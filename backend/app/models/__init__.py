@@ -7,6 +7,7 @@ from app.models.feature_definition import FeatureDefinition
 from app.models.computed_feature import ComputedFeature
 from app.models.experiment import Experiment
 from app.models.prediction import Prediction
+from app.models.scrape_log import ScrapeLog
 
 __all__ = [
     "Track",
@@ -18,4 +19,5 @@ __all__ = [
     "ComputedFeature",
     "Experiment",
     "Prediction",
+    "ScrapeLog",
 ]

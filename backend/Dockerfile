@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml .
 RUN pip install --no-cache-dir .
 
+# Install Playwright Chromium + system dependencies
+RUN playwright install chromium && playwright install-deps chromium
+
 COPY . .
 
 # Create artifacts directory

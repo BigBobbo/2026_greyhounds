@@ -7,6 +7,7 @@ import DogList from './pages/DogList';
 import FeatureBuilder from './pages/FeatureBuilder';
 import TrainingLab from './pages/TrainingLab';
 import Predictions from './pages/Predictions';
+import ScrapingStatus from './pages/ScrapingStatus';
 
 const queryClient = new QueryClient();
 
@@ -22,6 +23,7 @@ function App() {
             <Route path="/features" element={<FeatureBuilder />} />
             <Route path="/training" element={<TrainingLab />} />
             <Route path="/predictions" element={<Predictions />} />
+            <Route path="/scraping" element={<ScrapingStatus />} />
           </Route>
         </Routes>
       </BrowserRouter>

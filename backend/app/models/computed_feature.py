@@ -1,0 +1,18 @@
+from datetime import datetime
+
+from sqlalchemy import Column, DateTime, Float, Integer, ForeignKey, UniqueConstraint
+from app.database import Base
+
+
+class ComputedFeature(Base):
+    __tablename__ = "computed_features"
+
+    id = Column(Integer, primary_key=True, index=True)
+    race_entry_id = Column(Integer, ForeignKey("race_entries.id"), nullable=False, index=True)
+    feature_def_id = Column(Integer, ForeignKey("feature_definitions.id"), nullable=False)
+    value = Column(Float)
+    computed_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("race_entry_id", "feature_def_id", name="uq_computed_entry_feature"),
+    )

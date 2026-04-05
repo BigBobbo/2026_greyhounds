@@ -1,0 +1,26 @@
+from pydantic_settings import BaseSettings
+from pathlib import Path
+
+
+class Settings(BaseSettings):
+    app_name: str = "Greyhound Predictor"
+    database_url: str = "sqlite:///./greyhound.db"
+    cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+
+    # Scraping
+    scrape_delay: float = 2.0  # seconds between requests
+    gri_base_url: str = "https://www.grireland.ie"
+    greyhound_data_base_url: str = "https://www.greyhound-data.com"
+
+    # Betfair
+    betfair_api_key: str = ""
+    betfair_username: str = ""
+    betfair_password: str = ""
+
+    # ML
+    model_artifacts_dir: str = "./artifacts/models"
+
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+
+settings = Settings()

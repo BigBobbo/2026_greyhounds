@@ -223,3 +223,44 @@ def discover_tracks():
     thread.start()
 
     return {"message": "Track discovery started in background"}
+
+
+@router.get("/debug-fetch")
+async def debug_fetch(track_code: str = "SHP", date_str: str = "05-Apr-2026"):
+    """Fetch a GRI page and return raw HTML + parser results for debugging."""
+    import httpx
+    from scraping.gri_scraper import (
+        VIEW_RESULTS_URL, DEFAULT_HEADERS, parse_results_page, format_date
+    )
+    from datetime import datetime as dt
+
+    url = f"{VIEW_RESULTS_URL}?track={track_code}&date={date_str}"
+
+    async with httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30) as client:
+        try:
+            resp = await client.get(url)
+            html = resp.text
+            status_code = resp.status_code
+        except Exception as e:
+            return {"error": str(e), "url": url}
+
+    # Try to parse the date
+    try:
+        race_date = dt.strptime(date_str, "%d-%b-%Y").date()
+    except ValueError:
+        race_date = None
+
+    # Try parsing
+    races = []
+    if race_date:
+        races = parse_results_page(html, track_code, race_date)
+
+    # Return first 3000 chars of HTML for inspection
+    return {
+        "url": url,
+        "status_code": status_code,
+        "html_length": len(html),
+        "html_preview": html[:3000],
+        "races_found": len(races),
+        "races": races,
+    }

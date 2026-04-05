@@ -255,12 +255,50 @@ async def debug_fetch(track_code: str = "SHP", date_str: str = "05-Apr-2026"):
     if race_date:
         races = parse_results_page(html, track_code, race_date)
 
-    # Return first 3000 chars of HTML for inspection
+    # Find the body content and return key sections
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Remove script/style tags to focus on content
+    for tag in soup.find_all(["script", "style", "link", "meta", "noscript"]):
+        tag.decompose()
+
+    body = soup.find("body")
+    body_text = body.get_text(" ", strip=True)[:3000] if body else ""
+    body_html = str(body)[:5000] if body else html[2000:7000]
+
+    # Look for any tables
+    tables_info = []
+    for i, table in enumerate(soup.find_all("table")):
+        rows = table.find_all("tr")
+        first_row_text = rows[0].get_text(" ", strip=True)[:200] if rows else ""
+        tables_info.append({
+            "table_index": i,
+            "num_rows": len(rows),
+            "first_row": first_row_text,
+            "classes": table.get("class", []),
+        })
+
+    # Look for elements with race-related text
+    import re
+    race_elements = []
+    for elem in soup.find_all(string=re.compile(r"Race\s+\d+|Trap|525m|480m|550m", re.IGNORECASE)):
+        parent = elem.find_parent()
+        if parent:
+            race_elements.append({
+                "tag": parent.name,
+                "class": parent.get("class", []),
+                "text": parent.get_text(" ", strip=True)[:300],
+            })
+
     return {
         "url": url,
         "status_code": status_code,
         "html_length": len(html),
-        "html_preview": html[:3000],
-        "races_found": len(races),
+        "body_text_preview": body_text,
+        "body_html_preview": body_html,
+        "tables_found": tables_info,
+        "race_elements": race_elements[:20],
+        "races_parsed": len(races),
         "races": races,
     }

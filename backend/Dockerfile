@@ -18,4 +18,4 @@ COPY . .
 RUN mkdir -p artifacts/models
 
 # Run migrations and seed tracks on startup, then start the server
-CMD alembic upgrade head && python scripts/seed_tracks.py && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+CMD alembic upgrade head && python scripts/seed_tracks.py && python scripts/seed_features.py && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}

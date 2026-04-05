@@ -4,7 +4,7 @@ from pathlib import Path
 
 class Settings(BaseSettings):
     app_name: str = "Greyhound Predictor"
-    database_url: str = "sqlite:///./greyhound.db"
+    database_url: str = "sqlite:///./data/greyhound.db"
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000", "*"]
 
     # Scraping
@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     betfair_password: str = ""
 
     # ML
-    model_artifacts_dir: str = "./artifacts/models"
+    model_artifacts_dir: str = "./data/models"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

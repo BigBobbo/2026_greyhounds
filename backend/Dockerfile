@@ -14,8 +14,8 @@ RUN playwright install chromium && playwright install-deps chromium
 
 COPY . .
 
-# Create artifacts directory
-RUN mkdir -p artifacts/models
+# Create persistent data directory (mount Railway volume here at /app/data)
+RUN mkdir -p data/models
 
-# Run migrations and seed tracks on startup, then start the server
-CMD alembic upgrade head && python scripts/seed_tracks.py && python scripts/seed_features.py && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+# Run migrations and seed on startup, then start the server
+CMD mkdir -p data/models && alembic upgrade head && python scripts/seed_tracks.py && python scripts/seed_features.py && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}

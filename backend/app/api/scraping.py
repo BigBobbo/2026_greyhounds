@@ -225,6 +225,83 @@ def discover_tracks():
     return {"message": "Track discovery started in background"}
 
 
+@router.get("/debug-trap-column")
+async def debug_trap_column(track_code: str = "SPK", date_str: str = "04-Apr-2026"):
+    """Inspect the Trap column HTML to see how trap numbers are represented."""
+    from playwright.async_api import async_playwright
+    from scraping.gri_scraper import RESULTS_URL, _dismiss_cookie_banners, _navigate_and_load_results
+    from bs4 import BeautifulSoup
+    from datetime import datetime as dt
+
+    race_date = dt.strptime(date_str, "%d-%b-%Y").date()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        )
+        page = await context.new_page()
+        html = await _navigate_and_load_results(page, track_code, race_date)
+        await browser.close()
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Find the first result table
+    trap_info = []
+    for table in soup.find_all("table"):
+        header_row = table.find("tr")
+        if not header_row or "Pos." not in header_row.get_text():
+            continue
+
+        # Found a result table — inspect each row's Trap cell
+        rows = table.find_all("tr")
+        for i, row in enumerate(rows[:8]):  # header + up to 7 data rows
+            cells = row.find_all(["td", "th"])
+            if len(cells) < 3:
+                continue
+
+            # Trap is column index 1 (after Pos.)
+            trap_cell = cells[1]
+            trap_html = str(trap_cell)
+            trap_text = trap_cell.get_text(strip=True)
+
+            # Check for images
+            images = trap_cell.find_all("img")
+            img_info = []
+            for img in images:
+                img_info.append({
+                    "src": img.get("src", ""),
+                    "alt": img.get("alt", ""),
+                    "title": img.get("title", ""),
+                    "class": img.get("class", []),
+                    "width": img.get("width", ""),
+                    "height": img.get("height", ""),
+                })
+
+            # Check for spans, divs with classes
+            spans = trap_cell.find_all(["span", "div"])
+            span_info = [{"class": s.get("class", []), "text": s.get_text(strip=True), "style": s.get("style", "")} for s in spans]
+
+            # Check for background colors or styles
+            cell_style = trap_cell.get("style", "")
+            cell_class = trap_cell.get("class", [])
+
+            trap_info.append({
+                "row": i,
+                "is_header": i == 0,
+                "trap_text": trap_text,
+                "trap_html": trap_html[:500],
+                "images": img_info,
+                "spans": span_info,
+                "cell_style": cell_style,
+                "cell_class": cell_class,
+            })
+
+        break  # Only inspect first table
+
+    return {"trap_column_analysis": trap_info}
+
+
 @router.get("/debug-fetch")
 async def debug_fetch(track_code: str = "Shelbourne Park", date_str: str = "04-Apr-2026"):
     """

@@ -383,44 +383,6 @@ async def debug_trap_column(track_code: str = "SPK", date_str: str = "04-Apr-202
             })
 
     return result
-            trap_html = str(trap_cell)
-            trap_text = trap_cell.get_text(strip=True)
-
-            # Check for images
-            images = trap_cell.find_all("img")
-            img_info = []
-            for img in images:
-                img_info.append({
-                    "src": img.get("src", ""),
-                    "alt": img.get("alt", ""),
-                    "title": img.get("title", ""),
-                    "class": img.get("class", []),
-                    "width": img.get("width", ""),
-                    "height": img.get("height", ""),
-                })
-
-            # Check for spans, divs with classes
-            spans = trap_cell.find_all(["span", "div"])
-            span_info = [{"class": s.get("class", []), "text": s.get_text(strip=True), "style": s.get("style", "")} for s in spans]
-
-            # Check for background colors or styles
-            cell_style = trap_cell.get("style", "")
-            cell_class = trap_cell.get("class", [])
-
-            trap_info.append({
-                "row": i,
-                "is_header": i == 0,
-                "trap_text": trap_text,
-                "trap_html": trap_html[:500],
-                "images": img_info,
-                "spans": span_info,
-                "cell_style": cell_style,
-                "cell_class": cell_class,
-            })
-
-        break  # Only inspect first table
-
-    return {"trap_column_analysis": trap_info}
 
 
 @router.get("/debug-fetch")

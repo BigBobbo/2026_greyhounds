@@ -10,7 +10,7 @@ Prediction service: generate predictions for races using a trained model.
 
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import joblib
@@ -77,6 +77,15 @@ def compute_features_for_entries(
     return df
 
 
+def _get_train_cutoff(experiment: Experiment) -> date | None:
+    """Extract the training data cutoff date from an experiment's split config."""
+    split_config = experiment.split_config or {}
+    cutoff_str = split_config.get("train_cutoff_date")
+    if cutoff_str:
+        return date.fromisoformat(cutoff_str)
+    return None
+
+
 def predict_race(
     db: Session,
     experiment_id: int,
@@ -86,6 +95,7 @@ def predict_race(
     Generate predictions for all entries in a race.
 
     Returns list of prediction dicts with dog info.
+    Raises ValueError if the race falls within the training data period.
     """
     experiment = db.query(Experiment).filter(Experiment.id == experiment_id).first()
     if not experiment or experiment.status != "completed":
@@ -103,6 +113,20 @@ def predict_race(
         .order_by(RaceEntry.trap)
         .all()
     )
+
+    # Guard against predicting on training data
+    if entries:
+        race_date = entries[0].race_date
+        if isinstance(race_date, datetime):
+            race_date = race_date.date()
+        train_cutoff = _get_train_cutoff(experiment)
+        if train_cutoff and race_date < train_cutoff:
+            raise ValueError(
+                f"Race date {race_date} falls within the training data period "
+                f"(before {train_cutoff}). Predicting on training data would give "
+                f"misleadingly optimistic results. Use a race dated after {train_cutoff}, "
+                f"or retrain with an earlier cutoff."
+            )
 
     if not entries:
         return []

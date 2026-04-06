@@ -339,12 +339,59 @@ async def test_scrape(track_code: str = "SPK", date_str: str = "04-Apr-2026"):
             if not clicked:
                 steps.append("ERROR: No submit button found/clicked")
 
-            # Wait for results
-            await page.wait_for_timeout(5000)
+            # Wait for meetings list to load
+            await page.wait_for_timeout(3000)
             try:
                 await page.wait_for_load_state("networkidle", timeout=10000)
             except Exception:
                 pass
+
+            # Step 2: The form loads a meeting list — we need to click on
+            # the specific meeting to see results. Look for links/buttons
+            # with "View Race" or the track name or meeting links.
+            meeting_clicked = False
+
+            # Try clicking "View Race" links or meeting links
+            for selector in [
+                "a:has-text('View Race')",
+                "a:has-text('View Results')",
+                "a:has-text('Race 1')",
+                f"a:has-text('{track_code}')",
+                ".meeting-link",
+                "a[href*='race']",
+                "a[href*='result']",
+            ]:
+                try:
+                    link = await page.query_selector(selector)
+                    if link and await link.is_visible():
+                        await link.click()
+                        meeting_clicked = True
+                        steps.append(f"Clicked meeting link: {selector}")
+                        break
+                except Exception:
+                    continue
+
+            if not meeting_clicked:
+                # List all visible links to find the right one
+                visible_links = []
+                for link in await page.query_selector_all("a"):
+                    try:
+                        if await link.is_visible():
+                            txt = (await link.text_content() or "").strip()
+                            href = (await link.get_attribute("href") or "")
+                            if txt and len(txt) < 100 and txt not in ("", "Home Page", "Results"):
+                                visible_links.append({"text": txt[:80], "href": href[:100]})
+                    except Exception:
+                        continue
+                steps.append(f"No meeting link found. Visible links: {visible_links[:15]}")
+
+            # Wait for results to load after clicking meeting
+            if meeting_clicked:
+                await page.wait_for_timeout(5000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
 
             html = await page.content()
             await browser.close()

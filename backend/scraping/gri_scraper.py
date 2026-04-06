@@ -42,17 +42,27 @@ async def fetch_page_playwright(url: str, wait_selector: str | None = None) -> s
                 ),
             )
             page = await context.new_page()
+
+            # Block cookie consent script to prevent overlay
+            await page.route("**/consent.cookiebot.com/**", lambda route: route.abort())
+
             await page.goto(url, timeout=30000, wait_until="networkidle")
+
+            # Dismiss any cookie banners that still appear
+            await _dismiss_cookie_banners(page)
 
             # Wait for dynamic content to load
             if wait_selector:
                 try:
                     await page.wait_for_selector(wait_selector, timeout=10000)
                 except Exception:
-                    logger.debug("Selector '%s' not found, continuing with current content", wait_selector)
+                    logger.debug("Selector '%s' not found, continuing", wait_selector)
 
-            # Additional wait for JS rendering
-            await page.wait_for_timeout(2000)
+            # Wait for race data to render
+            await page.wait_for_timeout(3000)
+
+            # Try clicking the Go/Search button if a form exists
+            await _submit_search_form(page)
 
             html = await page.content()
             return html
@@ -60,10 +70,69 @@ async def fetch_page_playwright(url: str, wait_selector: str | None = None) -> s
             await browser.close()
 
 
+async def _dismiss_cookie_banners(page) -> None:
+    """Try to dismiss cookie consent banners."""
+    # Common cookie banner button selectors
+    selectors = [
+        "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+        "#CybotCookiebotDialogBodyButtonAccept",
+        "button[data-cookieconsent='accept']",
+        ".cookie-accept",
+        "button:has-text('Accept')",
+        "button:has-text('Allow all')",
+        "button:has-text('Accept all')",
+        "a:has-text('Accept')",
+    ]
+    for selector in selectors:
+        try:
+            btn = await page.query_selector(selector)
+            if btn:
+                await btn.click()
+                logger.debug("Dismissed cookie banner with selector: %s", selector)
+                await page.wait_for_timeout(1000)
+                return
+        except Exception:
+            continue
+
+    # Try removing the overlay via JavaScript
+    try:
+        await page.evaluate("""
+            document.querySelectorAll('[id*="Cookiebot"], [id*="cookie"], .cookie-banner, .cookie-overlay, #CybotCookiebotDialog').forEach(el => el.remove());
+            document.body.style.overflow = 'auto';
+        """)
+    except Exception:
+        pass
+
+
+async def _submit_search_form(page) -> None:
+    """Try to find and click a Go/Search/Submit button on the results form."""
+    selectors = [
+        "input[type='submit']",
+        "button[type='submit']",
+        "a:has-text('Go to Meeting')",
+        "button:has-text('Go')",
+        "button:has-text('Search')",
+        ".btn-search",
+        "a.btn:has-text('Go')",
+    ]
+    for selector in selectors:
+        try:
+            btn = await page.query_selector(selector)
+            if btn and await btn.is_visible():
+                await btn.click()
+                await page.wait_for_timeout(3000)
+                logger.debug("Clicked submit button: %s", selector)
+                return
+        except Exception:
+            continue
+
+
 async def fetch_page_playwright_reuse(page, url: str) -> str:
     """Fetch a page reusing an existing Playwright page (for batch scraping)."""
     await page.goto(url, timeout=30000, wait_until="networkidle")
-    await page.wait_for_timeout(2000)
+    await _dismiss_cookie_banners(page)
+    await page.wait_for_timeout(3000)
+    await _submit_search_form(page)
     return await page.content()
 
 

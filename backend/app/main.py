@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.api import tracks, dogs, races, features, training, predictions
+from app.api import tracks, dogs, races, features, training, predictions, odds
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -40,6 +40,7 @@ app.include_router(races.router, prefix="/api")
 app.include_router(features.router, prefix="/api")
 app.include_router(training.router, prefix="/api")
 app.include_router(predictions.router, prefix="/api")
+app.include_router(odds.router, prefix="/api")
 
 # Import scraping router separately — it uses Playwright which is heavy
 try:

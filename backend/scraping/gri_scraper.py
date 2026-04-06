@@ -257,6 +257,7 @@ def _parse_gri_table(
 
     entries = []
     winner_time = None
+    trap_num = 0
 
     for row in rows[1:]:
         cells = row.find_all(["td", "th"])
@@ -265,8 +266,13 @@ def _parse_gri_table(
         if len(texts) < 5:
             continue
 
+        trap_num += 1
         entry = _extract_entry_mapped(texts, cells, col_map)
         if entry and entry.get("dog_name"):
+            # Assign trap number from row order if not already set
+            # In GRI results, rows are ordered by trap (1-6/8)
+            if not entry.get("trap"):
+                entry["trap"] = trap_num
             # Track winner time for calculating estimated times
             if entry.get("finish_position") == 1 and entry.get("finish_time"):
                 winner_time = entry["finish_time"]

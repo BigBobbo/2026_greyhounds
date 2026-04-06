@@ -226,43 +226,151 @@ def discover_tracks():
 
 
 @router.get("/debug-fetch")
-async def debug_fetch(track_code: str = "SHP", date_str: str = "04-Apr-2026"):
-    """Fetch a GRI page with Playwright (JS rendering) and return debug info."""
-    from scraping.gri_scraper import (
-        VIEW_RESULTS_URL, fetch_page_playwright, parse_results_page
-    )
+async def debug_fetch(track_code: str = "Shelbourne Park", date_str: str = "04-Apr-2026"):
+    """
+    Fetch a GRI page with Playwright. Interacts with the form to load results.
+    Use full track names from the dropdown (e.g. 'Shelbourne Park', 'Curraheen Park').
+    """
+    from playwright.async_api import async_playwright
+    from scraping.gri_scraper import RESULTS_URL, _dismiss_cookie_banners, parse_results_page
     from datetime import datetime as dt
+    import base64
 
-    url = f"{VIEW_RESULTS_URL}?track={track_code}&date={date_str}"
+    debug_info = {"steps": []}
 
     try:
-        html = await fetch_page_playwright(url, wait_selector="table")
-    except Exception as e:
-        return {"error": str(e), "url": url}
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            )
+            page = await context.new_page()
 
-    # Try to parse the date
+            # Block cookie script
+            await page.route("**/consent.cookiebot.com/**", lambda route: route.abort())
+
+            # Go to the results page
+            await page.goto(RESULTS_URL, timeout=30000, wait_until="networkidle")
+            await _dismiss_cookie_banners(page)
+            await page.wait_for_timeout(2000)
+            debug_info["steps"].append("Loaded results page")
+
+            # Find all select elements and their options
+            selects_info = []
+            selects = await page.query_selector_all("select")
+            for sel in selects:
+                sel_id = await sel.get_attribute("id") or ""
+                sel_name = await sel.get_attribute("name") or ""
+                options = await sel.query_selector_all("option")
+                opts = []
+                for opt in options[:30]:
+                    val = await opt.get_attribute("value") or ""
+                    txt = await opt.text_content() or ""
+                    opts.append({"value": val, "text": txt.strip()})
+                selects_info.append({"id": sel_id, "name": sel_name, "options": opts})
+            debug_info["selects"] = selects_info
+
+            # Find all input elements (date pickers, etc.)
+            inputs_info = []
+            inputs = await page.query_selector_all("input")
+            for inp in inputs:
+                inp_type = await inp.get_attribute("type") or ""
+                inp_id = await inp.get_attribute("id") or ""
+                inp_name = await inp.get_attribute("name") or ""
+                inp_val = await inp.get_attribute("value") or ""
+                inp_placeholder = await inp.get_attribute("placeholder") or ""
+                inputs_info.append({
+                    "type": inp_type, "id": inp_id, "name": inp_name,
+                    "value": inp_val, "placeholder": inp_placeholder,
+                })
+            debug_info["inputs"] = inputs_info
+
+            # Find all buttons/links
+            buttons_info = []
+            for btn in await page.query_selector_all("button, input[type='submit'], a.btn"):
+                txt = await btn.text_content() or ""
+                href = await btn.get_attribute("href") or ""
+                cls = await btn.get_attribute("class") or ""
+                btn_id = await btn.get_attribute("id") or ""
+                buttons_info.append({"text": txt.strip(), "href": href, "class": cls, "id": btn_id})
+            debug_info["buttons"] = buttons_info[:20]
+
+            # Try to select the stadium in dropdown
+            stadium_selected = False
+            for sel in selects:
+                options = await sel.query_selector_all("option")
+                for opt in options:
+                    txt = (await opt.text_content() or "").strip()
+                    if txt == track_code or track_code.lower() in txt.lower():
+                        val = await opt.get_attribute("value") or ""
+                        await sel.select_option(value=val)
+                        stadium_selected = True
+                        debug_info["steps"].append(f"Selected stadium: {txt} (value={val})")
+                        break
+                if stadium_selected:
+                    break
+
+            # Try to set the date
+            date_set = False
+            for inp in inputs:
+                inp_type = await inp.get_attribute("type") or ""
+                inp_id = (await inp.get_attribute("id") or "").lower()
+                inp_name = (await inp.get_attribute("name") or "").lower()
+                if "date" in inp_id or "date" in inp_name or inp_type == "date":
+                    await inp.fill(date_str)
+                    date_set = True
+                    debug_info["steps"].append(f"Set date input to: {date_str}")
+                    break
+
+            # Wait a moment then try to submit
+            await page.wait_for_timeout(1000)
+
+            # Try clicking submit/go buttons
+            submitted = False
+            for btn in await page.query_selector_all("button, input[type='submit'], a"):
+                txt = (await btn.text_content() or "").strip().lower()
+                if txt in ("go", "search", "go to meeting", "go to meeting search", "submit", "view results"):
+                    try:
+                        await btn.click()
+                        submitted = True
+                        debug_info["steps"].append(f"Clicked button: {txt}")
+                        break
+                    except Exception:
+                        continue
+
+            # Wait for results to load
+            await page.wait_for_timeout(5000)
+            await page.wait_for_load_state("networkidle", timeout=10000)
+
+            # Take screenshot
+            screenshot = await page.screenshot(full_page=False)
+            screenshot_b64 = base64.b64encode(screenshot).decode()
+
+            html = await page.content()
+            await browser.close()
+
+    except Exception as e:
+        return {"error": str(e), "steps": debug_info.get("steps", [])}
+
+    # Parse
     try:
         race_date = dt.strptime(date_str, "%d-%b-%Y").date()
     except ValueError:
         race_date = None
 
-    # Try parsing
     races = []
     if race_date:
         races = parse_results_page(html, track_code, race_date)
 
-    # Analyze the rendered HTML
+    # Analyze HTML
     from bs4 import BeautifulSoup
     import re
     soup = BeautifulSoup(html, "html.parser")
-
     for tag in soup.find_all(["script", "style", "link", "meta", "noscript"]):
         tag.decompose()
-
     body = soup.find("body")
     body_text = body.get_text(" ", strip=True)[:5000] if body else ""
 
-    # Find tables
     tables_info = []
     for i, table in enumerate(soup.find_all("table")):
         rows = table.find_all("tr")
@@ -270,30 +378,31 @@ async def debug_fetch(track_code: str = "SHP", date_str: str = "04-Apr-2026"):
         for row in rows[:5]:
             cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
             rows_text.append(cells)
-        tables_info.append({
-            "table_index": i,
-            "num_rows": len(rows),
-            "classes": table.get("class", []),
-            "first_rows": rows_text,
-        })
+        tables_info.append({"table_index": i, "num_rows": len(rows), "first_rows": rows_text})
 
-    # Find race-related elements
     race_elements = []
-    for elem in soup.find_all(string=re.compile(r"Race\s+\d+|Trap|525m|480m|550m|\d{2}\.\d{2}", re.IGNORECASE)):
+    for elem in soup.find_all(string=re.compile(r"Race\s+\d+|Trap|525m|480m|550m", re.IGNORECASE)):
         parent = elem.find_parent()
         if parent:
             race_elements.append({
                 "tag": parent.name,
-                "class": parent.get("class", []),
                 "text": parent.get_text(" ", strip=True)[:300],
             })
 
     return {
-        "url": url,
+        "url": RESULTS_URL,
+        "track_code": track_code,
+        "date_str": date_str,
         "html_length": len(html),
+        "debug_steps": debug_info["steps"],
+        "selects": debug_info.get("selects", []),
+        "inputs": debug_info.get("inputs", []),
+        "buttons": debug_info.get("buttons", []),
         "body_text_preview": body_text,
         "tables_found": tables_info,
         "race_elements": race_elements[:30],
         "races_parsed": len(races),
         "races": races,
+        "screenshot_base64": screenshot_b64[:100] + "..." if screenshot_b64 else None,
+        "screenshot_url": "/api/scraping/debug-screenshot",
     }

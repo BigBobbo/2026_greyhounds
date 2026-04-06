@@ -58,6 +58,13 @@ def get_coverage(db: Session = Depends(get_db)):
     return get_feature_coverage(db)
 
 
+@router.get("/start-materialize")
+def start_materialize_get(force: bool = False, db: Session = Depends(get_db)):
+    """GET endpoint to trigger materialization from browser URL bar."""
+    req = MaterializeRequest(force=force)
+    return trigger_materialization(req, db)
+
+
 @router.get("/{feature_id}", response_model=FeatureDefinitionResponse)
 def get_feature(feature_id: int, db: Session = Depends(get_db)):
     feature = db.query(FeatureDefinition).filter(FeatureDefinition.id == feature_id).first()
@@ -183,11 +190,4 @@ def trigger_materialization(req: MaterializeRequest, db: Session = Depends(get_d
     return MaterializeResponse(
         message=f"Materialization started for {len(features)} features in background",
     )
-
-
-@router.get("/start-materialize")
-def start_materialize_get(force: bool = False, db: Session = Depends(get_db)):
-    """GET endpoint to trigger materialization from browser URL bar."""
-    req = MaterializeRequest(force=force)
-    return trigger_materialization(req, db)
 

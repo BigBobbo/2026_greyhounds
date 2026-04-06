@@ -92,41 +92,46 @@ async def _dismiss_cookie_banners(page) -> None:
 async def _navigate_and_load_results(page, track_code: str, race_date: date) -> str:
     """
     Navigate to GRI results page, select stadium + date, submit form,
-    and return the rendered HTML with race data.
+    click through to meeting results, and return the rendered HTML.
+
+    GRI has a two-step flow:
+    1. Select stadium + date → Show Meetings → shows meeting list
+    2. Click "View Results" on the meeting → shows actual race results
     """
     date_str = format_date(race_date)
 
-    # Block cookie script
-    await page.route("**/consent.cookiebot.com/**", lambda route: route.abort())
+    # Block cookie script (only if not already blocked)
+    try:
+        await page.route("**/consent.cookiebot.com/**", lambda route: route.abort())
+    except Exception:
+        pass  # Already blocked from a previous call
 
     await page.goto(RESULTS_URL, timeout=30000, wait_until="networkidle")
     await _dismiss_cookie_banners(page)
     await page.wait_for_timeout(1000)
 
-    # Select stadium from dropdown
+    # Step 1: Select stadium from dropdown
     stadium_select = await page.query_selector("#stadium")
     if stadium_select:
         await stadium_select.select_option(value=track_code)
         logger.debug("Selected stadium: %s", track_code)
-    else:
-        logger.warning("Stadium dropdown not found")
 
     # Set the date
     date_input = await page.query_selector("#FromDate")
     if date_input:
-        await date_input.fill("")
-        await date_input.fill(date_str)
-        logger.debug("Set date to: %s", date_str)
-    else:
-        logger.warning("Date input not found")
+        await date_input.click()
+        await page.wait_for_timeout(300)
+        await date_input.press("Control+a")
+        await date_input.type(date_str, delay=50)
+        logger.debug("Typed date: %s", date_str)
 
     await page.wait_for_timeout(500)
 
-    # Click "view results" or "Show Meetings" button
+    # Click "Show Meetings" button
     for selector in [
+        "button:has-text('Show Meetings')",
         "button:has-text('view results')",
         "button:has-text('View Results')",
-        "button:has-text('Show Meetings')",
         "input[type='submit']",
     ]:
         try:
@@ -137,6 +142,31 @@ async def _navigate_and_load_results(page, track_code: str, race_date: date) -> 
                 break
         except Exception:
             continue
+
+    # Wait for meetings list to load
+    await page.wait_for_timeout(3000)
+    try:
+        await page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        pass
+
+    # Step 2: Click through to the actual results
+    for selector in [
+        "a:has-text('View Results')",
+        "a:has-text('View Race')",
+        "a:has-text('Race 1')",
+    ]:
+        try:
+            link = await page.query_selector(selector)
+            if link and await link.is_visible():
+                await link.click()
+                logger.debug("Clicked meeting link: %s", selector)
+                break
+        except Exception:
+            continue
+
+    # Wait for results to load
+    await page.wait_for_timeout(5000)
 
     # Wait for results to load
     await page.wait_for_timeout(5000)

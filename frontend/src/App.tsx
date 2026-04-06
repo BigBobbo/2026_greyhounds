@@ -6,6 +6,7 @@ import RaceList from './pages/RaceList';
 import DogList from './pages/DogList';
 import FeatureBuilder from './pages/FeatureBuilder';
 import TrainingLab from './pages/TrainingLab';
+import ExperimentDetail from './pages/ExperimentDetail';
 import Predictions from './pages/Predictions';
 import ScrapingStatus from './pages/ScrapingStatus';
 
@@ -22,6 +23,7 @@ function App() {
             <Route path="/dogs" element={<DogList />} />
             <Route path="/features" element={<FeatureBuilder />} />
             <Route path="/training" element={<TrainingLab />} />
+            <Route path="/training/:id" element={<ExperimentDetail />} />
             <Route path="/predictions" element={<Predictions />} />
             <Route path="/scraping" element={<ScrapingStatus />} />
           </Route>

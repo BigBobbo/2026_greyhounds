@@ -1,11 +1,21 @@
+"""Training API: create experiments, trigger training, view results."""
+
+from threading import Thread
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import get_db, SessionLocal
 from app.models.experiment import Experiment
 from app.schemas.experiment import ExperimentCreate, ExperimentResponse
+from ml.trainers.base import BaseTrainer
 
 router = APIRouter(prefix="/training", tags=["training"])
+
+
+class DefaultParamsResponse(BaseModel):
+    params: dict
 
 
 @router.get("/experiments", response_model=list[ExperimentResponse])
@@ -32,14 +42,29 @@ def get_experiment(experiment_id: int, db: Session = Depends(get_db)):
     return experiment
 
 
+@router.get("/default-params/{algorithm}", response_model=DefaultParamsResponse)
+def get_default_params(algorithm: str):
+    """Get default hyperparameters for an algorithm."""
+    params = BaseTrainer.get_default_params(algorithm)
+    if not params:
+        raise HTTPException(status_code=404, detail=f"Unknown algorithm: {algorithm}")
+    return DefaultParamsResponse(params=params)
+
+
 @router.post("/experiments", response_model=ExperimentResponse, status_code=201)
 def create_experiment(experiment: ExperimentCreate, db: Session = Depends(get_db)):
+    """Create an experiment and start training in the background."""
+    # Use default params if none provided
+    hyperparams = experiment.hyperparameters
+    if not hyperparams:
+        hyperparams = BaseTrainer.get_default_params(experiment.algorithm)
+
     db_experiment = Experiment(
         name=experiment.name,
         description=experiment.description,
         algorithm=experiment.algorithm,
         target=experiment.target,
-        hyperparameters=experiment.hyperparameters,
+        hyperparameters=hyperparams,
         feature_set=experiment.feature_set,
         split_config=experiment.split_config,
         status="pending",
@@ -47,5 +72,32 @@ def create_experiment(experiment: ExperimentCreate, db: Session = Depends(get_db
     db.add(db_experiment)
     db.commit()
     db.refresh(db_experiment)
-    # TODO: trigger training background task
+
+    exp_id = db_experiment.id
+    use_optuna = experiment.auto_tune
+    optuna_trials = experiment.optuna_trials
+
+    # Start training in background
+    def _train():
+        db2 = SessionLocal()
+        try:
+            from app.services.training_service import run_training, run_optuna_optimization
+            if use_optuna:
+                run_optuna_optimization(db2, exp_id, n_trials=optuna_trials)
+            else:
+                run_training(db2, exp_id)
+        finally:
+            db2.close()
+
+    Thread(target=_train, daemon=True).start()
+
     return db_experiment
+
+
+@router.delete("/experiments/{experiment_id}", status_code=204)
+def delete_experiment(experiment_id: int, db: Session = Depends(get_db)):
+    experiment = db.query(Experiment).filter(Experiment.id == experiment_id).first()
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    db.delete(experiment)
+    db.commit()

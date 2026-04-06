@@ -121,6 +121,27 @@ def build_dataset(
 
     feature_names = list(X.columns)
 
+    # Recompute cutoff dates so they can be persisted by the training service
+    test_after = split_config.get("test_after")
+    val_pct = split_config.get("val_pct", 0.15)
+    test_pct = split_config.get("test_pct", 0.15)
+    race_dates = entries_df["race_date"]
+
+    if test_after:
+        test_cutoff = pd.Timestamp(test_after).date()
+    else:
+        sorted_dates = race_dates.sort_values()
+        test_idx = int(len(sorted_dates) * (1 - test_pct))
+        test_cutoff = sorted_dates.iloc[test_idx]
+
+    train_val_dates = race_dates[race_dates < test_cutoff]
+    if len(train_val_dates) > 0:
+        sorted_tv = train_val_dates.sort_values()
+        val_idx = int(len(sorted_tv) * (1 - val_pct / (1 - test_pct)))
+        val_cutoff = sorted_tv.iloc[val_idx]
+    else:
+        val_cutoff = test_cutoff
+
     stats = {
         "total_entries": len(X),
         "total_features": len(feature_names),
@@ -128,6 +149,8 @@ def build_dataset(
         "val_size": len(X_val),
         "test_size": len(X_test),
         "nan_features_dropped": len(nan_cols),
+        "train_cutoff_date": str(val_cutoff),
+        "test_cutoff_date": str(test_cutoff),
     }
 
     return {

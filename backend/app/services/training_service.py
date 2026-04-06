@@ -77,6 +77,13 @@ def run_training(db: Session, experiment_id: int) -> None:
         y_test = dataset["y_test"]
         feature_names = dataset["feature_names"]
 
+        # Persist the actual cutoff dates so prediction service can guard against leakage
+        split_config = dict(experiment.split_config or {})
+        split_config["train_cutoff_date"] = dataset["stats"].get("train_cutoff_date")
+        split_config["test_cutoff_date"] = dataset["stats"].get("test_cutoff_date")
+        experiment.split_config = split_config
+        db.commit()
+
         logger.info(
             "Dataset built: train=%d, val=%d, test=%d, features=%d",
             len(X_train), len(X_val), len(X_test), len(feature_names),
@@ -191,6 +198,13 @@ def run_optuna_optimization(
         X_val = dataset["X_val"]
         y_val = dataset["y_val"]
         target_type = "regression" if experiment.target == "finish_time" else "classification"
+
+        # Persist the actual cutoff dates so prediction service can guard against leakage
+        split_config = dict(experiment.split_config or {})
+        split_config["train_cutoff_date"] = dataset["stats"].get("train_cutoff_date")
+        split_config["test_cutoff_date"] = dataset["stats"].get("test_cutoff_date")
+        experiment.split_config = split_config
+        db.commit()
 
         def objective(trial):
             params = _suggest_params(trial, experiment.algorithm)

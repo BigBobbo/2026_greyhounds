@@ -227,60 +227,79 @@ def discover_tracks():
 
 @router.get("/debug-trap-column")
 async def debug_trap_column(track_code: str = "SPK", date_str: str = "04-Apr-2026"):
-    """Inspect the Trap column HTML to see how trap numbers are represented."""
+    """
+    Inspect the Trap column HTML using a lighter approach.
+    Reuses the same page fetch as debug-fetch but only returns trap cell details.
+    """
+    from scraping.gri_scraper import _navigate_and_load_results
     from playwright.async_api import async_playwright
-    from scraping.gri_scraper import RESULTS_URL, _dismiss_cookie_banners, _navigate_and_load_results
     from bs4 import BeautifulSoup
     from datetime import datetime as dt
+    import re
 
     race_date = dt.strptime(date_str, "%d-%b-%Y").date()
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        )
-        page = await context.new_page()
-        html = await _navigate_and_load_results(page, track_code, race_date)
-        await browser.close()
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            page = await context.new_page()
+            html = await _navigate_and_load_results(page, track_code, race_date)
+            await browser.close()
+    except Exception as e:
+        return {"error": str(e)}
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # Find the first result table — try multiple matching strategies
-    trap_info = []
+    # Find a result table
     target_table = None
     for table in soup.find_all("table"):
-        header_text = table.get_text(" ", strip=True)[:200].lower()
-        if "greyhound" in header_text or "pos" in header_text or "trap" in header_text:
+        if "Greyhound" in table.get_text()[:300]:
             target_table = table
             break
 
     if not target_table:
-        # Fallback: just get the table with most rows
-        tables = soup.find_all("table")
-        if tables:
-            target_table = max(tables, key=lambda t: len(t.find_all("tr")))
-
-    if not target_table:
-        return {"trap_column_analysis": [], "error": "No table found"}
+        return {"error": "No result table found", "table_count": len(soup.find_all("table"))}
 
     rows = target_table.find_all("tr")
-    # Find which column index is "Trap"
-    trap_col_idx = 1  # default
-    if rows:
-        header_cells = [c.get_text(strip=True).lower() for c in rows[0].find_all(["td", "th"])]
-        trap_info.append({"row": -1, "header_cells": header_cells})
-        for idx, h in enumerate(header_cells):
-            if "trap" in h:
-                trap_col_idx = idx
-                break
+    header_cells = [c.get_text(strip=True) for c in rows[0].find_all(["td", "th"])]
 
-    for i, row in enumerate(rows[:8]):
+    trap_col_idx = None
+    for idx, h in enumerate(header_cells):
+        if "trap" in h.lower():
+            trap_col_idx = idx
+            break
+
+    result = {
+        "header_cells": header_cells,
+        "trap_col_idx": trap_col_idx,
+        "rows_analyzed": [],
+    }
+
+    for i, row in enumerate(rows[:4]):  # header + 3 data rows
         cells = row.find_all(["td", "th"])
-        if len(cells) <= trap_col_idx:
-            continue
+        if trap_col_idx is not None and trap_col_idx < len(cells):
+            cell = cells[trap_col_idx]
+            raw_html = str(cell)
 
-        trap_cell = cells[trap_col_idx]
+            # Check all children elements
+            children = []
+            for child in cell.descendants:
+                if hasattr(child, 'name') and child.name:
+                    children.append({
+                        "tag": child.name,
+                        "attrs": dict(child.attrs) if hasattr(child, 'attrs') else {},
+                        "text": child.get_text(strip=True),
+                    })
+
+            result["rows_analyzed"].append({
+                "row_idx": i,
+                "raw_html": raw_html[:500],
+                "text_content": cell.get_text(strip=True),
+                "children": children,
+            })
+
+    return result
             trap_html = str(trap_cell)
             trap_text = trap_cell.get_text(strip=True)
 

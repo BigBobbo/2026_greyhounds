@@ -257,15 +257,21 @@ def discover_tracks():
 @router.get("/test-scrape")
 async def test_scrape(track_code: str = "SPK", date_str: str = "04-Apr-2026"):
     """
-    Scrape one date synchronously and save to DB. Returns results directly.
-    Use this to test the full pipeline end-to-end.
+    Scrape one date synchronously and save to DB. Returns results directly
+    with full diagnostics.
     """
-    from scraping.gri_scraper import _navigate_and_load_results, parse_results_page
+    from scraping.gri_scraper import (
+        RESULTS_URL, _dismiss_cookie_banners, parse_results_page, format_date,
+    )
     from scraping.db_pipeline import upsert_race_results
     from playwright.async_api import async_playwright
     from datetime import datetime as dt
+    from bs4 import BeautifulSoup
+    import re
 
     race_date = dt.strptime(date_str, "%d-%b-%Y").date()
+    date_formatted = format_date(race_date)
+    steps = []
 
     try:
         async with async_playwright() as p:
@@ -275,37 +281,120 @@ async def test_scrape(track_code: str = "SPK", date_str: str = "04-Apr-2026"):
             )
             page = await context.new_page()
             await page.route("**/consent.cookiebot.com/**", lambda route: route.abort())
-            html = await _navigate_and_load_results(page, track_code, race_date)
+
+            # Navigate to results page
+            await page.goto(RESULTS_URL, timeout=30000, wait_until="networkidle")
+            await _dismiss_cookie_banners(page)
+            await page.wait_for_timeout(1000)
+            steps.append("Loaded results page")
+
+            # Select stadium
+            stadium_select = await page.query_selector("#stadium")
+            if stadium_select:
+                await stadium_select.select_option(value=track_code)
+                steps.append(f"Selected stadium: {track_code}")
+            else:
+                steps.append("ERROR: #stadium dropdown not found")
+
+            # Set date
+            date_input = await page.query_selector("#FromDate")
+            if date_input:
+                await date_input.click()
+                await page.wait_for_timeout(300)
+                # Clear and type the date
+                await date_input.press("Control+a")
+                await date_input.type(date_formatted, delay=50)
+                steps.append(f"Typed date: {date_formatted}")
+            else:
+                steps.append("ERROR: #FromDate input not found")
+
+            await page.wait_for_timeout(500)
+
+            # Find and click the submit button
+            clicked = False
+            for btn_text in ["Show Meetings", "view results", "View Results"]:
+                try:
+                    btn = await page.query_selector(f"button:has-text('{btn_text}')")
+                    if btn and await btn.is_visible():
+                        await btn.click()
+                        steps.append(f"Clicked: {btn_text}")
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+            if not clicked:
+                # Try any visible button with class btn
+                for btn in await page.query_selector_all("button.btn, a.btn"):
+                    txt = (await btn.text_content() or "").strip()
+                    if txt and "menu" not in txt.lower():
+                        try:
+                            await btn.click()
+                            steps.append(f"Clicked fallback btn: {txt}")
+                            clicked = True
+                            break
+                        except Exception:
+                            continue
+
+            if not clicked:
+                steps.append("ERROR: No submit button found/clicked")
+
+            # Wait for results
+            await page.wait_for_timeout(5000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+
+            html = await page.content()
             await browser.close()
+
     except Exception as e:
-        return {"error": f"Playwright failed: {e}"}
+        return {"error": f"Playwright failed: {e}", "steps": steps}
+
+    # Check what we got
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup.find_all(["script", "style"]):
+        tag.decompose()
+    body_text = soup.get_text(" ", strip=True)[:1000]
+
+    # Count tables and race headers
+    tables = soup.find_all("table")
+    race_headers = soup.find_all("h4", string=re.compile(r"Race\s+\d+", re.IGNORECASE))
 
     races = parse_results_page(html, track_code, race_date)
 
+    result = {
+        "steps": steps,
+        "html_length": len(html),
+        "tables_count": len(tables),
+        "race_headers_count": len(race_headers),
+        "races_parsed": len(races),
+        "body_preview": body_text,
+    }
+
     if not races:
-        return {"message": "Parser found 0 races", "html_length": len(html)}
+        return result
 
     # Save to DB
     db = SessionLocal()
     try:
         stats = upsert_race_results(db, races)
-    except Exception as e:
-        db.rollback()
-        return {"error": f"DB save failed: {e}", "races_parsed": len(races)}
-    finally:
-        db.close()
-
-    return {
-        "races_parsed": len(races),
-        "db_stats": stats,
-        "first_race": {
+        result["db_stats"] = stats
+        result["first_race"] = {
             "number": races[0]["race_number"],
             "grade": races[0]["grade"],
             "distance": races[0]["distance_m"],
             "entries": len(races[0]["entries"]),
             "first_dog": races[0]["entries"][0]["dog_name"] if races[0]["entries"] else None,
-        },
-    }
+        }
+    except Exception as e:
+        db.rollback()
+        result["db_error"] = str(e)
+    finally:
+        db.close()
+
+    return result
 
 
 @router.get("/debug-trap-column")

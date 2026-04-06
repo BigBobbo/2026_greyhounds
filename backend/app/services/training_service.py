@@ -102,7 +102,7 @@ def run_training(db: Session, experiment_id: int) -> None:
 
         # 4. Evaluate on test set
         logger.info("Evaluating on test set...")
-        from ml.evaluation import compute_metrics
+        from ml.evaluation import compute_metrics, compute_betting_metrics
         target_type = "regression" if experiment.target == "finish_time" else "classification"
 
         test_pred = trainer.predict(X_test)
@@ -112,6 +112,34 @@ def run_training(db: Session, experiment_id: int) -> None:
         # Merge val and test metrics
         all_metrics = {f"val_{k}": v for k, v in result.metrics.items()}
         all_metrics.update({f"test_{k}": v for k, v in test_metrics.items()})
+
+        # 4b. Betting P&L evaluation
+        meta_test = dataset.get("meta_test")
+        betting_data = None
+        if target_type == "classification" and test_proba is not None and meta_test is not None:
+            try:
+                betting = compute_betting_metrics(
+                    y_test.values,
+                    test_proba,
+                    meta_test["sp_decimal"].values,
+                    meta_test["race_id"].values,
+                )
+                betting_data = betting
+                # Add headline betting metrics
+                all_metrics["betting_top_pick_pnl"] = betting["top_pick_pnl"]
+                all_metrics["betting_top_pick_roi"] = betting["top_pick_roi"]
+                all_metrics["betting_top_pick_strike_rate"] = betting["top_pick_strike_rate"]
+                all_metrics["betting_value_pnl"] = betting["value_bet_pnl"]
+                all_metrics["betting_value_roi"] = betting["value_bet_roi"]
+                all_metrics["betting_favourite_pnl"] = betting["favourite_pnl"]
+                all_metrics["betting_favourite_roi"] = betting["favourite_roi"]
+                logger.info(
+                    "Betting metrics: top_pick_pnl=$%.2f (ROI %.1f%%), value_pnl=$%.2f, fav_pnl=$%.2f",
+                    betting["top_pick_pnl"], betting["top_pick_roi"],
+                    betting["value_bet_pnl"], betting["favourite_pnl"],
+                )
+            except Exception as e:
+                logger.warning("Betting metrics failed: %s", e)
 
         # 5. Additional evaluation data
         confusion = None
@@ -146,7 +174,10 @@ def run_training(db: Session, experiment_id: int) -> None:
         experiment.metrics = all_metrics
         experiment.confusion_matrix = confusion
         experiment.roc_data = roc_data
-        experiment.calibration_data = calibration
+        experiment.calibration_data = {
+            "calibration": calibration,
+            "betting": betting_data,
+        } if calibration or betting_data else None
         experiment.shap_summary = shap_data
         experiment.feature_importance = result.feature_importance
         experiment.training_duration_s = duration

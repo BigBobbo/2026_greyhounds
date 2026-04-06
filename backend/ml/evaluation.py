@@ -118,6 +118,116 @@ def compute_calibration_data(
     }
 
 
+def compute_betting_metrics(
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    sp_decimal: np.ndarray,
+    race_ids: np.ndarray,
+) -> dict[str, Any]:
+    """
+    Compute betting P&L metrics.
+
+    Simulates betting $1 on the model's top pick in each race.
+    Also evaluates value betting (bet when model prob > implied prob).
+
+    Returns:
+        {
+            "top_pick_pnl": total P&L from $1 on predicted winner per race,
+            "top_pick_roi": return on investment %,
+            "top_pick_races": number of races bet on,
+            "top_pick_winners": number of winners picked,
+            "top_pick_strike_rate": % of races where top pick won,
+            "value_bet_pnl": P&L from $1 on value bets only,
+            "value_bet_roi": ROI % for value bets,
+            "value_bet_count": number of value bets placed,
+            "value_bet_winners": number of value bet winners,
+            "favourite_pnl": P&L from $1 on SP favourite (baseline),
+            "favourite_roi": ROI % for favourites,
+            "pnl_by_race": list of per-race results for charting,
+        }
+    """
+    import pandas as pd
+
+    df = pd.DataFrame({
+        "won": y_true.astype(bool),
+        "prob": y_proba,
+        "sp": sp_decimal,
+        "race_id": race_ids,
+    })
+
+    # Drop rows with no SP
+    df = df[df["sp"].notna() & (df["sp"] > 1)]
+
+    if df.empty:
+        return {"error": "No entries with SP data"}
+
+    # Implied probability from SP
+    df["implied_prob"] = 1.0 / df["sp"]
+
+    # --- Strategy 1: Bet $1 on model's top pick per race ---
+    top_pick_results = []
+    for race_id, group in df.groupby("race_id"):
+        if len(group) == 0:
+            continue
+        # Model's top pick = highest predicted probability
+        top = group.loc[group["prob"].idxmax()]
+        profit = (top["sp"] - 1) if top["won"] else -1.0
+        top_pick_results.append({
+            "race_id": int(race_id),
+            "won": bool(top["won"]),
+            "sp": float(top["sp"]),
+            "prob": float(top["prob"]),
+            "profit": float(profit),
+        })
+
+    top_pick_df = pd.DataFrame(top_pick_results)
+    top_pick_pnl = float(top_pick_df["profit"].sum()) if len(top_pick_df) > 0 else 0
+    top_pick_races = len(top_pick_df)
+    top_pick_winners = int(top_pick_df["won"].sum()) if len(top_pick_df) > 0 else 0
+
+    # --- Strategy 2: Value betting (model prob > implied prob) ---
+    df["is_value"] = df["prob"] > df["implied_prob"]
+    value_bets = df[df["is_value"]]
+    value_profit = value_bets.apply(
+        lambda r: (r["sp"] - 1) if r["won"] else -1.0, axis=1
+    )
+    value_pnl = float(value_profit.sum()) if len(value_profit) > 0 else 0
+    value_winners = int(value_bets["won"].sum())
+
+    # --- Baseline: Bet $1 on SP favourite per race ---
+    fav_results = []
+    for race_id, group in df.groupby("race_id"):
+        if len(group) == 0:
+            continue
+        fav = group.loc[group["sp"].idxmin()]  # lowest SP = favourite
+        profit = (fav["sp"] - 1) if fav["won"] else -1.0
+        fav_results.append(float(profit))
+
+    fav_pnl = sum(fav_results) if fav_results else 0
+
+    # Cumulative P&L for charting
+    cumulative = []
+    running = 0.0
+    for r in top_pick_results:
+        running += r["profit"]
+        cumulative.append({"race": len(cumulative) + 1, "pnl": round(running, 2)})
+
+    return {
+        "top_pick_pnl": round(top_pick_pnl, 2),
+        "top_pick_roi": round(top_pick_pnl / max(top_pick_races, 1) * 100, 2),
+        "top_pick_races": top_pick_races,
+        "top_pick_winners": top_pick_winners,
+        "top_pick_strike_rate": round(top_pick_winners / max(top_pick_races, 1) * 100, 1),
+        "value_bet_pnl": round(value_pnl, 2),
+        "value_bet_roi": round(value_pnl / max(len(value_bets), 1) * 100, 2),
+        "value_bet_count": len(value_bets),
+        "value_bet_winners": value_winners,
+        "favourite_pnl": round(fav_pnl, 2),
+        "favourite_roi": round(fav_pnl / max(len(fav_results), 1) * 100, 2),
+        "pnl_by_race": cumulative,
+    }
+
+
 def compute_shap_summary(model: Any, X: np.ndarray, feature_names: list[str], max_samples: int = 500) -> dict[str, Any] | None:
     """Compute SHAP values summary. Returns mean absolute SHAP values per feature."""
     try:

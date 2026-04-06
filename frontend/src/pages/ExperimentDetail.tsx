@@ -43,14 +43,19 @@ export default function ExperimentDetail() {
       }))
     : [];
 
-  // Calibration data
-  const calData = exp.calibration_data
-    ? (exp.calibration_data as any).predicted_prob?.map((prob: number, i: number) => ({
+  // Calibration data (now nested under .calibration)
+  const calRaw = (exp.calibration_data as any)?.calibration;
+  const calData = calRaw?.predicted_prob
+    ? calRaw.predicted_prob.map((prob: number, i: number) => ({
         predicted: prob,
-        actual: (exp.calibration_data as any).actual_freq[i],
-        count: (exp.calibration_data as any).bin_counts[i],
+        actual: calRaw.actual_freq[i],
+        count: calRaw.bin_counts[i],
       }))
     : [];
+
+  // Betting P&L data
+  const bettingRaw = (exp.calibration_data as any)?.betting;
+  const pnlData: { race: number; pnl: number }[] = bettingRaw?.pnl_by_race || [];
 
   // Confusion matrix
   const cm = exp.confusion_matrix as number[][] | null;
@@ -107,6 +112,56 @@ export default function ExperimentDetail() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Betting P&L */}
+      {bettingRaw && (
+        <div className="bg-white rounded-lg shadow p-5 mb-6">
+          <h2 className="font-semibold mb-3">Betting Simulation ($1 per race)</h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div className="border rounded-md p-3">
+              <p className="text-xs text-gray-500">Top Pick P&L</p>
+              <p className={`font-mono text-xl font-bold ${bettingRaw.top_pick_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                ${bettingRaw.top_pick_pnl}
+              </p>
+              <p className="text-xs text-gray-400">{bettingRaw.top_pick_races} races, ROI {bettingRaw.top_pick_roi}%</p>
+            </div>
+            <div className="border rounded-md p-3">
+              <p className="text-xs text-gray-500">Strike Rate</p>
+              <p className="font-mono text-xl font-bold">{bettingRaw.top_pick_strike_rate}%</p>
+              <p className="text-xs text-gray-400">{bettingRaw.top_pick_winners}/{bettingRaw.top_pick_races} winners</p>
+            </div>
+            <div className="border rounded-md p-3">
+              <p className="text-xs text-gray-500">Value Bets P&L</p>
+              <p className={`font-mono text-xl font-bold ${bettingRaw.value_bet_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                ${bettingRaw.value_bet_pnl}
+              </p>
+              <p className="text-xs text-gray-400">{bettingRaw.value_bet_count} bets, ROI {bettingRaw.value_bet_roi}%</p>
+            </div>
+            <div className="border rounded-md p-3">
+              <p className="text-xs text-gray-500">Favourite P&L (baseline)</p>
+              <p className={`font-mono text-xl font-bold ${bettingRaw.favourite_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                ${bettingRaw.favourite_pnl}
+              </p>
+              <p className="text-xs text-gray-400">ROI {bettingRaw.favourite_roi}%</p>
+            </div>
+          </div>
+          {pnlData.length > 0 && (
+            <div>
+              <h3 className="text-sm font-medium text-gray-600 mb-2">Cumulative P&L (Top Pick)</h3>
+              <ResponsiveContainer width="100%" height={250}>
+                <LineChart data={pnlData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="race" label={{ value: 'Race #', position: 'bottom', offset: -5 }} />
+                  <YAxis label={{ value: 'P&L ($)', angle: -90, position: 'left' }} />
+                  <Tooltip formatter={(v: any) => [`$${v}`, 'P&L']} />
+                  <Line type="monotone" dataKey="pnl" stroke="#3b82f6" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey={() => 0} stroke="#d1d5db" strokeDasharray="5 5" dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
         </div>
       )}
 

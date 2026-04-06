@@ -56,6 +56,7 @@ def build_dataset(
             RaceEntry.id.label("entry_id"),
             RaceEntry.finish_position,
             RaceEntry.finish_time,
+            RaceEntry.sp_decimal,
             RaceEntry.race_id,
             Race.race_date,
             Race.num_runners,
@@ -70,7 +71,7 @@ def build_dataset(
         raise ValueError("No resulted race entries found in database")
 
     entries_df = pd.DataFrame(entries, columns=[
-        "entry_id", "finish_position", "finish_time", "race_id", "race_date", "num_runners",
+        "entry_id", "finish_position", "finish_time", "sp_decimal", "race_id", "race_date", "num_runners",
     ])
 
     logger.info("Found %d resulted entries", len(entries_df))
@@ -119,6 +120,11 @@ def build_dataset(
         X, y, entries_df["race_date"], entries_df["race_id"], split_config,
     )
 
+    # Also split the metadata (sp_decimal, race_id) for betting evaluation
+    meta_train = entries_df.loc[X_train.index, ["sp_decimal", "race_id"]]
+    meta_val = entries_df.loc[X_val.index, ["sp_decimal", "race_id"]]
+    meta_test = entries_df.loc[X_test.index, ["sp_decimal", "race_id"]]
+
     feature_names = list(X.columns)
 
     # Recompute cutoff dates so they can be persisted by the training service
@@ -157,6 +163,9 @@ def build_dataset(
         "X_train": X_train, "y_train": y_train,
         "X_val": X_val, "y_val": y_val,
         "X_test": X_test, "y_test": y_test,
+        "meta_train": meta_train,
+        "meta_val": meta_val,
+        "meta_test": meta_test,
         "feature_names": feature_names,
         "stats": stats,
     }

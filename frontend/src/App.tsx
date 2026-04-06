@@ -3,7 +3,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import AppLayout from './components/layout/AppLayout';
 import Dashboard from './pages/Dashboard';
 import RaceList from './pages/RaceList';
+import RaceDetail from './pages/RaceDetail';
 import DogList from './pages/DogList';
+import DogProfile from './pages/DogProfile';
 import FeatureBuilder from './pages/FeatureBuilder';
 import TrainingLab from './pages/TrainingLab';
 import ExperimentDetail from './pages/ExperimentDetail';
@@ -20,7 +22,9 @@ function App() {
           <Route element={<AppLayout />}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/races" element={<RaceList />} />
+            <Route path="/races/:id" element={<RaceDetail />} />
             <Route path="/dogs" element={<DogList />} />
+            <Route path="/dogs/:id" element={<DogProfile />} />
             <Route path="/features" element={<FeatureBuilder />} />
             <Route path="/training" element={<TrainingLab />} />
             <Route path="/training/:id" element={<ExperimentDetail />} />

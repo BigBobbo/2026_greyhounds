@@ -1,9 +1,11 @@
 """
-GRI (Greyhound Racing Ireland) scraper using Playwright + BeautifulSoup.
+GRI (Greyhound Racing Ireland) scraper using httpx + BeautifulSoup.
 
-The GRI results page loads race data dynamically via JavaScript.
-We must use Playwright, navigate to /results/, select stadium + date from the
-form, click "view results", then parse the rendered HTML.
+NO Playwright needed — the race data is server-rendered in the HTML.
+
+URL pattern: https://www.grireland.ie/results/view-results/?track={CODE}&date={DD-Mon-YYYY}
+
+Trap numbers are encoded as <img alt="Trap N"> tags.
 
 Known GRI track codes (from dropdown):
   CML=Clonmel, CRK=Curraheen Park, DRY=Derry, DBP=Drumbo Park,
@@ -12,10 +14,6 @@ Known GRI track codes (from dropdown):
   LGD=Longford, MGR=Mullingar, NWB=Newbridge, SPK=Shelbourne Park,
   THR=Thurles Park, TRL=Tralee, TRS=Tralee Sat Evening, WFD=Waterford,
   WFE=Waterford Thursday Morning, YGL=Youghal
-
-Table columns:
-  Pos. | Trap | Greyhound | SIRE NAME | DAM NAME | Prize | Wt. |
-  WinTime | By | Going | EstTime | SP. | Grade | Comm.
 """
 
 import asyncio
@@ -24,14 +22,20 @@ import re
 from datetime import date, timedelta
 from typing import Any
 
+import httpx
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
 GRI_BASE_URL = "https://www.grireland.ie"
-RESULTS_URL = f"{GRI_BASE_URL}/results/"
+VIEW_RESULTS_URL = f"{GRI_BASE_URL}/results/view-results/"
 
-# Confirmed GRI track codes from the stadium dropdown
+DEFAULT_HEADERS = {
+    "User-Agent": "Greyhound-Research-Bot/1.0 (race prediction research)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
+
 GRI_TRACK_CODES = {
     "CML": "Clonmel",
     "CRK": "Curraheen Park",
@@ -63,432 +67,233 @@ def format_date(d: date) -> str:
     return d.strftime("%d-%b-%Y")
 
 
-async def _dismiss_cookie_banners(page) -> None:
-    """Try to dismiss cookie consent banners."""
-    selectors = [
-        "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
-        "#CybotCookiebotDialogBodyButtonAccept",
-        "button:has-text('Accept')",
-        "button:has-text('Allow all')",
-    ]
-    for selector in selectors:
-        try:
-            btn = await page.query_selector(selector)
-            if btn:
-                await btn.click()
-                await page.wait_for_timeout(1000)
-                return
-        except Exception:
-            continue
-    try:
-        await page.evaluate("""
-            document.querySelectorAll('[id*="Cookiebot"], [id*="cookie"], #CybotCookiebotDialog').forEach(el => el.remove());
-            document.body.style.overflow = 'auto';
-        """)
-    except Exception:
-        pass
-
-
-async def _navigate_and_load_results(page, track_code: str, race_date: date) -> str:
-    """
-    Navigate to GRI results page, select stadium + date, submit form,
-    click through to meeting results, and return the rendered HTML.
-
-    GRI has a two-step flow:
-    1. Select stadium + date → Show Meetings → shows meeting list
-    2. Click "View Results" on the meeting → shows actual race results
-    """
-    date_str = format_date(race_date)
-
-    # Block cookie script (only if not already blocked)
-    try:
-        await page.route("**/consent.cookiebot.com/**", lambda route: route.abort())
-    except Exception:
-        pass  # Already blocked from a previous call
-
-    await page.goto(RESULTS_URL, timeout=30000, wait_until="networkidle")
-    await _dismiss_cookie_banners(page)
-    await page.wait_for_timeout(1000)
-
-    # Step 1: Select stadium from dropdown
-    stadium_select = await page.query_selector("#stadium")
-    if stadium_select:
-        await stadium_select.select_option(value=track_code)
-        logger.debug("Selected stadium: %s", track_code)
-
-    # Set the date
-    date_input = await page.query_selector("#FromDate")
-    if date_input:
-        await date_input.click()
-        await page.wait_for_timeout(300)
-        await date_input.press("Control+a")
-        await date_input.type(date_str, delay=50)
-        logger.debug("Typed date: %s", date_str)
-
-    await page.wait_for_timeout(500)
-
-    # Click "Show Meetings" button
-    for selector in [
-        "button:has-text('Show Meetings')",
-        "button:has-text('view results')",
-        "button:has-text('View Results')",
-        "input[type='submit']",
-    ]:
-        try:
-            btn = await page.query_selector(selector)
-            if btn and await btn.is_visible():
-                await btn.click()
-                logger.debug("Clicked: %s", selector)
-                break
-        except Exception:
-            continue
-
-    # Wait for meetings list to load
-    await page.wait_for_timeout(3000)
-    try:
-        await page.wait_for_load_state("networkidle", timeout=10000)
-    except Exception:
-        pass
-
-    # Step 2: Click through to the actual results
-    for selector in [
-        "a:has-text('View Results')",
-        "a:has-text('View Race')",
-        "a:has-text('Race 1')",
-    ]:
-        try:
-            link = await page.query_selector(selector)
-            if link and await link.is_visible():
-                await link.click()
-                logger.debug("Clicked meeting link: %s", selector)
-                break
-        except Exception:
-            continue
-
-    # Wait for results to load
-    await page.wait_for_timeout(5000)
-
-    # Wait for results to load
-    await page.wait_for_timeout(5000)
-    try:
-        await page.wait_for_load_state("networkidle", timeout=10000)
-    except Exception:
-        pass
-
-    return await page.content()
-
-
 def parse_results_page(html: str, track_code: str, race_date: date) -> list[dict[str, Any]]:
     """
-    Parse GRI results HTML. The page contains one table per race, each preceded
-    by an h4 header like "Race 1 - The Welcome To Clonmel Track A6 / A7 525".
+    Parse a GRI results page. Race data is server-rendered HTML with tables.
 
-    Table columns (confirmed):
-      Pos. | Trap | Greyhound | SIRE NAME | DAM NAME | Prize | Wt. |
-      WinTime | By | Going | EstTime | SP. | Grade | Comm.
+    Each race has:
+    - An <h4> header: "Race 1 - Name 525 (Grade : A6/7) Flat 525"
+    - A <table class='igb-tbl'> with rows for each dog
+
+    Trap numbers are <img alt="Trap N"> tags.
     """
     soup = BeautifulSoup(html, "html.parser")
     races: list[dict[str, Any]] = []
 
-    # Find all race header elements (h4 tags with "Race N" text)
+    # Find all race header elements
     race_headers = soup.find_all("h4", string=re.compile(r"Race\s+\d+", re.IGNORECASE))
 
     if not race_headers:
-        # Fallback: find all tables with the expected header structure
-        for table in soup.find_all("table"):
-            header_row = table.find("tr")
-            if header_row and "Pos." in header_row.get_text():
-                race_data = _parse_gri_table(table, len(races) + 1, track_code, race_date, None)
-                if race_data:
-                    races.append(race_data)
-        return races
+        logger.debug("No race headers found for %s %s", track_code, race_date)
+        return []
 
-    # Process each race header + its corresponding table
     for header in race_headers:
         header_text = header.get_text(strip=True)
-
-        # Extract race info from header like:
-        # "Race 1 - The Welcome To Clonmel Track A6 / A7 525   (Grade : A6/7) Flat 525"
         race_info = _parse_race_header(header_text)
 
         # Find the next table after this header
-        table = header.find_next("table")
+        table = header.find_next("table", class_="igb-tbl")
+        if not table:
+            table = header.find_next("table")
         if not table:
             continue
 
-        race_data = _parse_gri_table(table, race_info["race_number"], track_code, race_date, race_info)
-        if race_data:
-            races.append(race_data)
+        entries = _parse_result_table(table)
+        if not entries:
+            continue
 
-    # Deduplicate by race_number
-    seen_nums = set()
-    unique_races = []
-    for race in races:
-        rn = race.get("race_number")
-        if rn not in seen_nums:
-            seen_nums.add(rn)
-            unique_races.append(race)
+        # Get going from first entry
+        going = next((e.get("going") for e in entries if e.get("going")), None)
 
-    logger.info("Parsed %d races from %s on %s", len(unique_races), track_code, race_date)
-    return unique_races
+        races.append({
+            "race_number": race_info["race_number"],
+            "race_date": race_date,
+            "track_code": track_code,
+            "distance_m": race_info["distance_m"],
+            "grade": race_info["grade"],
+            "race_type": race_info["race_type"],
+            "going": going,
+            "prize_money": max((e.get("prize_money") or 0 for e in entries), default=None),
+            "entries": entries,
+        })
+
+    logger.info("Parsed %d races from %s on %s", len(races), track_code, race_date)
+    return races
 
 
 def _parse_race_header(text: str) -> dict[str, Any]:
-    """Parse race header text to extract race number, distance, grade."""
-    info: dict[str, Any] = {"race_number": None, "distance_m": None, "grade": None, "race_type": "flat"}
+    """Parse header like 'Race 1 - Fáilte Go Dtí 525 (Grade : A8/9) Flat 525'."""
+    info: dict[str, Any] = {
+        "race_number": None, "distance_m": None, "grade": None, "race_type": "flat",
+    }
 
-    # Race number
     num_match = re.search(r"Race\s+(\d+)", text, re.IGNORECASE)
     if num_match:
         info["race_number"] = int(num_match.group(1))
 
-    # Grade from "(Grade : A6/7)" pattern
     grade_match = re.search(r"Grade\s*:\s*([A-Za-z0-9/]+)", text)
     if grade_match:
         info["grade"] = grade_match.group(1).strip()
-    else:
-        # Try simpler grade pattern
-        grade_match2 = re.search(r"\b([A-S]\d(?:/\d)?|OR|ON|OP|Nov|Novice|Puppy)\b", text, re.IGNORECASE)
-        if grade_match2:
-            info["grade"] = grade_match2.group(1)
 
-    # Distance — look for 3-4 digit number that's a typical distance
-    dist_match = re.search(r"\b(\d{3,4})\b", text)
-    if dist_match:
-        dist = int(dist_match.group(1))
-        if 200 <= dist <= 1000:  # valid greyhound distance range
-            info["distance_m"] = dist
+    # Distance: last 3-4 digit number in the header (appears twice, take any)
+    distances = re.findall(r"\b(\d{3,4})\b", text)
+    for d in distances:
+        val = int(d)
+        if 200 <= val <= 1000:
+            info["distance_m"] = val
+            break
 
-    # Race type
     if re.search(r"hurdle|hurdles", text, re.IGNORECASE):
         info["race_type"] = "hurdle"
 
     return info
 
 
-def _parse_gri_table(
-    table, race_number: int, track_code: str, race_date: date, race_info: dict | None
-) -> dict[str, Any] | None:
+def _parse_result_table(table) -> list[dict[str, Any]]:
     """
-    Parse a GRI result table with known column order:
+    Parse a GRI result table. Columns:
     Pos. | Trap | Greyhound | SIRE NAME | DAM NAME | Prize | Wt. |
-    WinTime | By | Going | EstTime | SP. | Grade | Comm.
+    Win Time | By | Going | Est Time | SP. | Grade | Comm.
+
+    Trap is an <img alt="Trap N"> tag.
     """
     rows = table.find_all("tr")
     if len(rows) < 2:
-        return None
-
-    # Detect column indices from header row
-    header_cells = [c.get_text(strip=True) for c in rows[0].find_all(["th", "td"])]
-    col_map = _build_column_map(header_cells)
-
-    if not col_map:
-        return None
+        return []
 
     entries = []
-    winner_time = None
-    trap_num = 0
-
-    for row in rows[1:]:
-        cells = row.find_all(["td", "th"])
-        texts = [c.get_text(strip=True) for c in cells]
-
-        if len(texts) < 5:
+    for row in rows[1:]:  # skip header
+        cells = row.find_all("td")
+        if len(cells) < 10:
             continue
 
-        trap_num += 1
-        entry = _extract_entry_mapped(texts, cells, col_map)
+        entry = _parse_row(cells)
         if entry and entry.get("dog_name"):
-            # Assign trap number from row order if not already set
-            # In GRI results, rows are ordered by trap (1-6/8)
-            if not entry.get("trap"):
-                entry["trap"] = trap_num
-            # Track winner time for calculating estimated times
-            if entry.get("finish_position") == 1 and entry.get("finish_time"):
-                winner_time = entry["finish_time"]
             entries.append(entry)
 
-    if not entries:
-        return None
-
-    # Extract race-level info
-    distance = race_info.get("distance_m") if race_info else None
-    grade = race_info.get("grade") if race_info else None
-    race_type = race_info.get("race_type", "flat") if race_info else "flat"
-
-    # Try to get going from entries
-    going = None
-    for e in entries:
-        if e.get("going"):
-            going = e["going"]
-            break
-
-    # Get prize from first entry
-    prize = None
-    for e in entries:
-        if e.get("prize_money"):
-            prize = e["prize_money"]
-            break
-
-    return {
-        "race_number": race_number,
-        "race_date": race_date,
-        "track_code": track_code,
-        "distance_m": distance,
-        "grade": grade,
-        "race_type": race_type,
-        "going": going,
-        "prize_money": prize,
-        "entries": entries,
-    }
+    return entries
 
 
-def _build_column_map(headers: list[str]) -> dict[str, int]:
-    """Map column names to indices from the header row."""
-    col_map = {}
-    for i, h in enumerate(headers):
-        h_lower = h.lower().strip().rstrip(".")
-
-        if h_lower in ("pos", "position"):
-            col_map["position"] = i
-        elif h_lower == "trap":
-            col_map["trap"] = i
-        elif h_lower in ("greyhound", "dog", "name"):
-            col_map["greyhound"] = i
-        elif h_lower == "sire name" or h_lower == "sire":
-            col_map["sire"] = i
-        elif h_lower == "dam name" or h_lower == "dam":
-            col_map["dam"] = i
-        elif h_lower == "prize":
-            col_map["prize"] = i
-        elif h_lower in ("wt", "weight"):
-            col_map["weight"] = i
-        elif h_lower in ("wintime", "win time", "time"):
-            col_map["wintime"] = i
-        elif h_lower == "by":
-            col_map["by"] = i
-        elif h_lower == "going":
-            col_map["going"] = i
-        elif h_lower in ("esttime", "est time", "est.time"):
-            col_map["esttime"] = i
-        elif h_lower in ("sp", "sp."):
-            col_map["sp"] = i
-        elif h_lower == "grade":
-            col_map["grade_col"] = i
-        elif h_lower in ("comm", "comm.", "comment", "remarks"):
-            col_map["comment"] = i
-
-    # Must at least have greyhound column to be useful
-    if "greyhound" not in col_map:
-        return {}
-
-    return col_map
-
-
-def _extract_entry_mapped(texts: list[str], cells, col_map: dict) -> dict[str, Any]:
-    """Extract entry data using confirmed column mapping."""
+def _parse_row(cells) -> dict[str, Any]:
+    """Parse a single result row from known column positions."""
     entry: dict[str, Any] = {}
 
-    def get(key: str) -> str:
-        idx = col_map.get(key)
-        if idx is not None and idx < len(texts):
-            return texts[idx].strip()
-        return ""
-
-    # Position
-    pos_text = get("position")
+    # Col 0: Position (e.g. "1.", "2.")
+    pos_text = cells[0].get_text(strip=True)
     pos_match = re.match(r"(\d+)", pos_text)
     if pos_match:
         entry["finish_position"] = int(pos_match.group(1))
 
-    # Trap
-    trap_text = get("trap")
-    trap_match = re.match(r"(\d+)", trap_text)
-    if trap_match:
-        entry["trap"] = int(trap_match.group(1))
+    # Col 1: Trap — encoded as <img alt="Trap 4">
+    trap_img = cells[1].find("img")
+    if trap_img:
+        alt = trap_img.get("alt", "")
+        trap_match = re.search(r"Trap\s*(\d+)", alt)
+        if trap_match:
+            entry["trap"] = int(trap_match.group(1))
 
-    # Greyhound name (this is the DOG, not sire/dam)
-    dog_name = get("greyhound")
-    # Also check for link text
-    greyhound_idx = col_map.get("greyhound")
-    if greyhound_idx is not None and greyhound_idx < len(cells):
-        link = cells[greyhound_idx].find("a")
-        if link:
-            dog_name = link.get_text(strip=True)
-    if dog_name:
-        entry["dog_name"] = dog_name.upper()
+    # Col 2: Greyhound name (contains <a> link)
+    dog_link = cells[2].find("a")
+    if dog_link:
+        entry["dog_name"] = dog_link.get_text(strip=True).upper()
 
-    # Sire and Dam
-    sire = get("sire")
-    dam = get("dam")
-    if sire:
-        entry["sire_name"] = sire
-    if dam:
-        entry["dam_name"] = dam
+    # Col 3: Sire name (in next <td> with pedigree-sire span)
+    sire_cell = cells[2].find_next("td")
+    if sire_cell:
+        sire_span = sire_cell.find(class_="viewresults-pedigree-sire")
+        if sire_span:
+            sire_link = sire_span.find("a")
+            if sire_link:
+                entry["sire_name"] = sire_link.get_text(strip=True)
 
-    # Prize
-    prize_text = get("prize")
-    prize_match = re.search(r"[€£]?([\d,]+(?:\.\d+)?)", prize_text)
-    if prize_match:
-        entry["prize_money"] = float(prize_match.group(1).replace(",", ""))
+    # Col 4: Dam name
+    dam_span = cells[2].find_next(class_="viewresults-pedigree-dam")
+    if dam_span:
+        dam_link = dam_span.find("a")
+        if dam_link:
+            entry["dam_name"] = dam_link.get_text(strip=True)
 
-    # Weight
-    wt_text = get("weight")
-    wt_match = re.match(r"(\d+\.?\d*)", wt_text)
-    if wt_match:
-        entry["weight_kg"] = float(wt_match.group(1))
+    # Now handle the remaining columns — but the sire/dam cells are embedded
+    # oddly in the HTML (missing closing </td> on greyhound cell).
+    # The actual separate <td> cells after the pedigree section are:
+    # Prize | Wt. | WinTime | By | Going | EstTime | SP. | Grade | Comm.
+    #
+    # Because of the broken HTML, let's find all <td> in the row and count
+    # from the end, since the last columns are consistent.
+    all_tds = cells
+    num_tds = len(all_tds)
 
-    # Win Time (the winner's time, same for all entries in a race)
-    wintime_text = get("wintime")
-    wt_time_match = re.match(r"(\d+\.\d+)", wintime_text)
-    if wt_time_match:
-        entry["win_time"] = float(wt_time_match.group(1))
+    # Work backwards from the known tail columns
+    # Last column = Comm (index -1)
+    # SP = -2, Grade = -3, EstTime = -4, Going = -5, By = -6
+    # WinTime = -7, Wt = -8, Prize = -9
 
-    # Estimated Time (individual dog's time)
-    esttime_text = get("esttime")
-    est_match = re.match(r"(\d+\.\d+)", esttime_text)
-    if est_match:
-        entry["finish_time"] = float(est_match.group(1))
+    def get_td_text(idx: int) -> str:
+        if idx < 0:
+            idx = num_tds + idx
+        if 0 <= idx < num_tds:
+            return all_tds[idx].get_text(strip=True)
+        return ""
 
-    # Beaten by
-    by_text = get("by")
-    if by_text and by_text not in ("", "-"):
-        # Could be "3.75L", "nk", "hd", "sh", "dnf"
-        dist_match = re.match(r"([\d.]+)L?", by_text)
-        if dist_match:
-            entry["beaten_distance"] = float(dist_match.group(1))
+    # Comment
+    comment = get_td_text(-1)
+    if comment:
+        entry["comment"] = comment
 
-    # Going
-    going_text = get("going")
-    if going_text:
-        entry["going"] = going_text
+    # Grade at entry
+    grade = get_td_text(-2)
+    if grade:
+        entry["grade_at_entry"] = grade
 
     # SP
-    sp_text = get("sp")
+    sp_text = get_td_text(-3)
     if sp_text:
         entry["starting_price"] = sp_text
         entry["sp_decimal"] = _parse_sp_decimal(sp_text)
 
-    # Comment
-    comment_text = get("comment")
-    if comment_text:
-        entry["comment"] = comment_text
+    # Est Time (individual dog's time)
+    est_text = get_td_text(-4)
+    est_match = re.match(r"([\d.]+)", est_text)
+    if est_match:
+        entry["finish_time"] = float(est_match.group(1))
 
-    # Grade at entry
-    grade_text = get("grade_col")
-    if grade_text:
-        entry["grade_at_entry"] = grade_text
+    # Going
+    going_text = get_td_text(-5)
+    if going_text:
+        entry["going"] = going_text
+
+    # By (beaten distance)
+    by_text = get_td_text(-6)
+    if by_text and by_text.strip() not in ("", "&nbsp;"):
+        dist_match = re.match(r"([\d.]+)", by_text)
+        if dist_match:
+            entry["beaten_distance"] = float(dist_match.group(1))
+
+    # Win Time
+    wt_text = get_td_text(-7)
+    wt_match = re.match(r"([\d.]+)", wt_text)
+    if wt_match:
+        entry["win_time"] = float(wt_match.group(1))
+
+    # Weight
+    weight_text = get_td_text(-8)
+    weight_match = re.match(r"(\d+\.?\d*)", weight_text)
+    if weight_match:
+        entry["weight_kg"] = float(weight_match.group(1))
+
+    # Prize
+    prize_text = get_td_text(-9)
+    prize_match = re.search(r"([\d,]+\.?\d*)", prize_text)
+    if prize_match:
+        entry["prize_money"] = float(prize_match.group(1).replace(",", ""))
 
     return entry
 
 
 def _parse_sp_decimal(sp_text: str) -> float | None:
     """Convert SP text to decimal odds."""
-    sp_text = sp_text.strip().lower()
-    # Remove F (favourite) or JF (joint favourite) suffixes
-    sp_clean = re.sub(r"[fj]+$", "", sp_text, flags=re.IGNORECASE).strip()
-
-    if sp_clean in ("evens", "evs"):
+    sp_clean = re.sub(r"[FfJj]+$", "", sp_text).strip()
+    if sp_clean.lower() in ("evens", "evs"):
         return 2.0
     match = re.match(r"(\d+)/(\d+)", sp_clean)
     if match:
@@ -498,75 +303,64 @@ def _parse_sp_decimal(sp_text: str) -> float | None:
     return None
 
 
-async def scrape_results(track_code: str, race_date: date) -> list[dict[str, Any]]:
-    """Scrape race results for a specific track and date using Playwright."""
-    from playwright.async_api import async_playwright
+async def scrape_results(
+    track_code: str,
+    race_date: date,
+    client: httpx.AsyncClient | None = None,
+) -> list[dict[str, Any]]:
+    """Scrape race results for a specific track and date."""
+    date_str = format_date(race_date)
+    url = f"{VIEW_RESULTS_URL}?track={track_code}&date={date_str}"
 
-    logger.info("Scraping %s %s", track_code, race_date)
+    close_client = False
+    if client is None:
+        client = httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30)
+        close_client = True
 
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            try:
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                )
-                page = await context.new_page()
-                html = await _navigate_and_load_results(page, track_code, race_date)
-                races = parse_results_page(html, track_code, race_date)
-                return races
-            finally:
-                await browser.close()
+        resp = await client.get(url)
+        if resp.status_code != 200:
+            logger.warning("Got %d for %s", resp.status_code, url)
+            return []
+        html = resp.text
     except Exception as e:
-        logger.error("Failed to scrape %s %s: %s", track_code, race_date, e)
+        logger.error("Failed to fetch %s: %s", url, e)
         return []
+    finally:
+        if close_client:
+            await client.aclose()
+
+    return parse_results_page(html, track_code, race_date)
 
 
 async def scrape_date_range(
     track_code: str,
     start_date: date,
     end_date: date,
-    delay: float = 3.0,
+    delay: float = 1.0,
 ) -> list[dict[str, Any]]:
-    """Scrape results for a track across a date range, reusing one browser."""
-    from playwright.async_api import async_playwright
-
+    """Scrape results for a track across a date range. Fast — no browser needed."""
     all_races: list[dict[str, Any]] = []
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        )
-        page = await context.new_page()
-        # Block cookies once for the session
-        await page.route("**/consent.cookiebot.com/**", lambda route: route.abort())
+    async with httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30) as client:
+        current = start_date
+        total_days = (end_date - start_date).days + 1
+        day_num = 0
 
-        try:
-            current = start_date
-            total_days = (end_date - start_date).days + 1
-            day_num = 0
+        while current <= end_date:
+            day_num += 1
+            races = await scrape_results(track_code, current, client)
+            all_races.extend(races)
 
-            while current <= end_date:
-                day_num += 1
-                try:
-                    html = await _navigate_and_load_results(page, track_code, current)
-                    races = parse_results_page(html, track_code, current)
-                    all_races.extend(races)
-                except Exception as e:
-                    logger.error("Error scraping %s %s: %s", track_code, current, e)
+            if day_num % 50 == 0:
+                logger.info(
+                    "Progress: %s %d/%d days, %d races found",
+                    track_code, day_num, total_days, len(all_races),
+                )
 
-                if day_num % 10 == 0:
-                    logger.info(
-                        "Progress: %s %d/%d days, %d races found",
-                        track_code, day_num, total_days, len(all_races),
-                    )
-
-                current += timedelta(days=1)
-                if current <= end_date:
-                    await asyncio.sleep(delay)
-        finally:
-            await browser.close()
+            current += timedelta(days=1)
+            if current <= end_date:
+                await asyncio.sleep(delay)
 
     logger.info("Completed %s: %d days, %d races", track_code, total_days, len(all_races))
     return all_races

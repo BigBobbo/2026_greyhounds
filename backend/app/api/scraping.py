@@ -246,22 +246,41 @@ async def debug_trap_column(track_code: str = "SPK", date_str: str = "04-Apr-202
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # Find the first result table
+    # Find the first result table — try multiple matching strategies
     trap_info = []
+    target_table = None
     for table in soup.find_all("table"):
-        header_row = table.find("tr")
-        if not header_row or "Pos." not in header_row.get_text():
+        header_text = table.get_text(" ", strip=True)[:200].lower()
+        if "greyhound" in header_text or "pos" in header_text or "trap" in header_text:
+            target_table = table
+            break
+
+    if not target_table:
+        # Fallback: just get the table with most rows
+        tables = soup.find_all("table")
+        if tables:
+            target_table = max(tables, key=lambda t: len(t.find_all("tr")))
+
+    if not target_table:
+        return {"trap_column_analysis": [], "error": "No table found"}
+
+    rows = target_table.find_all("tr")
+    # Find which column index is "Trap"
+    trap_col_idx = 1  # default
+    if rows:
+        header_cells = [c.get_text(strip=True).lower() for c in rows[0].find_all(["td", "th"])]
+        trap_info.append({"row": -1, "header_cells": header_cells})
+        for idx, h in enumerate(header_cells):
+            if "trap" in h:
+                trap_col_idx = idx
+                break
+
+    for i, row in enumerate(rows[:8]):
+        cells = row.find_all(["td", "th"])
+        if len(cells) <= trap_col_idx:
             continue
 
-        # Found a result table — inspect each row's Trap cell
-        rows = table.find_all("tr")
-        for i, row in enumerate(rows[:8]):  # header + up to 7 data rows
-            cells = row.find_all(["td", "th"])
-            if len(cells) < 3:
-                continue
-
-            # Trap is column index 1 (after Pos.)
-            trap_cell = cells[1]
+        trap_cell = cells[trap_col_idx]
             trap_html = str(trap_cell)
             trap_text = trap_cell.get_text(strip=True)
 

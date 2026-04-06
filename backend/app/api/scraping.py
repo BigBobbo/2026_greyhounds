@@ -226,23 +226,19 @@ def discover_tracks():
 
 
 @router.get("/debug-fetch")
-async def debug_fetch(track_code: str = "SHP", date_str: str = "05-Apr-2026"):
-    """Fetch a GRI page and return raw HTML + parser results for debugging."""
-    import httpx
+async def debug_fetch(track_code: str = "SHP", date_str: str = "04-Apr-2026"):
+    """Fetch a GRI page with Playwright (JS rendering) and return debug info."""
     from scraping.gri_scraper import (
-        VIEW_RESULTS_URL, DEFAULT_HEADERS, parse_results_page, format_date
+        VIEW_RESULTS_URL, fetch_page_playwright, parse_results_page
     )
     from datetime import datetime as dt
 
     url = f"{VIEW_RESULTS_URL}?track={track_code}&date={date_str}"
 
-    async with httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30) as client:
-        try:
-            resp = await client.get(url)
-            html = resp.text
-            status_code = resp.status_code
-        except Exception as e:
-            return {"error": str(e), "url": url}
+    try:
+        html = await fetch_page_playwright(url, wait_selector="table")
+    except Exception as e:
+        return {"error": str(e), "url": url}
 
     # Try to parse the date
     try:
@@ -255,34 +251,35 @@ async def debug_fetch(track_code: str = "SHP", date_str: str = "05-Apr-2026"):
     if race_date:
         races = parse_results_page(html, track_code, race_date)
 
-    # Find the body content and return key sections
+    # Analyze the rendered HTML
     from bs4 import BeautifulSoup
+    import re
     soup = BeautifulSoup(html, "html.parser")
 
-    # Remove script/style tags to focus on content
     for tag in soup.find_all(["script", "style", "link", "meta", "noscript"]):
         tag.decompose()
 
     body = soup.find("body")
-    body_text = body.get_text(" ", strip=True)[:3000] if body else ""
-    body_html = str(body)[:5000] if body else html[2000:7000]
+    body_text = body.get_text(" ", strip=True)[:5000] if body else ""
 
-    # Look for any tables
+    # Find tables
     tables_info = []
     for i, table in enumerate(soup.find_all("table")):
         rows = table.find_all("tr")
-        first_row_text = rows[0].get_text(" ", strip=True)[:200] if rows else ""
+        rows_text = []
+        for row in rows[:5]:
+            cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+            rows_text.append(cells)
         tables_info.append({
             "table_index": i,
             "num_rows": len(rows),
-            "first_row": first_row_text,
             "classes": table.get("class", []),
+            "first_rows": rows_text,
         })
 
-    # Look for elements with race-related text
-    import re
+    # Find race-related elements
     race_elements = []
-    for elem in soup.find_all(string=re.compile(r"Race\s+\d+|Trap|525m|480m|550m", re.IGNORECASE)):
+    for elem in soup.find_all(string=re.compile(r"Race\s+\d+|Trap|525m|480m|550m|\d{2}\.\d{2}", re.IGNORECASE)):
         parent = elem.find_parent()
         if parent:
             race_elements.append({
@@ -293,12 +290,10 @@ async def debug_fetch(track_code: str = "SHP", date_str: str = "05-Apr-2026"):
 
     return {
         "url": url,
-        "status_code": status_code,
         "html_length": len(html),
         "body_text_preview": body_text,
-        "body_html_preview": body_html,
         "tables_found": tables_info,
-        "race_elements": race_elements[:20],
+        "race_elements": race_elements[:30],
         "races_parsed": len(races),
         "races": races,
     }

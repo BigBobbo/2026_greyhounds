@@ -241,48 +241,96 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
     track_codes = [t.code for t in tracks]
 
     def _run_backfill():
+        """Run backfill one track at a time. Each track gets its own DB session and async loop."""
+        import traceback
         from scraping.gri_scraper import scrape_results, DEFAULT_HEADERS
         from scraping.db_pipeline import upsert_race_results
         import asyncio as _asyncio
 
-        db2 = SessionLocal()
-        log2 = db2.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
         total_races = 0
         total_new = 0
+        failed_tracks = []
 
-        async def _run():
-            nonlocal total_races, total_new
-            async with httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30) as client:
-                for tc in track_codes:
-                    current = start
-                    while current <= end:
-                        try:
-                            races = await scrape_results(tc, current, client)
-                            if races:
-                                stats = upsert_race_results(db2, races)
-                                total_races += stats["races_new"] + stats["races_updated"]
-                                total_new += stats["races_new"]
-                        except Exception as e:
-                            logger.error("Backfill error %s %s: %s", tc, current, e)
-                        current += timedelta(days=1)
-                        await _asyncio.sleep(1.0)
-                    logger.info("Backfill: completed %s, %d total races", tc, total_races)
+        for tc in track_codes:
+            track_races = 0
+            track_new = 0
 
+            async def _scrape_track():
+                nonlocal track_races, track_new
+                async with httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30) as client:
+                    db_track = SessionLocal()
+                    try:
+                        current = start
+                        day_count = 0
+                        while current <= end:
+                            day_count += 1
+                            try:
+                                races = await scrape_results(tc, current, client)
+                                if races:
+                                    stats = upsert_race_results(db_track, races)
+                                    track_races += stats["races_new"] + stats["races_updated"]
+                                    track_new += stats["races_new"]
+                            except Exception as e:
+                                logger.error("Error %s %s: %s", tc, current, e)
+
+                            # Commit + update log every 50 days
+                            if day_count % 50 == 0:
+                                db_track.commit()
+                                _update_log(total_races + track_races, total_new + track_new)
+
+                            current += timedelta(days=1)
+                            await _asyncio.sleep(1.0)
+
+                        db_track.commit()
+                    except Exception as e:
+                        logger.error("Track %s failed: %s", tc, e)
+                        db_track.rollback()
+                        raise
+                    finally:
+                        db_track.close()
+
+            try:
+                loop = _asyncio.new_event_loop()
+                _asyncio.set_event_loop(loop)
+                loop.run_until_complete(_scrape_track())
+                loop.close()
+
+                total_races += track_races
+                total_new += track_new
+                logger.info("Backfill: %s done — %d races (%d new). Total: %d", tc, track_races, track_new, total_races)
+                _update_log(total_races, total_new)
+
+            except Exception as e:
+                logger.error("Backfill track %s crashed: %s\n%s", tc, e, traceback.format_exc())
+                failed_tracks.append(tc)
+                # Continue with next track
+
+        # Final update
+        db_final = SessionLocal()
+        log_final = db_final.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
+        if log_final:
+            log_final.status = "success" if not failed_tracks else "partial"
+            log_final.records_scraped = total_races
+            log_final.records_new = total_new
+            log_final.completed_at = datetime.utcnow()
+            if failed_tracks:
+                log_final.error_message = f"Failed tracks: {', '.join(failed_tracks)}"
+            db_final.commit()
+        db_final.close()
+        logger.info("Backfill complete: %d races, %d new. Failed: %s", total_races, total_new, failed_tracks or "none")
+
+    def _update_log(scraped: int, new: int):
+        """Update the scrape log with current progress."""
         try:
-            loop = _asyncio.new_event_loop()
-            _asyncio.set_event_loop(loop)
-            loop.run_until_complete(_run())
-            loop.close()
-            log2.status = "success"
-            log2.records_scraped = total_races
-            log2.records_new = total_new
-        except Exception as e:
-            logger.error("Backfill failed: %s", e)
-            log2.status = "failed"
-            log2.error_message = str(e)
-        finally:
-            log2.completed_at = datetime.utcnow()
-            db2.commit()
+            db_log = SessionLocal()
+            log_entry = db_log.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
+            if log_entry:
+                log_entry.records_scraped = scraped
+                log_entry.records_new = new
+                db_log.commit()
+            db_log.close()
+        except Exception:
+            pass
             db2.close()
 
     Thread(target=_run_backfill, daemon=True).start()

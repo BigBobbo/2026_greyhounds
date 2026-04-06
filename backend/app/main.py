@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.api import tracks, dogs, races, features, training, predictions, scraping
+from app.api import tracks, dogs, races, features, training, predictions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -13,25 +13,22 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        from app.tasks.scheduler import start_scheduler, stop_scheduler
-        start_scheduler()
-        logger.info("Scheduler started")
-    except Exception as e:
-        logger.error("Failed to start scheduler: %s", e)
+    logger.info("App starting up")
+    # Scheduler disabled for now — enable once app is stable
+    # try:
+    #     from app.tasks.scheduler import start_scheduler
+    #     start_scheduler()
+    # except Exception as e:
+    #     logger.error("Scheduler failed: %s", e)
     yield
-    try:
-        from app.tasks.scheduler import stop_scheduler
-        stop_scheduler()
-    except Exception:
-        pass
+    logger.info("App shutting down")
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -43,7 +40,14 @@ app.include_router(races.router, prefix="/api")
 app.include_router(features.router, prefix="/api")
 app.include_router(training.router, prefix="/api")
 app.include_router(predictions.router, prefix="/api")
-app.include_router(scraping.router, prefix="/api")
+
+# Import scraping router separately — it uses Playwright which is heavy
+try:
+    from app.api import scraping
+    app.include_router(scraping.router, prefix="/api")
+    logger.info("Scraping router loaded")
+except Exception as e:
+    logger.error("Failed to load scraping router: %s", e)
 
 
 @app.get("/api/health")

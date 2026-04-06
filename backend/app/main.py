@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -5,14 +6,25 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.api import tracks, dogs, races, features, training, predictions, scraping
-from app.tasks.scheduler import start_scheduler, stop_scheduler
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    start_scheduler()
+    try:
+        from app.tasks.scheduler import start_scheduler, stop_scheduler
+        start_scheduler()
+        logger.info("Scheduler started")
+    except Exception as e:
+        logger.error("Failed to start scheduler: %s", e)
     yield
-    stop_scheduler()
+    try:
+        from app.tasks.scheduler import stop_scheduler
+        stop_scheduler()
+    except Exception:
+        pass
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)

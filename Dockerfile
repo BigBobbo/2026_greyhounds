@@ -17,5 +17,5 @@ COPY backend/ .
 # Create persistent data directory (mount Railway volume here at /app/data)
 RUN mkdir -p data/models
 
-# Run migrations and seed on startup, then start the server
-CMD mkdir -p data/models && alembic upgrade head && python scripts/seed_tracks.py && python scripts/seed_features.py && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+# Run startup script (migrations, seeds, then uvicorn)
+CMD ["python", "scripts/start.py"]

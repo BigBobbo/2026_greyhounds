@@ -8,7 +8,15 @@ from app.database import SessionLocal, engine, Base
 from app.models.track import Track
 import app.models  # noqa: F401
 
+# Track codes confirmed from GRI dropdown (grireland.ie)
 IRISH_TRACKS = [
+    {
+        "name": "Clonmel",
+        "code": "CML",
+        "location": "Clonmel",
+        "distances_m": [325, 400, 480, 525, 550, 725],
+        "num_traps": 6,
+    },
     {
         "name": "Curraheen Park",
         "code": "CRK",
@@ -24,7 +32,7 @@ IRISH_TRACKS = [
         "num_traps": 6,
     },
     {
-        "name": "Dundalk Stadium",
+        "name": "Dundalk",
         "code": "DLK",
         "location": "Dundalk",
         "distances_m": [325, 400, 480, 525, 550, 750],
@@ -32,16 +40,23 @@ IRISH_TRACKS = [
     },
     {
         "name": "Enniscorthy",
-        "code": "ENN",
+        "code": "ECY",
         "location": "Enniscorthy",
         "distances_m": [325, 480, 525, 550, 725],
         "num_traps": 6,
     },
     {
-        "name": "Galway (Greenpark)",
-        "code": "GAL",
+        "name": "Galway",
+        "code": "GLY",
         "location": "Galway",
         "distances_m": [325, 480, 525, 550, 750],
+        "num_traps": 6,
+    },
+    {
+        "name": "Harolds Cross",
+        "code": "HRX",
+        "location": "Dublin",
+        "distances_m": [325, 400, 480, 525, 550],
         "num_traps": 6,
     },
     {
@@ -52,6 +67,20 @@ IRISH_TRACKS = [
         "num_traps": 6,
     },
     {
+        "name": "Kilkenny Wed Evening",
+        "code": "KWE",
+        "location": "Kilkenny",
+        "distances_m": [325, 400, 480, 525, 550, 725],
+        "num_traps": 6,
+    },
+    {
+        "name": "Lifford",
+        "code": "LFD",
+        "location": "Lifford",
+        "distances_m": [325, 480, 525],
+        "num_traps": 6,
+    },
+    {
         "name": "Limerick",
         "code": "LMK",
         "location": "Limerick",
@@ -59,36 +88,50 @@ IRISH_TRACKS = [
         "num_traps": 6,
     },
     {
+        "name": "Longford",
+        "code": "LGD",
+        "location": "Longford",
+        "distances_m": [325, 400, 480, 525],
+        "num_traps": 6,
+    },
+    {
         "name": "Mullingar",
-        "code": "MUL",
+        "code": "MGR",
         "location": "Mullingar",
         "distances_m": [325, 480, 525, 550, 725],
         "num_traps": 6,
     },
     {
         "name": "Newbridge",
-        "code": "NBR",
+        "code": "NWB",
         "location": "Newbridge",
         "distances_m": [325, 480, 525, 550, 725],
         "num_traps": 6,
     },
     {
         "name": "Shelbourne Park",
-        "code": "SHP",
+        "code": "SPK",
         "location": "Dublin",
         "distances_m": [325, 400, 480, 525, 550, 750],
         "num_traps": 6,
     },
     {
-        "name": "Thurles",
-        "code": "THL",
+        "name": "Thurles Park",
+        "code": "THR",
         "location": "Thurles",
         "distances_m": [325, 480, 525, 550, 725],
         "num_traps": 6,
     },
     {
         "name": "Tralee",
-        "code": "TRA",
+        "code": "TRL",
+        "location": "Tralee",
+        "distances_m": [325, 480, 525, 550, 570, 750],
+        "num_traps": 6,
+    },
+    {
+        "name": "Tralee Sat Evening",
+        "code": "TRS",
         "location": "Tralee",
         "distances_m": [325, 480, 525, 550, 570, 750],
         "num_traps": 6,
@@ -101,10 +144,10 @@ IRISH_TRACKS = [
         "num_traps": 6,
     },
     {
-        "name": "Clonmel",
-        "code": "CLM",
-        "location": "Clonmel",
-        "distances_m": [325, 400, 480, 525, 550, 725],
+        "name": "Waterford Thursday Morning",
+        "code": "WFE",
+        "location": "Waterford",
+        "distances_m": [325, 460, 480, 525, 550, 680],
         "num_traps": 6,
     },
     {
@@ -112,13 +155,6 @@ IRISH_TRACKS = [
         "code": "DRY",
         "location": "Derry",
         "distances_m": [325, 480, 525, 550],
-        "num_traps": 6,
-    },
-    {
-        "name": "Longford",
-        "code": "LFD",
-        "location": "Longford",
-        "distances_m": [325, 400, 480, 525],
         "num_traps": 6,
     },
     {

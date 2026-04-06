@@ -31,29 +31,29 @@ def normalize_name(name: str) -> str:
     return name
 
 
-def find_or_create_dog(db: Session, name: str, trainer_name: str | None = None) -> Dog:
-    """Find existing dog by normalized name + trainer, or create new."""
+def find_or_create_dog(
+    db: Session, name: str, trainer_name: str | None = None,
+    sire: str | None = None, dam: str | None = None,
+) -> Dog:
+    """Find existing dog by normalized name, or create new."""
     norm_name = normalize_name(name)
 
-    query = db.query(Dog).filter(Dog.name == norm_name)
-    if trainer_name:
-        norm_trainer = normalize_name(trainer_name)
-        dog = query.filter(Dog.trainer_name == norm_trainer).first()
-        if dog:
-            return dog
-        # Try without trainer (might be a name change)
-        dog = query.first()
-        if dog and not dog.trainer_name:
-            dog.trainer_name = norm_trainer
-            return dog
-    else:
-        dog = query.first()
-        if dog:
-            return dog
+    dog = db.query(Dog).filter(Dog.name == norm_name).first()
+    if dog:
+        # Update missing fields
+        if sire and not dog.sire:
+            dog.sire = sire
+        if dam and not dog.dam:
+            dog.dam = dam
+        if trainer_name and not dog.trainer_name:
+            dog.trainer_name = normalize_name(trainer_name)
+        return dog
 
     # Create new dog
     dog = Dog(
         name=norm_name,
+        sire=sire,
+        dam=dam,
         trainer_name=normalize_name(trainer_name) if trainer_name else None,
     )
     db.add(dog)
@@ -126,7 +126,12 @@ def upsert_race_entry(
         logger.warning("Entry missing dog_name or trap: %s", entry_data)
         return None
 
-    dog = find_or_create_dog(db, dog_name, entry_data.get("trainer_name"))
+    dog = find_or_create_dog(
+        db, dog_name,
+        trainer_name=entry_data.get("trainer_name"),
+        sire=entry_data.get("sire_name"),
+        dam=entry_data.get("dam_name"),
+    )
 
     existing = (
         db.query(RaceEntry)

@@ -298,3 +298,14 @@ def discover_tracks():
     """Return known GRI track codes."""
     from scraping.gri_scraper import GRI_TRACK_CODES
     return {"tracks": [{"code": k, "name": v} for k, v in GRI_TRACK_CODES.items()]}
+
+
+@router.get("/start-backfill")
+def start_backfill_get(
+    start_date: str = "2021-04-05",
+    end_date: str = "2026-04-05",
+    db: Session = Depends(get_db),
+):
+    """GET endpoint to start a full backfill — use from browser URL bar."""
+    req = BackfillRequest(start_date=start_date, end_date=end_date, track_codes=None)
+    return trigger_backfill(req, db)

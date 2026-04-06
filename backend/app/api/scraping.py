@@ -352,8 +352,90 @@ def discover_tracks():
 def start_backfill_get(
     start_date: str = "2021-04-05",
     end_date: str = "2026-04-05",
+    tracks: str | None = None,
     db: Session = Depends(get_db),
 ):
-    """GET endpoint to start a full backfill — use from browser URL bar."""
-    req = BackfillRequest(start_date=start_date, end_date=end_date, track_codes=None)
+    """
+    GET endpoint to start a backfill from browser URL bar.
+    Use tracks param for specific tracks: ?tracks=TRL,SPK,CRK
+    """
+    track_codes = tracks.split(",") if tracks else None
+    req = BackfillRequest(start_date=start_date, end_date=end_date, track_codes=track_codes)
     return trigger_backfill(req, db)
+
+
+@router.get("/test-track-scrape")
+async def test_track_scrape(
+    track_code: str = "TRL",
+    date_str: str = "04-Apr-2026",
+):
+    """
+    Test scraping a single track+date and show detailed diagnostics.
+    Helps debug why a track might be failing.
+    """
+    from scraping.gri_scraper import VIEW_RESULTS_URL, DEFAULT_HEADERS, parse_results_page
+    from datetime import datetime as dt
+
+    race_date = dt.strptime(date_str, "%d-%b-%Y").date()
+    url = f"{VIEW_RESULTS_URL}?track={track_code}&date={date_str}"
+
+    async with httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30) as client:
+        try:
+            resp = await client.get(url)
+        except Exception as e:
+            return {"error": f"HTTP failed: {e}", "url": url}
+
+    if resp.status_code != 200:
+        return {"error": f"Status {resp.status_code}", "url": url}
+
+    races = parse_results_page(resp.text, track_code, race_date)
+
+    return {
+        "url": url,
+        "status_code": resp.status_code,
+        "html_length": len(resp.text),
+        "has_race_data": "Race 1" in resp.text,
+        "races_parsed": len(races),
+        "entries_total": sum(len(r.get("entries", [])) for r in races),
+    }
+
+
+@router.get("/data-summary")
+def data_summary(db: Session = Depends(get_db)):
+    """Show how much data we have per track — helps identify gaps."""
+    from sqlalchemy import func
+
+    rows = (
+        db.query(
+            Track.code,
+            Track.name,
+            func.count(Race.id).label("race_count"),
+            func.min(Race.race_date).label("earliest"),
+            func.max(Race.race_date).label("latest"),
+        )
+        .outerjoin(Race, Track.id == Race.track_id)
+        .group_by(Track.code, Track.name)
+        .order_by(func.count(Race.id).desc())
+        .all()
+    )
+
+    tracks = []
+    for row in rows:
+        tracks.append({
+            "code": row.code,
+            "name": row.name,
+            "race_count": row.race_count,
+            "earliest": str(row.earliest) if row.earliest else None,
+            "latest": str(row.latest) if row.latest else None,
+        })
+
+    total_races = db.query(Race).count()
+    total_entries = db.query(RaceEntry).count()
+    total_dogs = db.query(Dog).count()
+
+    return {
+        "total_races": total_races,
+        "total_entries": total_entries,
+        "total_dogs": total_dogs,
+        "tracks": tracks,
+    }

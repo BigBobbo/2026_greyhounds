@@ -67,6 +67,13 @@ export default function FeatureBuilder() {
   const [saving, setSaving] = useState(false);
   const [materializing, setMaterializing] = useState(false);
 
+  // Coverage tracking
+  const [coverage, setCoverage] = useState<{
+    feature_id: number; name: string; display_name: string | null;
+    computed_count: number; total_entries: number; coverage_pct: number;
+  }[]>([]);
+  const [showCoverage, setShowCoverage] = useState(false);
+
   // Visual builder state
   const [visualConfig, setVisualConfig] = useState<VisualConfig>({
     metric: 'finish_time',
@@ -174,29 +181,101 @@ export default function FeatureBuilder() {
     fetchFeatures();
   };
 
+  const fetchCoverage = useCallback(() => {
+    api.get('/features/coverage').then(res => {
+      setCoverage(res.data);
+    }).catch(() => {});
+  }, []);
+
   const handleMaterialize = async () => {
     setMaterializing(true);
+    setShowCoverage(true);
     try {
       await api.post('/features/materialize', { force: false });
-      alert('Materialization started in background');
+      // Start polling coverage
+      const interval = setInterval(() => {
+        api.get('/features/coverage').then(res => setCoverage(res.data));
+      }, 5000);
+      // Store interval ID so we can clear it
+      setTimeout(() => clearInterval(interval), 600000); // stop after 10 min
+      (window as any).__materializeInterval = interval;
     } catch {
       alert('Failed to start materialization');
     }
     setMaterializing(false);
   };
 
+  // Fetch coverage on mount and when toggled
+  useEffect(() => {
+    if (showCoverage) fetchCoverage();
+  }, [showCoverage, fetchCoverage]);
+
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">Feature Builder</h1>
-        <button
-          onClick={handleMaterialize}
-          disabled={materializing}
-          className="bg-green-600 text-white px-4 py-2 rounded-md text-sm hover:bg-green-700 disabled:opacity-50"
-        >
-          {materializing ? 'Materializing...' : 'Materialize All'}
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => { setShowCoverage(!showCoverage); if (!showCoverage) fetchCoverage(); }}
+            className="bg-gray-100 text-gray-700 px-4 py-2 rounded-md text-sm hover:bg-gray-200"
+          >
+            {showCoverage ? 'Hide Progress' : 'Show Progress'}
+          </button>
+          <button
+            onClick={handleMaterialize}
+            disabled={materializing}
+            className="bg-green-600 text-white px-4 py-2 rounded-md text-sm hover:bg-green-700 disabled:opacity-50"
+          >
+            {materializing ? 'Starting...' : 'Materialize All'}
+          </button>
+        </div>
       </div>
+
+      {/* Materialization Progress */}
+      {showCoverage && (
+        <div className="bg-white rounded-lg shadow p-5 mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold">Materialization Progress</h2>
+            <button onClick={fetchCoverage} className="text-xs text-blue-500 hover:underline">
+              Refresh
+            </button>
+          </div>
+          {coverage.length === 0 ? (
+            <p className="text-gray-400 text-sm">Loading coverage data...</p>
+          ) : (
+            <div className="space-y-2">
+              {coverage.map((c) => {
+                const pct = c.coverage_pct;
+                const isComplete = pct >= 99;
+                return (
+                  <div key={c.feature_id}>
+                    <div className="flex items-center justify-between text-xs mb-0.5">
+                      <span className="text-gray-600 truncate max-w-[250px]">{c.display_name || c.name}</span>
+                      <span className={`font-mono ${isComplete ? 'text-green-600' : 'text-gray-500'}`}>
+                        {c.computed_count.toLocaleString()} / {c.total_entries.toLocaleString()} ({pct}%)
+                      </span>
+                    </div>
+                    <div className="w-full bg-gray-100 rounded-full h-2">
+                      <div
+                        className={`h-2 rounded-full transition-all ${isComplete ? 'bg-green-500' : pct > 0 ? 'bg-blue-500' : 'bg-gray-200'}`}
+                        style={{ width: `${Math.min(pct, 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+              <div className="pt-2 border-t mt-3 text-sm text-gray-500">
+                {(() => {
+                  const total = coverage.reduce((s, c) => s + c.total_entries, 0);
+                  const done = coverage.reduce((s, c) => s + c.computed_count, 0);
+                  const overallPct = total > 0 ? (done / total * 100).toFixed(1) : '0';
+                  return `Overall: ${done.toLocaleString()} / ${total.toLocaleString()} computations (${overallPct}%)`;
+                })()}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex gap-4">
         {/* Feature list sidebar */}

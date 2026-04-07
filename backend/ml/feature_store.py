@@ -160,32 +160,52 @@ def build_feature_matrix(
     Build a feature matrix (DataFrame) from computed features.
 
     Returns a DataFrame with race_entry_id as index and feature names as columns.
+    Queries in batches to avoid SQLite's 999 variable limit.
     """
     features = db.query(FeatureDefinition).filter(FeatureDefinition.id.in_(feature_ids)).all()
     feature_map = {f.id: f.name for f in features}
 
-    query = (
-        db.query(
-            ComputedFeature.race_entry_id,
-            ComputedFeature.feature_def_id,
-            ComputedFeature.value,
-        )
-        .filter(ComputedFeature.feature_def_id.in_(feature_ids))
-    )
+    data: dict[int, dict[str, float | None]] = {}
 
     if race_entry_ids:
-        query = query.filter(ComputedFeature.race_entry_id.in_(race_entry_ids))
+        # Query in batches of 400 (well under SQLite's 999 limit, accounting for feature_ids too)
+        batch_size = max(1, 900 // (len(feature_ids) + 1))
+        batch_size = min(batch_size, 400)
 
-    rows = query.all()
+        for i in range(0, len(race_entry_ids), batch_size):
+            batch = race_entry_ids[i:i + batch_size]
+            rows = (
+                db.query(
+                    ComputedFeature.race_entry_id,
+                    ComputedFeature.feature_def_id,
+                    ComputedFeature.value,
+                )
+                .filter(ComputedFeature.feature_def_id.in_(feature_ids))
+                .filter(ComputedFeature.race_entry_id.in_(batch))
+                .all()
+            )
+            for entry_id, feat_id, value in rows:
+                if entry_id not in data:
+                    data[entry_id] = {}
+                data[entry_id][feature_map[feat_id]] = value
+    else:
+        # No entry filter — just filter by feature IDs (small list)
+        rows = (
+            db.query(
+                ComputedFeature.race_entry_id,
+                ComputedFeature.feature_def_id,
+                ComputedFeature.value,
+            )
+            .filter(ComputedFeature.feature_def_id.in_(feature_ids))
+            .all()
+        )
+        for entry_id, feat_id, value in rows:
+            if entry_id not in data:
+                data[entry_id] = {}
+            data[entry_id][feature_map[feat_id]] = value
 
-    if not rows:
+    if not data:
         return pd.DataFrame()
-
-    data: dict[int, dict[str, float | None]] = {}
-    for entry_id, feat_id, value in rows:
-        if entry_id not in data:
-            data[entry_id] = {}
-        data[entry_id][feature_map[feat_id]] = value
 
     df = pd.DataFrame.from_dict(data, orient="index")
     df.index.name = "race_entry_id"

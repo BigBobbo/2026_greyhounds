@@ -158,57 +158,67 @@ def build_feature_matrix(
 ) -> pd.DataFrame:
     """
     Build a feature matrix (DataFrame) from computed features.
+    Memory-efficient: queries directly into pandas via raw SQL.
 
     Returns a DataFrame with race_entry_id as index and feature names as columns.
-    Queries in batches to avoid SQLite's 999 variable limit.
     """
     features = db.query(FeatureDefinition).filter(FeatureDefinition.id.in_(feature_ids)).all()
     feature_map = {f.id: f.name for f in features}
 
-    data: dict[int, dict[str, float | None]] = {}
+    if not feature_map:
+        return pd.DataFrame()
+
+    # Use raw SQL with pandas for memory efficiency — avoids building
+    # millions of Python objects via SQLAlchemy ORM
+    from sqlalchemy import text
+    import sqlite3
+
+    # Get the raw connection
+    connection = db.get_bind().raw_connection()
 
     if race_entry_ids:
-        # Query in batches of 400 (well under SQLite's 999 limit, accounting for feature_ids too)
-        batch_size = max(1, 900 // (len(feature_ids) + 1))
-        batch_size = min(batch_size, 400)
+        # Build the pivot query in batches and concatenate
+        all_dfs = []
+        batch_size = 400
 
         for i in range(0, len(race_entry_ids), batch_size):
             batch = race_entry_ids[i:i + batch_size]
-            rows = (
-                db.query(
-                    ComputedFeature.race_entry_id,
-                    ComputedFeature.feature_def_id,
-                    ComputedFeature.value,
-                )
-                .filter(ComputedFeature.feature_def_id.in_(feature_ids))
-                .filter(ComputedFeature.race_entry_id.in_(batch))
-                .all()
-            )
-            for entry_id, feat_id, value in rows:
-                if entry_id not in data:
-                    data[entry_id] = {}
-                data[entry_id][feature_map[feat_id]] = value
-    else:
-        # No entry filter — just filter by feature IDs (small list)
-        rows = (
-            db.query(
-                ComputedFeature.race_entry_id,
-                ComputedFeature.feature_def_id,
-                ComputedFeature.value,
-            )
-            .filter(ComputedFeature.feature_def_id.in_(feature_ids))
-            .all()
-        )
-        for entry_id, feat_id, value in rows:
-            if entry_id not in data:
-                data[entry_id] = {}
-            data[entry_id][feature_map[feat_id]] = value
+            placeholders_entries = ",".join(str(int(eid)) for eid in batch)
+            placeholders_features = ",".join(str(int(fid)) for fid in feature_ids)
 
-    if not data:
+            sql = f"""
+                SELECT race_entry_id, feature_def_id, value
+                FROM computed_features
+                WHERE feature_def_id IN ({placeholders_features})
+                AND race_entry_id IN ({placeholders_entries})
+            """
+            batch_df = pd.read_sql_query(sql, connection)
+            if not batch_df.empty:
+                all_dfs.append(batch_df)
+
+        if not all_dfs:
+            return pd.DataFrame()
+
+        long_df = pd.concat(all_dfs, ignore_index=True)
+    else:
+        placeholders_features = ",".join(str(int(fid)) for fid in feature_ids)
+        sql = f"""
+            SELECT race_entry_id, feature_def_id, value
+            FROM computed_features
+            WHERE feature_def_id IN ({placeholders_features})
+        """
+        long_df = pd.read_sql_query(sql, connection)
+
+    if long_df.empty:
         return pd.DataFrame()
 
-    df = pd.DataFrame.from_dict(data, orient="index")
+    # Map feature IDs to names
+    long_df["feature_name"] = long_df["feature_def_id"].map(feature_map)
+
+    # Pivot from long to wide format
+    df = long_df.pivot(index="race_entry_id", columns="feature_name", values="value")
     df.index.name = "race_entry_id"
+
     return df
 
 

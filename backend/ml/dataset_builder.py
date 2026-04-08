@@ -50,8 +50,10 @@ def build_dataset(
     if split_config is None:
         split_config = {}
 
+    max_entries = split_config.get("max_entries", 100000)
+
     # Get all resulted race entries with their race dates
-    entries = (
+    query = (
         db.query(
             RaceEntry.id.label("entry_id"),
             RaceEntry.finish_position,
@@ -64,8 +66,13 @@ def build_dataset(
         .join(Race)
         .filter(Race.status == "resulted")
         .filter(RaceEntry.finish_position.isnot(None))
-        .all()
+        .order_by(Race.race_date.desc())
     )
+
+    if max_entries:
+        query = query.limit(max_entries)
+
+    entries = query.all()
 
     if not entries:
         raise ValueError("No resulted race entries found in database")

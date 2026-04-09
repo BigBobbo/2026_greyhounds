@@ -135,11 +135,15 @@ def list_versions(db: Session = Depends(get_db)):
     )
     result = []
     for v in versions:
-        count = (
-            db.query(sqlfunc.count(ComputedFeature.id))
-            .filter(ComputedFeature.version_id == v.id)
-            .scalar() or 0
-        )
+        try:
+            count = (
+                db.query(sqlfunc.count(ComputedFeature.id))
+                .filter(ComputedFeature.version_id == v.id)
+                .scalar() or 0
+            )
+        except Exception:
+            db.rollback()
+            count = 0
         result.append({
             "id": v.id,
             "name": v.name,
@@ -200,19 +204,24 @@ def get_version(version_id: int, db: Session = Depends(get_db)):
     if not version:
         raise HTTPException(status_code=404, detail="Version not found")
 
-    count = (
-        db.query(sqlfunc.count(ComputedFeature.id))
-        .filter(ComputedFeature.version_id == version.id)
-        .scalar() or 0
-    )
-    incomplete = (
-        db.query(sqlfunc.count(ComputedFeature.id))
-        .filter(
-            ComputedFeature.version_id == version.id,
-            ComputedFeature.data_complete.is_(False),
+    try:
+        count = (
+            db.query(sqlfunc.count(ComputedFeature.id))
+            .filter(ComputedFeature.version_id == version.id)
+            .scalar() or 0
         )
-        .scalar() or 0
-    )
+        incomplete = (
+            db.query(sqlfunc.count(ComputedFeature.id))
+            .filter(
+                ComputedFeature.version_id == version.id,
+                ComputedFeature.data_complete.is_(False),
+            )
+            .scalar() or 0
+        )
+    except Exception:
+        db.rollback()
+        count = 0
+        incomplete = 0
 
     return {
         "id": version.id,

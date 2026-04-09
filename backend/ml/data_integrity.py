@@ -96,8 +96,8 @@ def find_coverage_gaps(
             gaps.append({
                 "track_code": code,
                 "track_name": name,
-                "gap_start": start_date,
-                "gap_end": end_date,
+                "gap_start": str(start_date),
+                "gap_end": str(end_date),
                 "gap_days": (end_date - start_date).days,
             })
             continue
@@ -107,8 +107,8 @@ def find_coverage_gaps(
             gaps.append({
                 "track_code": code,
                 "track_name": name,
-                "gap_start": start_date,
-                "gap_end": dates[0],
+                "gap_start": str(start_date),
+                "gap_end": str(dates[0]),
                 "gap_days": (dates[0] - start_date).days,
             })
 
@@ -119,8 +119,8 @@ def find_coverage_gaps(
                 gaps.append({
                     "track_code": code,
                     "track_name": name,
-                    "gap_start": dates[i - 1],
-                    "gap_end": dates[i],
+                    "gap_start": str(dates[i - 1]),
+                    "gap_end": str(dates[i]),
                     "gap_days": gap,
                 })
 
@@ -129,8 +129,8 @@ def find_coverage_gaps(
             gaps.append({
                 "track_code": code,
                 "track_name": name,
-                "gap_start": dates[-1],
-                "gap_end": end_date,
+                "gap_start": str(dates[-1]),
+                "gap_end": str(end_date),
                 "gap_days": (end_date - dates[-1]).days,
             })
 

@@ -25,11 +25,29 @@ router = APIRouter(prefix="/features", tags=["features"])
 class MaterializeRequest(BaseModel):
     feature_ids: list[int] | None = None  # None = all enabled
     force: bool = False
+    # When set, computed features are saved under a named version snapshot.
+    # Create the version first via POST /features/versions, then pass its id.
+    version_id: int | None = None
 
 
 class MaterializeResponse(BaseModel):
     message: str
     results: dict[str, Any] | None = None
+
+
+class CreateVersionRequest(BaseModel):
+    name: str
+    description: str | None = None
+
+
+class VersionResponse(BaseModel):
+    id: int
+    name: str
+    description: str | None
+    created_at: Any
+    coverage_snapshot: Any | None
+    feature_count: int = 0
+    model_config = {"from_attributes": True}
 
 
 class FeatureCoverageItem(BaseModel):
@@ -39,8 +57,15 @@ class FeatureCoverageItem(BaseModel):
     feature_type: str
     enabled: bool
     computed_count: int
+    incomplete_count: int = 0
     total_entries: int
     coverage_pct: float
+
+
+class DataIntegrityRequest(BaseModel):
+    start_date: str | None = None
+    end_date: str | None = None
+    max_gap_days: int = 14
 
 
 @router.get("/", response_model=list[FeatureDefinitionResponse])
@@ -56,6 +81,163 @@ def get_coverage(db: Session = Depends(get_db)):
     """Get computation coverage stats for all features."""
     from ml.feature_store import get_feature_coverage
     return get_feature_coverage(db)
+
+
+@router.get("/data-integrity")
+def get_data_integrity(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    max_gap_days: int = 14,
+    db: Session = Depends(get_db),
+):
+    """
+    Check data completeness before materializing features.
+
+    Reports scrape coverage gaps that could cause features to be computed
+    with incomplete dog histories — e.g. if a dog raced at Dublin and
+    Limerick but only Limerick data has been scraped, rolling features
+    like 'mean last 5 race times' would silently be wrong.
+
+    Returns a recommendation of "safe", "warning", or "incomplete".
+    """
+    from datetime import date as date_type
+    from ml.data_integrity import assess_materialization_readiness
+
+    sd = date_type.fromisoformat(start_date) if start_date else None
+    ed = date_type.fromisoformat(end_date) if end_date else None
+
+    return assess_materialization_readiness(db, sd, ed, max_gap_days)
+
+
+@router.post("/data-integrity")
+def post_data_integrity(req: DataIntegrityRequest, db: Session = Depends(get_db)):
+    """POST variant of data-integrity check."""
+    from datetime import date as date_type
+    from ml.data_integrity import assess_materialization_readiness
+
+    sd = date_type.fromisoformat(req.start_date) if req.start_date else None
+    ed = date_type.fromisoformat(req.end_date) if req.end_date else None
+
+    return assess_materialization_readiness(db, sd, ed, req.max_gap_days)
+
+
+@router.get("/versions")
+def list_versions(db: Session = Depends(get_db)):
+    """List all feature versions, newest first."""
+    from sqlalchemy import func as sqlfunc
+    from app.models.feature_version import FeatureVersion
+    from app.models.computed_feature import ComputedFeature
+
+    versions = (
+        db.query(FeatureVersion)
+        .order_by(FeatureVersion.created_at.desc())
+        .all()
+    )
+    result = []
+    for v in versions:
+        count = (
+            db.query(sqlfunc.count(ComputedFeature.id))
+            .filter(ComputedFeature.version_id == v.id)
+            .scalar() or 0
+        )
+        result.append({
+            "id": v.id,
+            "name": v.name,
+            "description": v.description,
+            "created_at": v.created_at,
+            "coverage_snapshot": v.coverage_snapshot,
+            "feature_count": count,
+        })
+    return result
+
+
+@router.post("/versions", status_code=201)
+def create_version(req: CreateVersionRequest, db: Session = Depends(get_db)):
+    """
+    Create a named feature version (snapshot).
+
+    This captures a data-integrity snapshot at creation time so you can
+    see the scrape coverage that was in effect when features were computed.
+    After creating, pass the returned id to POST /features/materialize
+    to compute features into this version.
+    """
+    from app.models.feature_version import FeatureVersion
+    from ml.data_integrity import assess_materialization_readiness
+
+    existing = db.query(FeatureVersion).filter(FeatureVersion.name == req.name).first()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Version '{req.name}' already exists")
+
+    snapshot = assess_materialization_readiness(db)
+
+    version = FeatureVersion(
+        name=req.name,
+        description=req.description,
+        coverage_snapshot=snapshot,
+    )
+    db.add(version)
+    db.commit()
+    db.refresh(version)
+
+    return {
+        "id": version.id,
+        "name": version.name,
+        "description": version.description,
+        "created_at": version.created_at,
+        "coverage_snapshot": version.coverage_snapshot,
+        "feature_count": 0,
+    }
+
+
+@router.get("/versions/{version_id}")
+def get_version(version_id: int, db: Session = Depends(get_db)):
+    """Get details for a specific feature version."""
+    from sqlalchemy import func as sqlfunc
+    from app.models.feature_version import FeatureVersion
+    from app.models.computed_feature import ComputedFeature
+
+    version = db.query(FeatureVersion).filter(FeatureVersion.id == version_id).first()
+    if not version:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    count = (
+        db.query(sqlfunc.count(ComputedFeature.id))
+        .filter(ComputedFeature.version_id == version.id)
+        .scalar() or 0
+    )
+    incomplete = (
+        db.query(sqlfunc.count(ComputedFeature.id))
+        .filter(
+            ComputedFeature.version_id == version.id,
+            ComputedFeature.data_complete.is_(False),
+        )
+        .scalar() or 0
+    )
+
+    return {
+        "id": version.id,
+        "name": version.name,
+        "description": version.description,
+        "created_at": version.created_at,
+        "coverage_snapshot": version.coverage_snapshot,
+        "feature_count": count,
+        "incomplete_count": incomplete,
+    }
+
+
+@router.delete("/versions/{version_id}", status_code=204)
+def delete_version(version_id: int, db: Session = Depends(get_db)):
+    """Delete a feature version and all its computed features."""
+    from app.models.feature_version import FeatureVersion
+    from app.models.computed_feature import ComputedFeature
+
+    version = db.query(FeatureVersion).filter(FeatureVersion.id == version_id).first()
+    if not version:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    db.query(ComputedFeature).filter(ComputedFeature.version_id == version.id).delete()
+    db.delete(version)
+    db.commit()
 
 
 @router.get("/start-materialize")
@@ -160,8 +342,19 @@ def preview_feature(req: FeaturePreviewRequest, db: Session = Depends(get_db)):
 
 @router.post("/materialize", response_model=MaterializeResponse)
 def trigger_materialization(req: MaterializeRequest, db: Session = Depends(get_db)):
-    """Trigger feature materialization in the background."""
-    from ml.feature_store import materialize_feature, materialize_all_features
+    """
+    Trigger feature materialization in the background.
+
+    If version_id is provided, features are saved into that named snapshot.
+    Otherwise they are saved unversioned (upserted in place).
+    """
+    from ml.feature_store import materialize_feature
+
+    if req.version_id is not None:
+        from app.models.feature_version import FeatureVersion
+        version = db.query(FeatureVersion).filter(FeatureVersion.id == req.version_id).first()
+        if not version:
+            raise HTTPException(status_code=404, detail="Version not found")
 
     if req.feature_ids:
         features = db.query(FeatureDefinition).filter(FeatureDefinition.id.in_(req.feature_ids)).all()
@@ -173,21 +366,25 @@ def trigger_materialization(req: MaterializeRequest, db: Session = Depends(get_d
     if not features:
         return MaterializeResponse(message="No enabled features to materialize")
 
+    version_id = req.version_id
+
     def _run():
         db2 = SessionLocal()
         try:
             for f in features:
-                # Re-fetch in new session
                 feat = db2.query(FeatureDefinition).filter(FeatureDefinition.id == f.id).first()
                 if feat:
-                    materialize_feature(db2, feat, force=req.force)
+                    materialize_feature(
+                        db2, feat, force=req.force, version_id=version_id,
+                    )
         finally:
             db2.close()
 
     thread = Thread(target=_run, daemon=True)
     thread.start()
 
+    version_msg = f" into version {version_id}" if version_id else ""
     return MaterializeResponse(
-        message=f"Materialization started for {len(features)} features in background",
+        message=f"Materialization started for {len(features)} features{version_msg} in background",
     )
 

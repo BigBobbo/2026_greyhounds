@@ -3,10 +3,16 @@ Feature store: batch materialization of features into the computed_features tabl
 
 Handles both visual (JSON config) and code (Python) features.
 Supports incremental computation — only computes for entries that don't already have values.
+
+Data completeness:
+Each computed feature is tagged with `data_complete`.  When the dog's race
+history may be incomplete (e.g. some tracks not yet scraped for the feature's
+date window), the flag is set to False so downstream consumers can filter
+these out during training.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -19,8 +25,27 @@ from app.models.race import Race
 from app.models.race_entry import RaceEntry
 from app.services.feature_engine import compute_visual_feature, get_dog_history, get_race_context
 from app.services.feature_sandbox import execute_feature_code
+from ml.data_integrity import check_dog_history_complete
 
 logger = logging.getLogger(__name__)
+
+# Default lookback window (days) used when checking whether a dog's history
+# is complete.  90 days covers most "last N" features comfortably.
+_DEFAULT_COMPLETENESS_WINDOW_DAYS = 90
+
+
+def _feature_window_days(feature_def: FeatureDefinition) -> int:
+    """Estimate the lookback window (in days) a feature needs.
+
+    For "last_n" features we can't know the exact date span, so we use a
+    generous default.  For "days" features we use the configured value.
+    """
+    if feature_def.feature_type == "visual":
+        config = feature_def.config_json or {}
+        window = config.get("window", {})
+        if window.get("type") == "days":
+            return int(window.get("n", _DEFAULT_COMPLETENESS_WINDOW_DAYS))
+    return _DEFAULT_COMPLETENESS_WINDOW_DAYS
 
 
 def materialize_feature(
@@ -28,13 +53,21 @@ def materialize_feature(
     feature_def: FeatureDefinition,
     race_entry_ids: list[int] | None = None,
     force: bool = False,
+    version_id: int | None = None,
 ) -> dict[str, int]:
     """
     Materialize a single feature for specified race entries (or all resulted entries).
 
-    Returns {"computed": N, "skipped": N, "errors": N}
+    Args:
+        version_id: If provided, computed features are stored under this
+            FeatureVersion.  Each version is an independent snapshot — the
+            same (entry, feature) pair can exist once per version.  When
+            None, features are stored unversioned and upserted in place
+            (legacy behaviour).
+
+    Returns {"computed": N, "skipped": N, "errors": N, "incomplete": N}
     """
-    stats = {"computed": 0, "skipped": 0, "errors": 0}
+    stats = {"computed": 0, "skipped": 0, "errors": 0, "incomplete": 0}
 
     # Get entries to compute for
     if race_entry_ids:
@@ -47,11 +80,19 @@ def materialize_feature(
         )
 
     if not force:
-        # Exclude entries that already have this feature computed
+        # Exclude entries that already have this feature computed (for this version)
         already_computed = (
             db.query(ComputedFeature.race_entry_id)
             .filter(ComputedFeature.feature_def_id == feature_def.id)
         )
+        if version_id is not None:
+            already_computed = already_computed.filter(
+                ComputedFeature.version_id == version_id,
+            )
+        else:
+            already_computed = already_computed.filter(
+                ComputedFeature.version_id.is_(None),
+            )
         entries_query = entries_query.filter(~RaceEntry.id.in_(already_computed))
 
     entry_ids = [row[0] for row in entries_query.all()]
@@ -61,9 +102,15 @@ def materialize_feature(
         return stats
 
     logger.info(
-        "Materializing feature '%s' for %d entries",
-        feature_def.name, len(entry_ids),
+        "Materializing feature '%s' for %d entries (version_id=%s)",
+        feature_def.name, len(entry_ids), version_id,
     )
+
+    window_days = _feature_window_days(feature_def)
+
+    # Cache completeness checks per (dog_id, race_date) to avoid redundant
+    # DB queries — many entries share the same dog.
+    completeness_cache: dict[tuple[int, str], bool] = {}
 
     # Process in batches
     batch_size = 100
@@ -97,25 +144,48 @@ def materialize_feature(
                     stats["errors"] += 1
                     continue
 
-            # Upsert computed value
-            existing = (
-                db.query(ComputedFeature)
-                .filter(
-                    ComputedFeature.race_entry_id == entry_id,
-                    ComputedFeature.feature_def_id == feature_def.id,
+            # Check data completeness (cached per dog+date)
+            cache_key = (dog_id, str(race_date))
+            if cache_key not in completeness_cache:
+                completeness_cache[cache_key] = check_dog_history_complete(
+                    db, dog_id, race_date, window_days=window_days,
                 )
-                .first()
-            )
+            data_complete = completeness_cache[cache_key]
 
-            if existing:
-                existing.value = value
-                existing.computed_at = datetime.utcnow()
+            if not data_complete:
+                stats["incomplete"] += 1
+
+            # Upsert for unversioned, insert for versioned
+            if version_id is None:
+                existing = (
+                    db.query(ComputedFeature)
+                    .filter(
+                        ComputedFeature.race_entry_id == entry_id,
+                        ComputedFeature.feature_def_id == feature_def.id,
+                        ComputedFeature.version_id.is_(None),
+                    )
+                    .first()
+                )
+                if existing:
+                    existing.value = value
+                    existing.computed_at = datetime.utcnow()
+                    existing.data_complete = data_complete
+                else:
+                    db.add(ComputedFeature(
+                        race_entry_id=entry_id,
+                        feature_def_id=feature_def.id,
+                        value=value,
+                        computed_at=datetime.utcnow(),
+                        data_complete=data_complete,
+                    ))
             else:
                 db.add(ComputedFeature(
                     race_entry_id=entry_id,
                     feature_def_id=feature_def.id,
                     value=value,
                     computed_at=datetime.utcnow(),
+                    data_complete=data_complete,
+                    version_id=version_id,
                 ))
 
             stats["computed"] += 1
@@ -124,13 +194,22 @@ def materialize_feature(
 
         if (i + batch_size) % 500 == 0:
             logger.info(
-                "Feature '%s': %d/%d entries computed",
-                feature_def.name, min(i + batch_size, len(entry_ids)), len(entry_ids),
+                "Feature '%s': %d/%d entries computed (%d incomplete)",
+                feature_def.name, min(i + batch_size, len(entry_ids)),
+                len(entry_ids), stats["incomplete"],
             )
 
+    if stats["incomplete"]:
+        logger.warning(
+            "Feature '%s': %d/%d entries flagged as INCOMPLETE (dog history "
+            "may be missing races from tracks with scrape gaps)",
+            feature_def.name, stats["incomplete"], stats["computed"],
+        )
+
     logger.info(
-        "Feature '%s' done: %d computed, %d skipped, %d errors",
-        feature_def.name, stats["computed"], stats["skipped"], stats["errors"],
+        "Feature '%s' done: %d computed, %d skipped, %d errors, %d incomplete",
+        feature_def.name, stats["computed"], stats["skipped"],
+        stats["errors"], stats["incomplete"],
     )
     return stats
 
@@ -139,13 +218,16 @@ def materialize_all_features(
     db: Session,
     race_entry_ids: list[int] | None = None,
     force: bool = False,
+    version_id: int | None = None,
 ) -> dict[str, dict[str, int]]:
-    """Materialize all enabled features."""
+    """Materialize all enabled features, optionally into a named version."""
     features = db.query(FeatureDefinition).filter(FeatureDefinition.enabled.is_(True)).all()
     results = {}
 
     for feature_def in features:
-        stats = materialize_feature(db, feature_def, race_entry_ids, force)
+        stats = materialize_feature(
+            db, feature_def, race_entry_ids, force, version_id=version_id,
+        )
         results[feature_def.name] = stats
 
     return results
@@ -155,10 +237,20 @@ def build_feature_matrix(
     db: Session,
     feature_ids: list[int],
     race_entry_ids: list[int] | None = None,
+    only_complete: bool = False,
+    version_id: int | None = None,
 ) -> pd.DataFrame:
     """
     Build a feature matrix (DataFrame) from computed features.
     Memory-efficient: queries directly into pandas via raw SQL.
+
+    Args:
+        only_complete: If True, exclude computed features flagged as
+            data_complete=False.  This drops rows where *any* feature
+            was computed with incomplete dog history.
+        version_id: If provided, only use features from this version
+            snapshot.  If None, uses unversioned (version_id IS NULL)
+            features.
 
     Returns a DataFrame with race_entry_id as index and feature names as columns.
     """
@@ -167,6 +259,15 @@ def build_feature_matrix(
 
     if not feature_map:
         return pd.DataFrame()
+
+    # Build optional SQL filters
+    extra_filters = ""
+    if only_complete:
+        extra_filters += " AND data_complete = 1"
+    if version_id is not None:
+        extra_filters += f" AND version_id = {int(version_id)}"
+    else:
+        extra_filters += " AND version_id IS NULL"
 
     # Use raw SQL with pandas for memory efficiency — avoids building
     # millions of Python objects via SQLAlchemy ORM
@@ -191,6 +292,7 @@ def build_feature_matrix(
                 FROM computed_features
                 WHERE feature_def_id IN ({placeholders_features})
                 AND race_entry_id IN ({placeholders_entries})
+                {extra_filters}
             """
             batch_df = pd.read_sql_query(sql, connection)
             if not batch_df.empty:
@@ -206,6 +308,7 @@ def build_feature_matrix(
             SELECT race_entry_id, feature_def_id, value
             FROM computed_features
             WHERE feature_def_id IN ({placeholders_features})
+            {extra_filters}
         """
         long_df = pd.read_sql_query(sql, connection)
 
@@ -234,6 +337,14 @@ def get_feature_coverage(db: Session) -> list[dict[str, Any]]:
             .filter(ComputedFeature.feature_def_id == f.id)
             .scalar() or 0
         )
+        incomplete = (
+            db.query(func.count(ComputedFeature.id))
+            .filter(
+                ComputedFeature.feature_def_id == f.id,
+                ComputedFeature.data_complete.is_(False),
+            )
+            .scalar() or 0
+        )
         result.append({
             "feature_id": f.id,
             "name": f.name,
@@ -241,6 +352,7 @@ def get_feature_coverage(db: Session) -> list[dict[str, Any]]:
             "feature_type": f.feature_type,
             "enabled": f.enabled,
             "computed_count": computed,
+            "incomplete_count": incomplete,
             "total_entries": total_entries,
             "coverage_pct": round(computed / total_entries * 100, 1) if total_entries > 0 else 0,
         })

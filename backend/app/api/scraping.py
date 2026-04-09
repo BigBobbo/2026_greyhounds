@@ -439,3 +439,134 @@ def data_summary(db: Session = Depends(get_db)):
         "total_dogs": total_dogs,
         "tracks": tracks,
     }
+
+
+@router.get("/verify-coverage")
+def verify_coverage(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    max_gap_days: int = 14,
+    db: Session = Depends(get_db),
+):
+    """
+    Verify that scraping is complete across all active tracks.
+
+    Returns a per-track breakdown showing:
+    - Whether the track has data at all
+    - Date range covered
+    - Any suspicious gaps (>max_gap_days with no races)
+    - An overall verdict: "complete", "gaps_found", or "missing_tracks"
+
+    Use this before materializing features to confirm all track data is present.
+    """
+    from sqlalchemy import func as sqlfunc
+    from ml.data_integrity import find_coverage_gaps, get_track_date_coverage
+
+    # Determine date range
+    if start_date and end_date:
+        sd = date.fromisoformat(start_date)
+        ed = date.fromisoformat(end_date)
+    else:
+        date_range = (
+            db.query(sqlfunc.min(Race.race_date), sqlfunc.max(Race.race_date))
+            .filter(Race.status == "resulted")
+            .first()
+        )
+        if not date_range or not date_range[0]:
+            return {"verdict": "no_data", "message": "No resulted races in database"}
+        sd, ed = date_range
+
+    active_tracks = (
+        db.query(Track.code, Track.name, Track.id)
+        .filter(Track.active.is_(True))
+        .order_by(Track.name)
+        .all()
+    )
+    coverage = get_track_date_coverage(db, sd, ed)
+    gaps = find_coverage_gaps(db, sd, ed, max_gap_days)
+
+    # Build gap lookup by track code
+    gaps_by_track: dict[str, list] = {}
+    for g in gaps:
+        gaps_by_track.setdefault(g["track_code"], []).append({
+            "from": str(g["gap_start"]),
+            "to": str(g["gap_end"]),
+            "days": g["gap_days"],
+        })
+
+    # Per-track report
+    track_reports = []
+    missing_tracks = []
+    tracks_with_gaps = []
+
+    for code, name, tid in active_tracks:
+        dates = coverage.get(code, [])
+        race_count = (
+            db.query(sqlfunc.count(Race.id))
+            .filter(Race.track_id == tid, Race.status == "resulted",
+                    Race.race_date >= sd, Race.race_date <= ed)
+            .scalar() or 0
+        )
+
+        if not dates:
+            missing_tracks.append(code)
+            track_reports.append({
+                "code": code,
+                "name": name,
+                "status": "no_data",
+                "race_count": 0,
+                "earliest": None,
+                "latest": None,
+                "gaps": [],
+            })
+        else:
+            track_gaps = gaps_by_track.get(code, [])
+            status = "gaps" if track_gaps else "ok"
+            if track_gaps:
+                tracks_with_gaps.append(code)
+            track_reports.append({
+                "code": code,
+                "name": name,
+                "status": status,
+                "race_count": race_count,
+                "earliest": str(dates[0]),
+                "latest": str(dates[-1]),
+                "gaps": track_gaps,
+            })
+
+    # Overall verdict
+    if missing_tracks:
+        verdict = "missing_tracks"
+        message = (
+            f"{len(missing_tracks)} track(s) have NO data in "
+            f"{sd} to {ed}: {', '.join(missing_tracks)}. "
+            "Run a backfill for these tracks before materializing features."
+        )
+    elif tracks_with_gaps:
+        verdict = "gaps_found"
+        total_gaps = sum(len(g) for g in gaps_by_track.values())
+        message = (
+            f"{total_gaps} gap(s) found across {len(tracks_with_gaps)} track(s). "
+            "Some dogs' histories may be incomplete. Consider backfilling "
+            f"these tracks: {', '.join(tracks_with_gaps)}"
+        )
+    else:
+        verdict = "complete"
+        message = (
+            f"All {len(active_tracks)} active tracks have continuous coverage "
+            f"from {sd} to {ed} (no gaps > {max_gap_days} days)."
+        )
+
+    return {
+        "verdict": verdict,
+        "message": message,
+        "date_range": {"start": str(sd), "end": str(ed)},
+        "max_gap_days": max_gap_days,
+        "summary": {
+            "total_tracks": len(active_tracks),
+            "tracks_ok": len(active_tracks) - len(missing_tracks) - len(tracks_with_gaps),
+            "tracks_with_gaps": len(tracks_with_gaps),
+            "tracks_missing": len(missing_tracks),
+        },
+        "tracks": track_reports,
+    }

@@ -185,14 +185,43 @@ def compute_betting_metrics(
     top_pick_races = len(top_pick_df)
     top_pick_winners = int(top_pick_df["won"].sum()) if len(top_pick_df) > 0 else 0
 
-    # --- Strategy 2: Value betting (model prob > implied prob) ---
-    df["is_value"] = df["prob"] > df["implied_prob"]
+    # --- Strategy 2: Value betting (model prob > implied prob * 1.05 = 5% min edge) ---
+    min_edge = 0.05
+    df["edge"] = df["prob"] - df["implied_prob"]
+    df["is_value"] = df["edge"] > min_edge
     value_bets = df[df["is_value"]]
     value_profit = value_bets.apply(
         lambda r: (r["sp"] - 1) if r["won"] else -1.0, axis=1
     )
     value_pnl = float(value_profit.sum()) if len(value_profit) > 0 else 0
     value_winners = int(value_bets["won"].sum())
+
+    # --- Strategy 3: Kelly criterion staking (fractional Kelly) ---
+    kelly_fraction = 0.25  # Quarter Kelly for safety
+    bankroll = 100.0
+    kelly_results = []
+    for race_id, group in df.groupby("race_id"):
+        if len(group) == 0:
+            continue
+        top = group.loc[group["prob"].idxmax()]
+        b = top["sp"] - 1
+        if b <= 0:
+            continue
+        f_star = (b * top["prob"] - (1 - top["prob"])) / b
+        if f_star <= 0:
+            continue  # No edge, skip
+        stake_pct = min(f_star * kelly_fraction, 0.05)  # Cap at 5% of bankroll
+        stake = bankroll * stake_pct
+        profit = stake * (top["sp"] - 1) if top["won"] else -stake
+        kelly_results.append({
+            "race_id": int(race_id),
+            "won": bool(top["won"]),
+            "stake": round(float(stake), 2),
+            "profit": round(float(profit), 2),
+        })
+
+    kelly_total_staked = sum(r["stake"] for r in kelly_results) if kelly_results else 0
+    kelly_pnl = sum(r["profit"] for r in kelly_results) if kelly_results else 0
 
     # --- Baseline: Bet $1 on SP favourite per race ---
     fav_results = []
@@ -212,6 +241,13 @@ def compute_betting_metrics(
         running += r["profit"]
         cumulative.append({"race": len(cumulative) + 1, "pnl": round(running, 2)})
 
+    # Kelly cumulative P&L for charting
+    kelly_cumulative = []
+    kelly_running = 0.0
+    for r in kelly_results:
+        kelly_running += r["profit"]
+        kelly_cumulative.append({"race": len(kelly_cumulative) + 1, "pnl": round(kelly_running, 2)})
+
     return {
         "top_pick_pnl": round(top_pick_pnl, 2),
         "top_pick_roi": round(top_pick_pnl / max(top_pick_races, 1) * 100, 2),
@@ -222,6 +258,11 @@ def compute_betting_metrics(
         "value_bet_roi": round(value_pnl / max(len(value_bets), 1) * 100, 2),
         "value_bet_count": len(value_bets),
         "value_bet_winners": value_winners,
+        "kelly_pnl": round(kelly_pnl, 2),
+        "kelly_roi": round(kelly_pnl / max(kelly_total_staked, 1) * 100, 2),
+        "kelly_races": len(kelly_results),
+        "kelly_total_staked": round(kelly_total_staked, 2),
+        "kelly_pnl_by_race": kelly_cumulative,
         "favourite_pnl": round(fav_pnl, 2),
         "favourite_roi": round(fav_pnl / max(len(fav_results), 1) * 100, 2),
         "pnl_by_race": cumulative,

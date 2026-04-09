@@ -1,14 +1,17 @@
 """
 Prediction service: generate predictions for races using a trained model.
 
-1. Load a trained model from an experiment
+1. Load a trained model (with preprocessing artifacts) from an experiment
 2. Compute features for the target race entries
 3. Generate predictions (win probability, position, time)
-4. Normalize win probabilities within each race to sum to ~1.0
-5. Save predictions to DB
+4. Compute confidence metrics (entropy, margin, edge)
+5. Normalize win probabilities within each race via softmax
+6. Compute bankroll-aware staking recommendations (Kelly criterion)
+7. Save predictions to DB
 """
 
 import logging
+import math
 import os
 from datetime import date, datetime
 from typing import Any
@@ -32,11 +35,26 @@ from app.models.feature_definition import FeatureDefinition
 logger = logging.getLogger(__name__)
 
 
-def load_trained_model(experiment: Experiment):
-    """Load a trained model from disk."""
+def load_trained_model(experiment: Experiment) -> dict[str, Any]:
+    """Load a trained model artifact from disk.
+
+    Returns a dict with keys: trainer, feature_medians, is_ranking.
+    Backwards-compatible with old models saved as raw trainer objects.
+    """
     if not experiment.model_path or not os.path.exists(experiment.model_path):
         raise FileNotFoundError(f"Model file not found: {experiment.model_path}")
-    return joblib.load(experiment.model_path)
+
+    artifact = joblib.load(experiment.model_path)
+
+    # Backwards compatibility: old models were saved as the trainer directly
+    if not isinstance(artifact, dict):
+        return {
+            "trainer": artifact,
+            "feature_medians": {},
+            "is_ranking": False,
+        }
+
+    return artifact
 
 
 def compute_features_for_entries(
@@ -86,25 +104,146 @@ def _get_train_cutoff(experiment: Experiment) -> date | None:
     return None
 
 
+def _softmax(scores: np.ndarray) -> np.ndarray:
+    """Numerically stable softmax."""
+    shifted = scores - np.max(scores)
+    exp_scores = np.exp(shifted)
+    return exp_scores / exp_scores.sum()
+
+
+def _compute_confidence(probs: np.ndarray) -> dict[str, float]:
+    """Compute confidence metrics for a race's probability distribution.
+
+    Returns:
+        entropy: Normalized entropy (0 = totally confident, 1 = uniform/no opinion)
+        margin: Probability gap between 1st and 2nd pick
+        confidence_score: Combined score (0 to 1, higher = more confident)
+        confidence_tier: "strong", "moderate", "weak", or "avoid"
+    """
+    n = len(probs)
+    if n <= 1:
+        return {
+            "entropy": 0.0,
+            "margin": 1.0,
+            "confidence_score": 1.0,
+            "confidence_tier": "strong",
+        }
+
+    # Normalized entropy: 0 = one dog certain, 1 = uniform distribution
+    entropy = 0.0
+    for p in probs:
+        if p > 0:
+            entropy -= p * math.log(p)
+    max_entropy = math.log(n)
+    normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0.0
+
+    # Margin between top two picks
+    sorted_probs = sorted(probs, reverse=True)
+    margin = sorted_probs[0] - sorted_probs[1]
+
+    # Combined confidence score: weight margin and inverse entropy
+    # Margin is more important for betting decisions
+    confidence_score = 0.6 * (margin * n) + 0.4 * (1 - normalized_entropy)
+    confidence_score = max(0.0, min(1.0, confidence_score))
+
+    # Tier assignment
+    if confidence_score >= 0.65 and margin >= 0.08:
+        tier = "strong"
+    elif confidence_score >= 0.40 and margin >= 0.04:
+        tier = "moderate"
+    elif confidence_score >= 0.20:
+        tier = "weak"
+    else:
+        tier = "avoid"
+
+    return {
+        "entropy": round(normalized_entropy, 4),
+        "margin": round(margin, 4),
+        "confidence_score": round(confidence_score, 4),
+        "confidence_tier": tier,
+    }
+
+
+def _compute_kelly_stake(
+    win_prob: float,
+    odds_decimal: float | None,
+    bankroll: float = 100.0,
+    kelly_fraction: float = 0.25,
+    min_edge: float = 0.05,
+) -> dict[str, Any]:
+    """Compute Kelly criterion stake for a bet.
+
+    Args:
+        win_prob: Model's estimated win probability
+        odds_decimal: Decimal odds (e.g. 3.5 means +250)
+        bankroll: Current bankroll
+        kelly_fraction: Fraction of full Kelly to use (0.25 = quarter Kelly, safer)
+        min_edge: Minimum edge required to place a bet (default 5%)
+
+    Returns dict with stake info or None if no bet recommended.
+    """
+    if odds_decimal is None or odds_decimal <= 1.0:
+        return {"bet": False, "reason": "no_odds"}
+
+    implied_prob = 1.0 / odds_decimal
+    edge = win_prob - implied_prob
+
+    if edge < min_edge:
+        return {
+            "bet": False,
+            "reason": "insufficient_edge",
+            "edge": round(edge, 4),
+            "implied_prob": round(implied_prob, 4),
+        }
+
+    # Kelly formula: f* = (bp - q) / b
+    # where b = odds - 1, p = win_prob, q = 1 - win_prob
+    b = odds_decimal - 1
+    f_star = (b * win_prob - (1 - win_prob)) / b
+
+    # Cap at kelly_fraction of full Kelly for safety
+    fractional_kelly = max(0, f_star * kelly_fraction)
+
+    # Also cap at 5% of bankroll as absolute max
+    max_stake_pct = 0.05
+    stake_pct = min(fractional_kelly, max_stake_pct)
+    stake = round(bankroll * stake_pct, 2)
+
+    return {
+        "bet": True,
+        "stake": stake,
+        "stake_pct": round(stake_pct * 100, 2),
+        "full_kelly_pct": round(f_star * 100, 2),
+        "edge": round(edge, 4),
+        "implied_prob": round(implied_prob, 4),
+        "expected_value": round(win_prob * (odds_decimal - 1) - (1 - win_prob), 4),
+    }
+
+
 def predict_race(
     db: Session,
     experiment_id: int,
     race_id: int,
+    bankroll: float = 100.0,
 ) -> list[dict[str, Any]]:
     """
     Generate predictions for all entries in a race.
 
-    Returns list of prediction dicts with dog info.
+    Returns list of prediction dicts with dog info, confidence metrics,
+    and Kelly staking recommendations.
     Raises ValueError if the race falls within the training data period.
     """
     experiment = db.query(Experiment).filter(Experiment.id == experiment_id).first()
     if not experiment or experiment.status != "completed":
         raise ValueError(f"Experiment {experiment_id} not found or not completed")
 
-    # Load model
-    trainer = load_trained_model(experiment)
+    # Load model artifact (trainer + preprocessing info)
+    artifact = load_trained_model(experiment)
+    trainer = artifact["trainer"]
+    feature_medians = artifact.get("feature_medians", {})
+    is_ranking = artifact.get("is_ranking", False)
 
-    # Get race entries
+    # Get race entries with SP odds
     entries = (
         db.query(RaceEntry, Dog.name.label("dog_name"), Race.race_date)
         .join(Dog, RaceEntry.dog_id == Dog.id)
@@ -146,8 +285,11 @@ def predict_race(
     if X.empty:
         return []
 
-    # Fill NaN with 0 (same as training)
-    X = X.fillna(X.median() if len(X) > 1 else 0)
+    # Fill NaN using training set medians (consistent with training)
+    if feature_medians:
+        X = X.fillna(feature_medians)
+    # Any remaining NaN (new features, etc.) fill with 0
+    X = X.fillna(0)
 
     # Ensure columns match training
     feature_names = [f.name for f in feature_defs]
@@ -157,20 +299,27 @@ def predict_race(
     X = X[feature_names]
 
     # Generate predictions
-    predictions = []
-    raw_proba = trainer.predict_proba(X) if hasattr(trainer, "predict_proba") else None
-    raw_pred = trainer.predict(X)
+    raw_scores = trainer.predict(X)
 
-    # Normalize win probabilities to sum to 1.0 within the race
-    if raw_proba is not None:
-        proba_sum = raw_proba.sum()
-        if proba_sum > 0:
-            normalized_proba = raw_proba / proba_sum
+    # Compute probabilities
+    if is_ranking:
+        # LambdaRank: softmax over raw ranking scores
+        win_probs = _softmax(raw_scores)
+    elif hasattr(trainer, "predict_proba"):
+        raw_proba = trainer.predict_proba(X)
+        if raw_proba is not None:
+            # Softmax normalization (better than naive division)
+            win_probs = _softmax(np.log(np.clip(raw_proba, 1e-10, 1.0)))
         else:
-            normalized_proba = raw_proba
+            win_probs = None
     else:
-        normalized_proba = None
+        win_probs = None
 
+    # Compute race-level confidence metrics
+    race_confidence = _compute_confidence(win_probs) if win_probs is not None else None
+
+    # Build prediction list
+    predictions = []
     for i, (entry_row, entry_id) in enumerate(zip(entries, entry_ids)):
         entry = entry_row.RaceEntry
         dog_name = entry_row.dog_name
@@ -182,23 +331,52 @@ def predict_race(
             "experiment_id": experiment_id,
         }
 
-        if experiment.target == "win_prob":
-            pred_data["win_probability"] = float(normalized_proba[i]) if normalized_proba is not None else None
+        if is_ranking or experiment.target == "win_prob":
+            win_prob = float(win_probs[i]) if win_probs is not None else None
+            pred_data["win_probability"] = win_prob
             pred_data["predicted_position"] = None
             pred_data["predicted_time"] = None
+
+            # Confidence score for this dog (race-level confidence * individual probability)
+            if race_confidence and win_prob is not None:
+                pred_data["confidence"] = round(race_confidence["confidence_score"], 4)
+                pred_data["confidence_tier"] = race_confidence["confidence_tier"]
+                pred_data["margin"] = race_confidence["margin"]
+                pred_data["entropy"] = race_confidence["entropy"]
+
+            # Kelly staking recommendation
+            if win_prob is not None:
+                kelly = _compute_kelly_stake(
+                    win_prob, entry.sp_decimal, bankroll=bankroll,
+                )
+                pred_data["kelly"] = kelly
+            else:
+                pred_data["kelly"] = {"bet": False, "reason": "no_probability"}
+
+            # Edge vs market
+            if win_prob is not None and entry.sp_decimal and entry.sp_decimal > 1:
+                implied = 1.0 / entry.sp_decimal
+                pred_data["edge"] = round(win_prob - implied, 4)
+                pred_data["is_value"] = win_prob > implied * 1.05  # 5% min edge
+            else:
+                pred_data["edge"] = None
+                pred_data["is_value"] = None
+
         elif experiment.target == "finish_position":
             pred_data["win_probability"] = None
-            pred_data["predicted_position"] = float(raw_pred[i])
+            pred_data["predicted_position"] = float(raw_scores[i])
             pred_data["predicted_time"] = None
+            pred_data["confidence"] = None
         elif experiment.target == "finish_time":
             pred_data["win_probability"] = None
             pred_data["predicted_position"] = None
-            pred_data["predicted_time"] = float(raw_pred[i])
+            pred_data["predicted_time"] = float(raw_scores[i])
+            pred_data["confidence"] = None
 
         predictions.append(pred_data)
 
     # Sort by win probability (highest first) or predicted position/time
-    if experiment.target == "win_prob":
+    if is_ranking or experiment.target == "win_prob":
         predictions.sort(key=lambda p: p.get("win_probability") or 0, reverse=True)
     elif experiment.target == "finish_position":
         predictions.sort(key=lambda p: p.get("predicted_position") or 999)
@@ -225,6 +403,7 @@ def save_predictions(db: Session, predictions: list[dict[str, Any]]) -> int:
             existing.win_probability = pred.get("win_probability")
             existing.predicted_position = pred.get("predicted_position")
             existing.predicted_time = pred.get("predicted_time")
+            existing.confidence = pred.get("confidence")
             existing.created_at = datetime.utcnow()
         else:
             db.add(Prediction(
@@ -233,6 +412,7 @@ def save_predictions(db: Session, predictions: list[dict[str, Any]]) -> int:
                 win_probability=pred.get("win_probability"),
                 predicted_position=pred.get("predicted_position"),
                 predicted_time=pred.get("predicted_time"),
+                confidence=pred.get("confidence"),
             ))
         saved += 1
 
@@ -243,6 +423,7 @@ def save_predictions(db: Session, predictions: list[dict[str, Any]]) -> int:
 def predict_upcoming_races(
     db: Session,
     experiment_id: int,
+    bankroll: float = 100.0,
 ) -> list[dict[str, Any]]:
     """
     Generate predictions for all scheduled (upcoming) races.
@@ -265,7 +446,7 @@ def predict_upcoming_races(
     for race_row in scheduled_races:
         race = race_row.Race
         try:
-            preds = predict_race(db, experiment_id, race.id)
+            preds = predict_race(db, experiment_id, race.id, bankroll=bankroll)
             if preds:
                 save_predictions(db, preds)
                 results.append({

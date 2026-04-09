@@ -4,6 +4,7 @@ import api from '../api/client';
 import type { Experiment, FeatureDefinition } from '../types/models';
 
 const ALGORITHMS = [
+  { value: 'lambdarank', label: 'LambdaRank (Recommended)' },
   { value: 'xgboost', label: 'XGBoost' },
   { value: 'lightgbm', label: 'LightGBM' },
   { value: 'random_forest', label: 'Random Forest' },
@@ -25,7 +26,7 @@ export default function TrainingLab() {
 
   // Form state
   const [name, setName] = useState('');
-  const [algorithm, setAlgorithm] = useState('xgboost');
+  const [algorithm, setAlgorithm] = useState('lambdarank');
   const [target, setTarget] = useState('win_prob');
   const [selectedFeatures, setSelectedFeatures] = useState<number[]>([]);
   const [autoTune, setAutoTune] = useState(false);
@@ -250,11 +251,20 @@ export default function TrainingLab() {
           </div>
 
           {/* Summary */}
+          {algorithm === 'lambdarank' && (
+            <div className="bg-purple-50 border border-purple-200 rounded-md p-3 mb-4 text-sm text-purple-800">
+              <strong>LambdaRank</strong> is a learning-to-rank model that sees all dogs in a race simultaneously,
+              rather than predicting each dog independently. It learns which dog is most likely to win by comparing
+              the entire field. This produces better-calibrated probabilities and more reliable confidence scores.
+              The target is always <strong>finish_position</strong> (used internally as relevance labels).
+            </div>
+          )}
+
           <div className="bg-blue-50 border border-blue-200 rounded-md p-3 mb-4 text-sm text-blue-800">
-            <strong>Training plan:</strong> Train {algorithm.toUpperCase()} to predict <strong>{target}</strong> using {selectedFeatures.length} features.
+            <strong>Training plan:</strong> Train {algorithm === 'lambdarank' ? 'LambdaRank (LightGBM Ranker)' : algorithm.toUpperCase()} to predict <strong>{algorithm === 'lambdarank' ? 'race ranking (win probability derived via softmax)' : target}</strong> using {selectedFeatures.length} features.
             Train on all data before <strong>{testAfter}</strong>, test on data after.
             {autoTune && ` Auto-tune with ${optunTrials} Optuna trials.`}
-            {' '}Betting P&L will be evaluated by simulating $1 bets on the test set.
+            {' '}Betting P&L will be evaluated by simulating $1 flat bets + Kelly criterion on the test set.
           </div>
 
           <button

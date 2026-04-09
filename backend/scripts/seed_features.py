@@ -209,6 +209,121 @@ PRESET_FEATURES = [
 """,
         "input_columns": ["finish_position", "track_id", "distance_m"],
     },
+    # === Trap bias features ===
+    {
+        "name": "trap_win_rate_at_track",
+        "display_name": "Trap Win Rate at Track",
+        "description": "Historical win rate for this trap number at this specific track",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    same_trap = dog_history[
+        (dog_history['trap'] == race_context['trap']) &
+        (dog_history['track_id'] == race_context['track_id'])
+    ]
+    positions = same_trap['finish_position'].dropna()
+    if len(positions) < 2:
+        return None
+    return float((positions == 1).sum() / len(positions))
+""",
+        "input_columns": ["finish_position", "trap", "track_id"],
+    },
+    {
+        "name": "trap_place_rate_at_track",
+        "display_name": "Trap Place Rate at Track",
+        "description": "Historical top-3 rate for this trap at this track",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    same_trap = dog_history[
+        (dog_history['trap'] == race_context['trap']) &
+        (dog_history['track_id'] == race_context['track_id'])
+    ]
+    positions = same_trap['finish_position'].dropna()
+    if len(positions) < 2:
+        return None
+    return float((positions <= 3).sum() / len(positions))
+""",
+        "input_columns": ["finish_position", "trap", "track_id"],
+    },
+    # === Race frequency / workload ===
+    {
+        "name": "races_in_last_30_days",
+        "display_name": "Races in Last 30 Days",
+        "description": "Number of races in the past 30 days — workload indicator",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    if len(dog_history) == 0:
+        return 0.0
+    from datetime import timedelta
+    cutoff = race_context['race_date'] - timedelta(days=30)
+    recent = dog_history[dog_history['race_date'] >= cutoff]
+    return float(len(recent))
+""",
+        "input_columns": ["race_date"],
+    },
+    # === Grade movement ===
+    {
+        "name": "grade_change",
+        "display_name": "Grade Change",
+        "description": "Whether the dog is moving up or down in class. Positive = dropping (easier), negative = stepping up (harder).",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    if len(dog_history) == 0:
+        return None
+    # Extract numeric grade level (e.g. A1=1, A2=2, ..., A10=10)
+    import re
+    current_grade = race_context.get('grade', '')
+    last_grade = dog_history['grade'].iloc[-1] if 'grade' in dog_history.columns else ''
+    def grade_to_num(g):
+        if not g:
+            return None
+        m = re.search(r'(\\d+)', str(g))
+        return int(m.group(1)) if m else None
+    curr = grade_to_num(current_grade)
+    prev = grade_to_num(last_grade)
+    if curr is None or prev is None:
+        return None
+    return float(curr - prev)
+""",
+        "input_columns": ["grade"],
+    },
+    # === Going preference ===
+    {
+        "name": "going_win_rate",
+        "display_name": "Going Win Rate",
+        "description": "Win rate on the same going/ground conditions",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    if len(dog_history) == 0 or 'going' not in dog_history.columns:
+        return None
+    current_going = race_context.get('going', None) if hasattr(race_context, 'get') else None
+    if not current_going:
+        return None
+    same_going = dog_history[dog_history['going'] == current_going]
+    positions = same_going['finish_position'].dropna()
+    if len(positions) < 2:
+        return None
+    return float((positions == 1).sum() / len(positions))
+""",
+        "input_columns": ["going", "finish_position"],
+    },
+    # === Consistency / reliability ===
+    {
+        "name": "finish_position_stdev_last5",
+        "display_name": "Position Consistency (last 5)",
+        "description": "Standard deviation of finish positions — lower means more predictable",
+        "feature_type": "visual",
+        "config_json": {"metric": "finish_position", "aggregation": "stdev", "window": {"type": "last_n", "n": 5}, "filters": {}},
+        "input_columns": ["finish_position"],
+    },
+    # === Race count at this distance ===
+    {
+        "name": "runs_at_distance",
+        "display_name": "Runs at Distance",
+        "description": "Number of career races at this distance",
+        "feature_type": "visual",
+        "config_json": {"metric": "finish_position", "aggregation": "count", "window": {"type": "all"}, "filters": {"same_distance": True}},
+        "input_columns": ["finish_position"],
+    },
 ]
 
 

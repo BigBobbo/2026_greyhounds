@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any
 
 import joblib
+import numpy as np
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -34,7 +35,10 @@ def create_trainer(algorithm: str, params: dict[str, Any], target: str):
     """Factory function to create the appropriate trainer."""
     target_type = "regression" if target == "finish_time" else "classification"
 
-    if algorithm == "xgboost":
+    if algorithm == "lambdarank":
+        from ml.trainers.lambdarank_trainer import LambdaRankTrainer
+        return LambdaRankTrainer(params, target_type)
+    elif algorithm == "xgboost":
         from ml.trainers.xgboost_trainer import XGBoostTrainer
         return XGBoostTrainer(params, target_type)
     elif algorithm == "lightgbm":
@@ -63,10 +67,12 @@ def run_training(db: Session, experiment_id: int) -> None:
         # 1. Build dataset
         logger.info("Building dataset for experiment %d", experiment_id)
         split_cfg = experiment.split_config or {}
+        # LambdaRank always uses finish_position internally
+        build_target = "finish_position" if experiment.algorithm == "lambdarank" else experiment.target
         dataset = build_dataset(
             db,
             feature_ids=experiment.feature_set,
-            target=experiment.target,
+            target=build_target,
             split_config=split_cfg,
             only_complete=split_cfg.get("only_complete", False),
             version_id=split_cfg.get("version_id"),
@@ -99,9 +105,18 @@ def run_training(db: Session, experiment_id: int) -> None:
             experiment.target,
         )
 
+        is_ranking = experiment.algorithm == "lambdarank"
+        group_train = dataset.get("group_train")
+        group_val = dataset.get("group_val")
+        group_test = dataset.get("group_test")
+
         # 3. Train
         logger.info("Training %s model...", experiment.algorithm)
-        result = trainer.train(X_train, y_train, X_val, y_val)
+        if is_ranking:
+            result = trainer.train(X_train, y_train, X_val, y_val,
+                                   group_train=group_train, group_val=group_val)
+        else:
+            result = trainer.train(X_train, y_train, X_val, y_val)
 
         # 4. Evaluate on test set
         logger.info("Evaluating on test set...")
@@ -109,8 +124,27 @@ def run_training(db: Session, experiment_id: int) -> None:
         target_type = "regression" if experiment.target == "finish_time" else "classification"
 
         test_pred = trainer.predict(X_test)
-        test_proba = trainer.predict_proba(X_test)
-        test_metrics = compute_metrics(y_test, test_pred, test_proba, target_type)
+
+        if is_ranking:
+            # For ranking models, convert scores to probabilities via softmax
+            test_proba = trainer.scores_to_proba(test_pred, group_test)
+            # Compute ranking-specific metrics
+            test_metrics = trainer._compute_ranking_metrics(y_test, test_pred, group_test)
+            # Also compute classification metrics using win labels
+            y_test_binary = (y_test == 1).astype(float)
+            test_pred_binary = np.zeros_like(y_test_binary)
+            # Mark top pick per race as predicted winner
+            idx = 0
+            for g_size in (group_test or [len(test_pred)]):
+                g_scores = test_pred[idx:idx + g_size]
+                winner_idx = np.argmax(g_scores)
+                test_pred_binary[idx + winner_idx] = 1
+                idx += g_size
+            cls_metrics = compute_metrics(y_test_binary, test_pred_binary, test_proba, "classification")
+            test_metrics.update(cls_metrics)
+        else:
+            test_proba = trainer.predict_proba(X_test)
+            test_metrics = compute_metrics(y_test, test_pred, test_proba, target_type)
 
         # Merge val and test metrics
         all_metrics = {f"val_{k}": v for k, v in result.metrics.items()}
@@ -119,10 +153,16 @@ def run_training(db: Session, experiment_id: int) -> None:
         # 4b. Betting P&L evaluation
         meta_test = dataset.get("meta_test")
         betting_data = None
-        if target_type == "classification" and test_proba is not None and meta_test is not None:
+        can_eval_betting = (
+            (target_type == "classification" or is_ranking)
+            and test_proba is not None
+            and meta_test is not None
+        )
+        if can_eval_betting:
             try:
+                y_binary = (y_test == 1).astype(float).values if is_ranking else y_test.values
                 betting = compute_betting_metrics(
-                    y_test.values,
+                    y_binary,
                     test_proba,
                     meta_test["sp_decimal"].values,
                     meta_test["race_id"].values,
@@ -136,10 +176,12 @@ def run_training(db: Session, experiment_id: int) -> None:
                 all_metrics["betting_value_roi"] = betting["value_bet_roi"]
                 all_metrics["betting_favourite_pnl"] = betting["favourite_pnl"]
                 all_metrics["betting_favourite_roi"] = betting["favourite_roi"]
+                all_metrics["betting_kelly_pnl"] = betting.get("kelly_pnl", 0)
+                all_metrics["betting_kelly_roi"] = betting.get("kelly_roi", 0)
                 logger.info(
-                    "Betting metrics: top_pick_pnl=$%.2f (ROI %.1f%%), value_pnl=$%.2f, fav_pnl=$%.2f",
+                    "Betting metrics: top_pick_pnl=$%.2f (ROI %.1f%%), value_pnl=$%.2f, kelly_pnl=$%.2f",
                     betting["top_pick_pnl"], betting["top_pick_roi"],
-                    betting["value_bet_pnl"], betting["favourite_pnl"],
+                    betting["value_bet_pnl"], betting.get("kelly_pnl", 0),
                 )
             except Exception as e:
                 logger.warning("Betting metrics failed: %s", e)
@@ -150,12 +192,17 @@ def run_training(db: Session, experiment_id: int) -> None:
         calibration = None
         shap_data = None
 
-        if target_type == "classification":
-            confusion = compute_confusion_matrix(y_test.values, test_pred)
+        if target_type == "classification" or is_ranking:
+            if is_ranking:
+                y_binary = (y_test == 1).astype(float).values
+                confusion = compute_confusion_matrix(y_binary, test_pred_binary)
+            else:
+                y_binary = y_test.values
+                confusion = compute_confusion_matrix(y_binary, test_pred)
 
             if test_proba is not None:
-                roc_data = compute_roc_data(y_test.values, test_proba)
-                calibration = compute_calibration_data(y_test.values, test_proba)
+                roc_data = compute_roc_data(y_binary, test_proba)
+                calibration = compute_calibration_data(y_binary, test_proba)
 
         # SHAP (skip if too slow — limit samples)
         try:
@@ -165,11 +212,17 @@ def run_training(db: Session, experiment_id: int) -> None:
         except Exception as e:
             logger.warning("SHAP failed: %s", e)
 
-        # 6. Save model
+        # 6. Save model + preprocessing artifacts
         model_dir = settings.model_artifacts_dir
         os.makedirs(model_dir, exist_ok=True)
         model_path = os.path.join(model_dir, f"experiment_{experiment_id}.joblib")
-        joblib.dump(trainer, model_path)
+        # Save the trainer along with feature medians for consistent imputation
+        artifact = {
+            "trainer": trainer,
+            "feature_medians": dataset.get("feature_medians", {}),
+            "is_ranking": is_ranking,
+        }
+        joblib.dump(artifact, model_path)
 
         # 7. Update experiment record
         duration = time.time() - start_time
@@ -221,10 +274,11 @@ def run_optuna_optimization(
 
     try:
         split_cfg = experiment.split_config or {}
+        build_target = "finish_position" if experiment.algorithm == "lambdarank" else experiment.target
         dataset = build_dataset(
             db,
             feature_ids=experiment.feature_set,
-            target=experiment.target,
+            target=build_target,
             split_config=split_cfg,
             only_complete=split_cfg.get("only_complete", False),
             version_id=split_cfg.get("version_id"),
@@ -243,14 +297,23 @@ def run_optuna_optimization(
         experiment.split_config = split_config
         db.commit()
 
+        is_ranking = experiment.algorithm == "lambdarank"
+        group_train = dataset.get("group_train")
+        group_val = dataset.get("group_val")
+
         def objective(trial):
             params = _suggest_params(trial, experiment.algorithm)
             trainer = create_trainer(experiment.algorithm, params, experiment.target)
-            result = trainer.train(X_train, y_train, X_val, y_val)
-
-            if target_type == "classification":
+            if is_ranking:
+                result = trainer.train(X_train, y_train, X_val, y_val,
+                                       group_train=group_train, group_val=group_val)
+                # Optimize for top-1 accuracy (maximize), return negative
+                return -(result.metrics.get("top1_accuracy", 0))
+            elif target_type == "classification":
+                result = trainer.train(X_train, y_train, X_val, y_val)
                 return result.metrics.get("log_loss", 999)
             else:
+                result = trainer.train(X_train, y_train, X_val, y_val)
                 return result.metrics.get("rmse", 999)
 
         study = optuna.create_study(direction="minimize")
@@ -261,25 +324,43 @@ def run_optuna_optimization(
         experiment.hyperparameters = best_params
 
         trainer = create_trainer(experiment.algorithm, best_params, experiment.target)
-        result = trainer.train(X_train, y_train, X_val, y_val)
+        if is_ranking:
+            result = trainer.train(X_train, y_train, X_val, y_val,
+                                   group_train=group_train, group_val=group_val)
+        else:
+            result = trainer.train(X_train, y_train, X_val, y_val)
 
         # Evaluate on test
         X_test, y_test = dataset["X_test"], dataset["y_test"]
+        group_test = dataset.get("group_test")
         from ml.evaluation import compute_metrics
         test_pred = trainer.predict(X_test)
-        test_proba = trainer.predict_proba(X_test)
-        test_metrics = compute_metrics(y_test, test_pred, test_proba, target_type)
+
+        if is_ranking:
+            test_proba = trainer.scores_to_proba(test_pred, group_test)
+            test_metrics = trainer._compute_ranking_metrics(y_test, test_pred, group_test)
+            y_binary = (y_test == 1).astype(float)
+            cls_metrics = compute_metrics(y_binary, (test_proba > 0.5).astype(float), test_proba, "classification")
+            test_metrics.update(cls_metrics)
+        else:
+            test_proba = trainer.predict_proba(X_test)
+            test_metrics = compute_metrics(y_test, test_pred, test_proba, target_type)
 
         all_metrics = {f"val_{k}": v for k, v in result.metrics.items()}
         all_metrics.update({f"test_{k}": v for k, v in test_metrics.items()})
         all_metrics["optuna_best_value"] = float(study.best_value)
         all_metrics["optuna_n_trials"] = n_trials
 
-        # Save
+        # Save model + preprocessing artifacts
         model_dir = settings.model_artifacts_dir
         os.makedirs(model_dir, exist_ok=True)
         model_path = os.path.join(model_dir, f"experiment_{experiment_id}.joblib")
-        joblib.dump(trainer, model_path)
+        artifact = {
+            "trainer": trainer,
+            "feature_medians": dataset.get("feature_medians", {}),
+            "is_ranking": is_ranking,
+        }
+        joblib.dump(artifact, model_path)
 
         experiment.status = "completed"
         experiment.metrics = all_metrics
@@ -288,10 +369,12 @@ def run_optuna_optimization(
         experiment.model_path = model_path
         experiment.completed_at = datetime.utcnow()
 
-        if target_type == "classification" and test_proba is not None:
-            experiment.confusion_matrix = compute_confusion_matrix(y_test.values, test_pred)
-            experiment.roc_data = compute_roc_data(y_test.values, test_proba)
-            experiment.calibration_data = compute_calibration_data(y_test.values, test_proba)
+        if (target_type == "classification" or is_ranking) and test_proba is not None:
+            y_binary = (y_test == 1).astype(float).values if is_ranking else y_test.values
+            pred_binary = (test_proba > 0.5).astype(float) if is_ranking else test_pred
+            experiment.confusion_matrix = compute_confusion_matrix(y_binary, pred_binary)
+            experiment.roc_data = compute_roc_data(y_binary, test_proba)
+            experiment.calibration_data = compute_calibration_data(y_binary, test_proba)
 
         db.commit()
         logger.info("Optuna experiment %d completed. Best: %s", experiment_id, best_params)
@@ -306,7 +389,16 @@ def run_optuna_optimization(
 
 def _suggest_params(trial, algorithm: str) -> dict:
     """Suggest hyperparameters for Optuna trial."""
-    if algorithm == "xgboost":
+    if algorithm == "lambdarank":
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 100, 600),
+            "num_leaves": trial.suggest_int("num_leaves", 15, 63),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+            "min_child_samples": trial.suggest_int("min_child_samples", 5, 50),
+        }
+    elif algorithm == "xgboost":
         return {
             "n_estimators": trial.suggest_int("n_estimators", 50, 500),
             "max_depth": trial.suggest_int("max_depth", 3, 10),

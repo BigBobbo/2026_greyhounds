@@ -63,7 +63,12 @@ def list_predictions(
 
 
 @router.get("/race/{race_id}")
-def predict_single_race(race_id: int, experiment_id: int, db: Session = Depends(get_db)):
+def predict_single_race(
+    race_id: int,
+    experiment_id: int,
+    bankroll: float = Query(default=100.0, ge=1),
+    db: Session = Depends(get_db),
+):
     """Generate predictions for a specific race using a trained model."""
     from app.services.prediction_service import predict_race, save_predictions
 
@@ -72,7 +77,7 @@ def predict_single_race(race_id: int, experiment_id: int, db: Session = Depends(
         raise HTTPException(status_code=404, detail="Race not found")
 
     try:
-        preds = predict_race(db, experiment_id, race_id)
+        preds = predict_race(db, experiment_id, race_id, bankroll=bankroll)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -96,13 +101,61 @@ def predict_single_race(race_id: int, experiment_id: int, db: Session = Depends(
     }
 
 
+@router.get("/races-for-date")
+def get_races_for_date(
+    race_date: date,
+    track_code: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Get all races for a given date, optionally filtered by track.
+    Used by the race picker in the predictions UI."""
+    query = (
+        db.query(
+            Race.id,
+            Race.race_number,
+            Race.distance_m,
+            Race.grade,
+            Race.status,
+            Race.race_date,
+            Track.name.label("track_name"),
+            Track.code.label("track_code"),
+        )
+        .join(Track, Race.track_id == Track.id)
+        .filter(Race.race_date == race_date)
+    )
+
+    if track_code:
+        query = query.filter(Track.code == track_code)
+
+    query = query.order_by(Track.name, Race.race_number)
+    rows = query.all()
+
+    return [
+        {
+            "id": r.id,
+            "race_number": r.race_number,
+            "distance_m": r.distance_m,
+            "grade": r.grade,
+            "status": r.status,
+            "race_date": str(r.race_date),
+            "track_name": r.track_name,
+            "track_code": r.track_code,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/upcoming")
-def get_upcoming_predictions(experiment_id: int, db: Session = Depends(get_db)):
+def get_upcoming_predictions(
+    experiment_id: int,
+    bankroll: float = Query(default=100.0, ge=1),
+    db: Session = Depends(get_db),
+):
     """Get or generate predictions for all scheduled (upcoming) races."""
     from app.services.prediction_service import predict_upcoming_races
 
     try:
-        results = predict_upcoming_races(db, experiment_id)
+        results = predict_upcoming_races(db, experiment_id, bankroll=bankroll)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -163,11 +216,15 @@ def results_comparison(
             "win_probability": pred.win_probability,
             "predicted_position": pred.predicted_position,
             "predicted_time": pred.predicted_time,
+            "confidence": pred.confidence,
             "actual_position": row.finish_position,
             "actual_time": row.finish_time,
             "sp_decimal": row.sp_decimal,
             "won": row.finish_position == 1,
-            "value": (pred.win_probability or 0) > (1 / (row.sp_decimal or 999)) if pred.win_probability and row.sp_decimal else None,
+            "edge": round(pred.win_probability - 1.0 / row.sp_decimal, 4)
+                if pred.win_probability and row.sp_decimal and row.sp_decimal > 1 else None,
+            "value": (pred.win_probability or 0) > (1 / (row.sp_decimal or 999)) * 1.05
+                if pred.win_probability and row.sp_decimal else None,
         })
 
     return {

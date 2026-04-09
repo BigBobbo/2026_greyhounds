@@ -279,7 +279,7 @@ export default function FeatureBuilder() {
             disabled={materializing}
             className="bg-green-600 text-white px-4 py-2 rounded-md text-sm hover:bg-green-700 disabled:opacity-50"
           >
-            {materializing ? 'Starting...' : selectedVersionId ? `Materialize into v${selectedVersionId}` : 'Materialize All'}
+            {materializing ? 'Starting...' : selectedVersionId ? `Materialize into "${versions.find(v => v.id === selectedVersionId)?.name || selectedVersionId}"` : 'Materialize All'}
           </button>
         </div>
       </div>

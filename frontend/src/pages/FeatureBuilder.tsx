@@ -193,8 +193,10 @@ export default function FeatureBuilder() {
     fetchFeatures();
   };
 
-  const fetchCoverage = useCallback(() => {
-    const params = selectedVersionId ? { version_id: selectedVersionId } : {};
+  const fetchCoverage = useCallback((versionId?: number | null) => {
+    const vid = versionId !== undefined ? versionId : selectedVersionId;
+    const params: Record<string, number> = {};
+    if (vid) params.version_id = vid;
     api.get('/features/coverage', { params }).then(res => {
       setCoverage(res.data);
     }).catch(() => {});
@@ -238,23 +240,29 @@ export default function FeatureBuilder() {
       const body: { force: boolean; version_id?: number } = { force: false };
       if (selectedVersionId) body.version_id = selectedVersionId;
       await api.post('/features/materialize', body);
-      // Start polling coverage
-      const pollParams = selectedVersionId ? { version_id: selectedVersionId } : {};
-      const interval = setInterval(() => {
-        api.get('/features/coverage', { params: pollParams }).then(res => setCoverage(res.data));
-      }, 5000);
-      setTimeout(() => clearInterval(interval), 600000);
-      (window as any).__materializeInterval = interval;
     } catch {
       alert('Failed to start materialization');
     }
     setMaterializing(false);
   };
 
-  // Fetch coverage when toggled or when selected version changes
+  // Clear old polling interval when version changes, start new one if coverage is visible
   useEffect(() => {
-    if (showCoverage) fetchCoverage();
-  }, [showCoverage, fetchCoverage, selectedVersionId]);
+    if ((window as any).__materializeInterval) {
+      clearInterval((window as any).__materializeInterval);
+      (window as any).__materializeInterval = null;
+    }
+    if (showCoverage) {
+      fetchCoverage(selectedVersionId);
+      const params: Record<string, number> = {};
+      if (selectedVersionId) params.version_id = selectedVersionId;
+      const interval = setInterval(() => {
+        api.get('/features/coverage', { params }).then(res => setCoverage(res.data));
+      }, 5000);
+      (window as any).__materializeInterval = interval;
+      return () => clearInterval(interval);
+    }
+  }, [showCoverage, selectedVersionId]);
 
   // Fetch versions on mount
   useEffect(() => { fetchVersions(); }, [fetchVersions]);

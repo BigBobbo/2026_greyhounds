@@ -194,10 +194,11 @@ export default function FeatureBuilder() {
   };
 
   const fetchCoverage = useCallback(() => {
-    api.get('/features/coverage').then(res => {
+    const params = selectedVersionId ? { version_id: selectedVersionId } : {};
+    api.get('/features/coverage', { params }).then(res => {
       setCoverage(res.data);
     }).catch(() => {});
-  }, []);
+  }, [selectedVersionId]);
 
   const fetchVersions = useCallback(() => {
     api.get('/features/versions').then(res => {
@@ -238,8 +239,9 @@ export default function FeatureBuilder() {
       if (selectedVersionId) body.version_id = selectedVersionId;
       await api.post('/features/materialize', body);
       // Start polling coverage
+      const pollParams = selectedVersionId ? { version_id: selectedVersionId } : {};
       const interval = setInterval(() => {
-        api.get('/features/coverage').then(res => setCoverage(res.data));
+        api.get('/features/coverage', { params: pollParams }).then(res => setCoverage(res.data));
       }, 5000);
       setTimeout(() => clearInterval(interval), 600000);
       (window as any).__materializeInterval = interval;
@@ -249,10 +251,10 @@ export default function FeatureBuilder() {
     setMaterializing(false);
   };
 
-  // Fetch coverage on mount and when toggled
+  // Fetch coverage when toggled or when selected version changes
   useEffect(() => {
     if (showCoverage) fetchCoverage();
-  }, [showCoverage, fetchCoverage]);
+  }, [showCoverage, fetchCoverage, selectedVersionId]);
 
   // Fetch versions on mount
   useEffect(() => { fetchVersions(); }, [fetchVersions]);

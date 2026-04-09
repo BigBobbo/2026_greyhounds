@@ -325,25 +325,32 @@ def build_feature_matrix(
     return df
 
 
-def get_feature_coverage(db: Session) -> list[dict[str, Any]]:
-    """Get feature coverage stats (how many entries have each feature computed)."""
+def get_feature_coverage(
+    db: Session,
+    version_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Get feature coverage stats (how many entries have each feature computed).
+
+    Args:
+        version_id: If provided, count only features for this version.
+            If None, counts unversioned (version_id IS NULL) features.
+    """
     features = db.query(FeatureDefinition).all()
     total_entries = db.query(func.count(RaceEntry.id)).scalar() or 0
 
     result = []
     for f in features:
-        computed = (
-            db.query(func.count(ComputedFeature.id))
-            .filter(ComputedFeature.feature_def_id == f.id)
-            .scalar() or 0
+        base_q = db.query(func.count(ComputedFeature.id)).filter(
+            ComputedFeature.feature_def_id == f.id,
         )
+        if version_id is not None:
+            base_q = base_q.filter(ComputedFeature.version_id == version_id)
+        else:
+            base_q = base_q.filter(ComputedFeature.version_id.is_(None))
+
+        computed = base_q.scalar() or 0
         incomplete = (
-            db.query(func.count(ComputedFeature.id))
-            .filter(
-                ComputedFeature.feature_def_id == f.id,
-                ComputedFeature.data_complete.is_(False),
-            )
-            .scalar() or 0
+            base_q.filter(ComputedFeature.data_complete.is_(False)).scalar() or 0
         )
         result.append({
             "feature_id": f.id,

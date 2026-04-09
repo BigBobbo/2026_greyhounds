@@ -77,10 +77,10 @@ def list_features(enabled_only: bool = False, db: Session = Depends(get_db)):
 
 
 @router.get("/coverage", response_model=list[FeatureCoverageItem])
-def get_coverage(db: Session = Depends(get_db)):
-    """Get computation coverage stats for all features."""
+def get_coverage(version_id: int | None = None, db: Session = Depends(get_db)):
+    """Get computation coverage stats for all features, optionally filtered by version."""
     from ml.feature_store import get_feature_coverage
-    return get_feature_coverage(db)
+    return get_feature_coverage(db, version_id=version_id)
 
 
 @router.get("/data-integrity")

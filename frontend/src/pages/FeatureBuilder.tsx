@@ -70,9 +70,21 @@ export default function FeatureBuilder() {
   // Coverage tracking
   const [coverage, setCoverage] = useState<{
     feature_id: number; name: string; display_name: string | null;
-    computed_count: number; total_entries: number; coverage_pct: number;
+    computed_count: number; incomplete_count: number; total_entries: number; coverage_pct: number;
   }[]>([]);
   const [showCoverage, setShowCoverage] = useState(false);
+
+  // Versioning
+  const [versions, setVersions] = useState<{
+    id: number; name: string; description: string | null;
+    created_at: string; feature_count: number;
+    coverage_snapshot: { recommendation?: string } | null;
+  }[]>([]);
+  const [showVersions, setShowVersions] = useState(false);
+  const [newVersionName, setNewVersionName] = useState('');
+  const [newVersionDesc, setNewVersionDesc] = useState('');
+  const [creatingVersion, setCreatingVersion] = useState(false);
+  const [selectedVersionId, setSelectedVersionId] = useState<number | null>(null);
 
   // Visual builder state
   const [visualConfig, setVisualConfig] = useState<VisualConfig>({
@@ -187,17 +199,49 @@ export default function FeatureBuilder() {
     }).catch(() => {});
   }, []);
 
+  const fetchVersions = useCallback(() => {
+    api.get('/features/versions').then(res => {
+      setVersions(res.data);
+    }).catch(() => {});
+  }, []);
+
+  const handleCreateVersion = async () => {
+    if (!newVersionName.trim()) return;
+    setCreatingVersion(true);
+    try {
+      const res = await api.post('/features/versions', {
+        name: newVersionName.trim(),
+        description: newVersionDesc.trim() || null,
+      });
+      setNewVersionName('');
+      setNewVersionDesc('');
+      setSelectedVersionId(res.data.id);
+      fetchVersions();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to create version');
+    }
+    setCreatingVersion(false);
+  };
+
+  const handleDeleteVersion = async (id: number) => {
+    if (!confirm('Delete this version and all its computed features?')) return;
+    await api.delete(`/features/versions/${id}`);
+    if (selectedVersionId === id) setSelectedVersionId(null);
+    fetchVersions();
+  };
+
   const handleMaterialize = async () => {
     setMaterializing(true);
     setShowCoverage(true);
     try {
-      await api.post('/features/materialize', { force: false });
+      const body: { force: boolean; version_id?: number } = { force: false };
+      if (selectedVersionId) body.version_id = selectedVersionId;
+      await api.post('/features/materialize', body);
       // Start polling coverage
       const interval = setInterval(() => {
         api.get('/features/coverage').then(res => setCoverage(res.data));
       }, 5000);
-      // Store interval ID so we can clear it
-      setTimeout(() => clearInterval(interval), 600000); // stop after 10 min
+      setTimeout(() => clearInterval(interval), 600000);
       (window as any).__materializeInterval = interval;
     } catch {
       alert('Failed to start materialization');
@@ -210,11 +254,20 @@ export default function FeatureBuilder() {
     if (showCoverage) fetchCoverage();
   }, [showCoverage, fetchCoverage]);
 
+  // Fetch versions on mount
+  useEffect(() => { fetchVersions(); }, [fetchVersions]);
+
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">Feature Builder</h1>
         <div className="flex gap-2">
+          <button
+            onClick={() => { setShowVersions(!showVersions); }}
+            className="bg-gray-100 text-gray-700 px-4 py-2 rounded-md text-sm hover:bg-gray-200"
+          >
+            {showVersions ? 'Hide Versions' : 'Versions'}
+          </button>
           <button
             onClick={() => { setShowCoverage(!showCoverage); if (!showCoverage) fetchCoverage(); }}
             className="bg-gray-100 text-gray-700 px-4 py-2 rounded-md text-sm hover:bg-gray-200"
@@ -226,10 +279,113 @@ export default function FeatureBuilder() {
             disabled={materializing}
             className="bg-green-600 text-white px-4 py-2 rounded-md text-sm hover:bg-green-700 disabled:opacity-50"
           >
-            {materializing ? 'Starting...' : 'Materialize All'}
+            {materializing ? 'Starting...' : selectedVersionId ? `Materialize into v${selectedVersionId}` : 'Materialize All'}
           </button>
         </div>
       </div>
+
+      {/* Version Management */}
+      {showVersions && (
+        <div className="bg-white rounded-lg shadow p-5 mb-6">
+          <h2 className="font-semibold mb-3">Feature Versions</h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Create named snapshots of your features. Each version captures the current scrape state
+            so you can compare models trained on different data.
+          </p>
+
+          {/* Create new version */}
+          <div className="flex gap-2 mb-4">
+            <input
+              type="text"
+              value={newVersionName}
+              onChange={(e) => setNewVersionName(e.target.value)}
+              placeholder="Version name (e.g. v1-full-scrape)"
+              className="border rounded-md px-3 py-2 text-sm flex-1"
+            />
+            <input
+              type="text"
+              value={newVersionDesc}
+              onChange={(e) => setNewVersionDesc(e.target.value)}
+              placeholder="Description (optional)"
+              className="border rounded-md px-3 py-2 text-sm flex-1"
+            />
+            <button
+              onClick={handleCreateVersion}
+              disabled={creatingVersion || !newVersionName.trim()}
+              className="bg-blue-600 text-white px-4 py-2 rounded-md text-sm hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
+            >
+              {creatingVersion ? 'Creating...' : 'Create Version'}
+            </button>
+          </div>
+
+          {/* Version list */}
+          <div className="space-y-2">
+            {/* Unversioned option */}
+            <div
+              onClick={() => setSelectedVersionId(null)}
+              className={`flex items-center justify-between p-3 rounded-md border cursor-pointer transition-colors ${
+                selectedVersionId === null ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'
+              }`}
+            >
+              <div>
+                <span className="text-sm font-medium">Unversioned (default)</span>
+                <p className="text-xs text-gray-500">Features are upserted in place</p>
+              </div>
+              {selectedVersionId === null && (
+                <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded">Selected</span>
+              )}
+            </div>
+
+            {versions.map((v) => (
+              <div
+                key={v.id}
+                onClick={() => setSelectedVersionId(v.id)}
+                className={`flex items-center justify-between p-3 rounded-md border cursor-pointer transition-colors ${
+                  selectedVersionId === v.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">{v.name}</span>
+                    {v.coverage_snapshot?.recommendation && (
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${
+                        v.coverage_snapshot.recommendation === 'safe'
+                          ? 'bg-green-100 text-green-700'
+                          : v.coverage_snapshot.recommendation === 'warning'
+                          ? 'bg-yellow-100 text-yellow-700'
+                          : 'bg-red-100 text-red-700'
+                      }`}>
+                        {v.coverage_snapshot.recommendation}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-500 truncate">
+                    {v.description || 'No description'}
+                    {' \u00b7 '}{v.feature_count.toLocaleString()} features
+                    {' \u00b7 '}{new Date(v.created_at).toLocaleDateString()}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 ml-2">
+                  {selectedVersionId === v.id && (
+                    <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded">Selected</span>
+                  )}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleDeleteVersion(v.id); }}
+                    className="text-red-400 hover:text-red-600 text-xs px-1"
+                    title="Delete version"
+                  >
+                    x
+                  </button>
+                </div>
+              </div>
+            ))}
+
+            {versions.length === 0 && (
+              <p className="text-xs text-gray-400 text-center py-2">No versions created yet</p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Materialization Progress */}
       {showCoverage && (
@@ -253,6 +409,11 @@ export default function FeatureBuilder() {
                       <span className="text-gray-600 truncate max-w-[250px]">{c.display_name || c.name}</span>
                       <span className={`font-mono ${isComplete ? 'text-green-600' : 'text-gray-500'}`}>
                         {c.computed_count.toLocaleString()} / {c.total_entries.toLocaleString()} ({pct}%)
+                        {c.incomplete_count > 0 && (
+                          <span className="text-yellow-600 ml-1" title="Features computed with potentially incomplete data">
+                            ({c.incomplete_count.toLocaleString()} incomplete)
+                          </span>
+                        )}
                       </span>
                     </div>
                     <div className="w-full bg-gray-100 rounded-full h-2">

@@ -119,7 +119,7 @@ export default function ExperimentDetail() {
       {bettingRaw && (
         <div className="bg-white rounded-lg shadow p-5 mb-6">
           <h2 className="font-semibold mb-3">Betting Simulation ($1 per race)</h2>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
             <div className="border rounded-md p-3">
               <p className="text-xs text-gray-500">Top Pick P&L</p>
               <p className={`font-mono text-xl font-bold ${bettingRaw.top_pick_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
@@ -139,6 +139,15 @@ export default function ExperimentDetail() {
               </p>
               <p className="text-xs text-gray-400">{bettingRaw.value_bet_count} bets, ROI {bettingRaw.value_bet_roi}%</p>
             </div>
+            {bettingRaw.kelly_pnl !== undefined && (
+              <div className="border rounded-md p-3">
+                <p className="text-xs text-gray-500">Kelly Criterion P&L</p>
+                <p className={`font-mono text-xl font-bold ${bettingRaw.kelly_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  ${bettingRaw.kelly_pnl}
+                </p>
+                <p className="text-xs text-gray-400">{bettingRaw.kelly_races} bets, ROI {bettingRaw.kelly_roi}%</p>
+              </div>
+            )}
             <div className="border rounded-md p-3">
               <p className="text-xs text-gray-500">Favourite P&L (baseline)</p>
               <p className={`font-mono text-xl font-bold ${bettingRaw.favourite_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>

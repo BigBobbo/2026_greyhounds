@@ -75,6 +75,15 @@ class BaseTrainer(ABC):
                 "colsample_bytree": 0.8,
                 "min_child_samples": 20,
             },
+            "lambdarank": {
+                "n_estimators": 300,
+                "num_leaves": 31,
+                "learning_rate": 0.05,
+                "max_depth": -1,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "min_child_samples": 20,
+            },
             "logistic_regression": {
                 "C": 1.0,
                 "max_iter": 1000,

@@ -144,6 +144,9 @@ def build_dataset(
 
     feature_names = list(X.columns)
 
+    # Save column medians from training set for consistent imputation at prediction time
+    feature_medians = X.median().to_dict()
+
     # Recompute cutoff dates so they can be persisted by the training service
     test_after = split_config.get("test_after")
     val_pct = split_config.get("val_pct", 0.15)
@@ -164,6 +167,11 @@ def build_dataset(
         val_cutoff = sorted_tv.iloc[val_idx]
     else:
         val_cutoff = test_cutoff
+
+    # Compute race group sizes for LambdaRank training
+    group_train = _compute_group_sizes(entries_df.loc[X_train.index, "race_id"])
+    group_val = _compute_group_sizes(entries_df.loc[X_val.index, "race_id"])
+    group_test = _compute_group_sizes(entries_df.loc[X_test.index, "race_id"])
 
     stats = {
         "total_entries": len(X),
@@ -186,6 +194,10 @@ def build_dataset(
         "meta_val": meta_val,
         "meta_test": meta_test,
         "feature_names": feature_names,
+        "feature_medians": feature_medians,
+        "group_train": group_train,
+        "group_val": group_val,
+        "group_test": group_test,
         "stats": stats,
     }
 
@@ -251,3 +263,28 @@ def _time_based_split(
     )
 
     return X_train, y_train, X_val, y_val, X_test, y_test
+
+
+def _compute_group_sizes(race_ids: pd.Series) -> list[int]:
+    """Compute group sizes (dogs per race) in order of appearance.
+
+    This is needed by LambdaRank which requires knowing how many entries
+    belong to each race group.  The entries must be contiguous by race_id
+    in the dataset, which is guaranteed by our time-based split (races are
+    sorted by date and all entries for a race are together).
+    """
+    if race_ids.empty:
+        return []
+
+    groups = []
+    current_race = race_ids.iloc[0]
+    count = 0
+    for rid in race_ids:
+        if rid == current_race:
+            count += 1
+        else:
+            groups.append(count)
+            current_race = rid
+            count = 1
+    groups.append(count)
+    return groups

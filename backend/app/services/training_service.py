@@ -69,6 +69,7 @@ def run_training(db: Session, experiment_id: int) -> None:
             target=experiment.target,
             split_config=split_cfg,
             only_complete=split_cfg.get("only_complete", False),
+            version_id=split_cfg.get("version_id"),
         )
 
         X_train = dataset["X_train"]
@@ -226,6 +227,7 @@ def run_optuna_optimization(
             target=experiment.target,
             split_config=split_cfg,
             only_complete=split_cfg.get("only_complete", False),
+            version_id=split_cfg.get("version_id"),
         )
 
         X_train = dataset["X_train"]

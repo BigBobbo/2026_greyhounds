@@ -16,7 +16,14 @@ class ComputedFeature(Base):
     # yet scraped for the feature's date window).  Downstream consumers can
     # filter these out to avoid training on potentially wrong values.
     data_complete = Column(Boolean, default=True)
+    # Links this computed value to a named snapshot.  NULL means "current /
+    # unversioned" (legacy behaviour: upserted in place).  When a version_id
+    # is set, the row belongs to that snapshot and won't be overwritten.
+    version_id = Column(Integer, ForeignKey("feature_versions.id"), nullable=True, index=True)
 
     __table_args__ = (
-        UniqueConstraint("race_entry_id", "feature_def_id", name="uq_computed_entry_feature"),
+        UniqueConstraint(
+            "race_entry_id", "feature_def_id", "version_id",
+            name="uq_computed_entry_feature_version",
+        ),
     )

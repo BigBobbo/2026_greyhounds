@@ -30,6 +30,7 @@ def build_dataset(
     target: str,
     split_config: dict[str, Any] | None = None,
     only_complete: bool = False,
+    version_id: int | None = None,
 ) -> dict[str, Any]:
     """
     Build a complete dataset for model training.
@@ -41,6 +42,8 @@ def build_dataset(
         only_complete: If True, exclude features flagged as data_complete=False.
             Use this when scrape coverage is incomplete across tracks to avoid
             training on features computed with partial dog histories.
+        version_id: If provided, use features from this version snapshot.
+            If None, uses unversioned features.
 
     Returns:
         {
@@ -89,7 +92,10 @@ def build_dataset(
 
     # Build feature matrix
     entry_ids = entries_df["entry_id"].tolist()
-    X = build_feature_matrix(db, feature_ids, entry_ids, only_complete=only_complete)
+    X = build_feature_matrix(
+        db, feature_ids, entry_ids,
+        only_complete=only_complete, version_id=version_id,
+    )
 
     if X.empty:
         raise ValueError("Feature matrix is empty — have features been materialized?")
@@ -169,6 +175,7 @@ def build_dataset(
         "train_cutoff_date": str(val_cutoff),
         "test_cutoff_date": str(test_cutoff),
         "only_complete_data": only_complete,
+        "feature_version_id": version_id,
     }
 
     return {

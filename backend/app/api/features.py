@@ -39,8 +39,15 @@ class FeatureCoverageItem(BaseModel):
     feature_type: str
     enabled: bool
     computed_count: int
+    incomplete_count: int = 0
     total_entries: int
     coverage_pct: float
+
+
+class DataIntegrityRequest(BaseModel):
+    start_date: str | None = None
+    end_date: str | None = None
+    max_gap_days: int = 14
 
 
 @router.get("/", response_model=list[FeatureDefinitionResponse])
@@ -56,6 +63,44 @@ def get_coverage(db: Session = Depends(get_db)):
     """Get computation coverage stats for all features."""
     from ml.feature_store import get_feature_coverage
     return get_feature_coverage(db)
+
+
+@router.get("/data-integrity")
+def get_data_integrity(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    max_gap_days: int = 14,
+    db: Session = Depends(get_db),
+):
+    """
+    Check data completeness before materializing features.
+
+    Reports scrape coverage gaps that could cause features to be computed
+    with incomplete dog histories — e.g. if a dog raced at Dublin and
+    Limerick but only Limerick data has been scraped, rolling features
+    like 'mean last 5 race times' would silently be wrong.
+
+    Returns a recommendation of "safe", "warning", or "incomplete".
+    """
+    from datetime import date as date_type
+    from ml.data_integrity import assess_materialization_readiness
+
+    sd = date_type.fromisoformat(start_date) if start_date else None
+    ed = date_type.fromisoformat(end_date) if end_date else None
+
+    return assess_materialization_readiness(db, sd, ed, max_gap_days)
+
+
+@router.post("/data-integrity")
+def post_data_integrity(req: DataIntegrityRequest, db: Session = Depends(get_db)):
+    """POST variant of data-integrity check."""
+    from datetime import date as date_type
+    from ml.data_integrity import assess_materialization_readiness
+
+    sd = date_type.fromisoformat(req.start_date) if req.start_date else None
+    ed = date_type.fromisoformat(req.end_date) if req.end_date else None
+
+    return assess_materialization_readiness(db, sd, ed, req.max_gap_days)
 
 
 @router.get("/start-materialize")

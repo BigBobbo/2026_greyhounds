@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Float, Integer, ForeignKey, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, ForeignKey, UniqueConstraint
 from app.database import Base
 
 
@@ -12,6 +12,10 @@ class ComputedFeature(Base):
     feature_def_id = Column(Integer, ForeignKey("feature_definitions.id"), nullable=False)
     value = Column(Float)
     computed_at = Column(DateTime, default=datetime.utcnow)
+    # False when the dog's history may be incomplete (e.g. some tracks not
+    # yet scraped for the feature's date window).  Downstream consumers can
+    # filter these out to avoid training on potentially wrong values.
+    data_complete = Column(Boolean, default=True)
 
     __table_args__ = (
         UniqueConstraint("race_entry_id", "feature_def_id", name="uq_computed_entry_feature"),

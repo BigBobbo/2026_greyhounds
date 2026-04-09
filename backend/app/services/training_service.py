@@ -62,11 +62,13 @@ def run_training(db: Session, experiment_id: int) -> None:
     try:
         # 1. Build dataset
         logger.info("Building dataset for experiment %d", experiment_id)
+        split_cfg = experiment.split_config or {}
         dataset = build_dataset(
             db,
             feature_ids=experiment.feature_set,
             target=experiment.target,
-            split_config=experiment.split_config,
+            split_config=split_cfg,
+            only_complete=split_cfg.get("only_complete", False),
         )
 
         X_train = dataset["X_train"]
@@ -217,11 +219,13 @@ def run_optuna_optimization(
     start_time = time.time()
 
     try:
+        split_cfg = experiment.split_config or {}
         dataset = build_dataset(
             db,
             feature_ids=experiment.feature_set,
             target=experiment.target,
-            split_config=experiment.split_config,
+            split_config=split_cfg,
+            only_complete=split_cfg.get("only_complete", False),
         )
 
         X_train = dataset["X_train"]

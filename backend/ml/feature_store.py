@@ -12,7 +12,7 @@ these out during training.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
@@ -23,9 +23,10 @@ from app.models.computed_feature import ComputedFeature
 from app.models.feature_definition import FeatureDefinition
 from app.models.race import Race
 from app.models.race_entry import RaceEntry
-from app.services.feature_engine import compute_visual_feature, get_dog_history, get_race_context
+from app.models.track import Track
+from app.services.feature_engine import compute_visual_feature
 from app.services.feature_sandbox import execute_feature_code
-from ml.data_integrity import check_dog_history_complete
+from ml.data_integrity import find_coverage_gaps
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,126 @@ def _feature_window_days(feature_def: FeatureDefinition) -> int:
         if window.get("type") == "days":
             return int(window.get("n", _DEFAULT_COMPLETENESS_WINDOW_DAYS))
     return _DEFAULT_COMPLETENESS_WINDOW_DAYS
+
+
+def _batch_load_contexts(db: Session, entry_ids: list[int]) -> dict[int, dict]:
+    """Load race contexts for many entries in one query.
+
+    Returns {entry_id: {trap, dog_id, track_id, distance_m, ...}}
+    """
+    from app.models.track import Track
+
+    rows = (
+        db.query(
+            RaceEntry.id,
+            RaceEntry.trap,
+            RaceEntry.dog_id,
+            Race.track_id,
+            Race.distance_m,
+            Race.grade,
+            Race.race_date,
+            Race.race_type,
+            Track.code.label("track_code"),
+        )
+        .join(Race, RaceEntry.race_id == Race.id)
+        .join(Track, Race.track_id == Track.id)
+        .filter(RaceEntry.id.in_(entry_ids))
+        .all()
+    )
+    return {
+        row.id: {
+            "trap": row.trap,
+            "dog_id": row.dog_id,
+            "track_id": row.track_id,
+            "distance_m": row.distance_m,
+            "grade": row.grade,
+            "race_date": row.race_date,
+            "race_type": row.race_type,
+            "track_code": row.track_code,
+        }
+        for row in rows
+    }
+
+
+def _batch_load_dog_histories(db: Session, dog_ids: set[int]) -> dict[int, pd.DataFrame]:
+    """Load full race history for multiple dogs in one query.
+
+    Returns {dog_id: DataFrame} where each DataFrame contains the dog's
+    complete history sorted chronologically.  The caller filters by date.
+    """
+    from app.models.track import Track
+
+    rows = (
+        db.query(
+            RaceEntry.dog_id,
+            RaceEntry.trap,
+            RaceEntry.finish_position,
+            RaceEntry.finish_time,
+            RaceEntry.sectional_time,
+            RaceEntry.beaten_distance,
+            RaceEntry.weight_kg,
+            RaceEntry.sp_decimal,
+            RaceEntry.starting_price,
+            RaceEntry.comment,
+            Race.race_date,
+            Race.track_id,
+            Race.distance_m,
+            Race.grade,
+            Race.race_type,
+            Race.going,
+            Race.num_runners,
+            Track.name.label("track_name"),
+            Track.code.label("track_code"),
+        )
+        .join(Race, RaceEntry.race_id == Race.id)
+        .join(Track, Race.track_id == Track.id)
+        .filter(
+            RaceEntry.dog_id.in_(dog_ids),
+            Race.status == "resulted",
+        )
+        .order_by(RaceEntry.dog_id, Race.race_date)
+        .all()
+    )
+
+    if not rows:
+        return {}
+
+    columns = [
+        "dog_id", "trap", "finish_position", "finish_time", "sectional_time",
+        "beaten_distance", "weight_kg", "sp_decimal", "starting_price",
+        "comment", "race_date", "track_id", "distance_m", "grade",
+        "race_type", "going", "num_runners", "track_name", "track_code",
+    ]
+    all_df = pd.DataFrame(rows, columns=columns)
+
+    result: dict[int, pd.DataFrame] = {}
+    for dog_id, group in all_df.groupby("dog_id"):
+        result[int(dog_id)] = group.drop(columns=["dog_id"]).reset_index(drop=True)
+
+    return result
+
+
+def _precompute_completeness(
+    db: Session,
+    dog_histories: dict[int, pd.DataFrame],
+    gap_track_ids: set[int],
+) -> dict[int, bool]:
+    """Pre-compute data completeness for each dog.
+
+    A dog's data is incomplete if they have raced at any track that has
+    coverage gaps.  This is a conservative check — it doesn't vary by
+    date window (which would be too expensive per-entry).
+
+    Returns {dog_id: True/False}
+    """
+    result: dict[int, bool] = {}
+    for dog_id, history in dog_histories.items():
+        if history.empty:
+            result[dog_id] = True
+            continue
+        dog_track_ids = set(history["track_id"].unique())
+        result[dog_id] = not bool(dog_track_ids & gap_track_ids)
+    return result
 
 
 def materialize_feature(
@@ -106,19 +227,39 @@ def materialize_feature(
         feature_def.name, len(entry_ids), version_id,
     )
 
-    window_days = _feature_window_days(feature_def)
+    # --- Pre-compute coverage gaps ONCE for the full date range ---
+    date_range = (
+        db.query(func.min(Race.race_date), func.max(Race.race_date))
+        .filter(Race.status == "resulted")
+        .first()
+    )
+    gap_track_ids: set[int] = set()
+    if date_range and date_range[0]:
+        active_tracks = db.query(Track.id, Track.code).filter(Track.active.is_(True)).all()
+        code_to_id = {code: tid for tid, code in active_tracks}
+        gaps = find_coverage_gaps(db, date_range[0], date_range[1])
+        gap_track_ids = {code_to_id[g["track_code"]] for g in gaps if g["track_code"] in code_to_id}
 
-    # Cache completeness checks per (dog_id, race_date) to avoid redundant
-    # DB queries — many entries share the same dog.
-    completeness_cache: dict[tuple[int, str], bool] = {}
-
-    # Process in batches
-    batch_size = 100
+    # --- Process in large batches to amortize DB round-trips ---
+    batch_size = 2000
     for i in range(0, len(entry_ids), batch_size):
         batch = entry_ids[i:i + batch_size]
 
+        # 1. Batch-load all race contexts for this batch (1 query)
+        contexts = _batch_load_contexts(db, batch)
+
+        # 2. Collect unique dog IDs and batch-load their histories (1 query)
+        dog_ids = {ctx["dog_id"] for ctx in contexts.values()}
+        histories = _batch_load_dog_histories(db, dog_ids)
+
+        # 3. Pre-compute completeness per dog (no queries — uses cached gaps)
+        completeness = _precompute_completeness(db, histories, gap_track_ids)
+
+        # 4. Compute features and build insert list
+        new_features: list[ComputedFeature] = []
+
         for entry_id in batch:
-            ctx = get_race_context(db, entry_id)
+            ctx = contexts.get(entry_id)
             if not ctx:
                 stats["errors"] += 1
                 continue
@@ -126,12 +267,17 @@ def materialize_feature(
             dog_id = ctx["dog_id"]
             race_date = ctx["race_date"]
 
-            # Get dog history (before this race)
-            history = get_dog_history(db, dog_id, race_date)
+            # Filter dog's full history to only races before this date
+            full_history = histories.get(dog_id)
+            if full_history is not None and not full_history.empty:
+                history = full_history[full_history["race_date"] < race_date].copy()
+                # Keep only most recent 100 (same as original limit)
+                history = history.tail(100).reset_index(drop=True)
+            else:
+                history = pd.DataFrame()
 
             # Compute the feature
             value = None
-            error = None
 
             if feature_def.feature_type == "visual":
                 config = feature_def.config_json or {}
@@ -140,64 +286,36 @@ def materialize_feature(
                 code = feature_def.code or ""
                 value, error = execute_feature_code(code, history, ctx)
                 if error:
-                    logger.debug("Error computing '%s' for entry %d: %s", feature_def.name, entry_id, error)
                     stats["errors"] += 1
                     continue
 
-            # Check data completeness (cached per dog+date)
-            cache_key = (dog_id, str(race_date))
-            if cache_key not in completeness_cache:
-                completeness_cache[cache_key] = check_dog_history_complete(
-                    db, dog_id, race_date, window_days=window_days,
-                )
-            data_complete = completeness_cache[cache_key]
-
+            data_complete = completeness.get(dog_id, True)
             if not data_complete:
                 stats["incomplete"] += 1
 
-            # Upsert for unversioned, insert for versioned
-            if version_id is None:
-                existing = (
-                    db.query(ComputedFeature)
-                    .filter(
-                        ComputedFeature.race_entry_id == entry_id,
-                        ComputedFeature.feature_def_id == feature_def.id,
-                        ComputedFeature.version_id.is_(None),
-                    )
-                    .first()
-                )
-                if existing:
-                    existing.value = value
-                    existing.computed_at = datetime.utcnow()
-                    existing.data_complete = data_complete
-                else:
-                    db.add(ComputedFeature(
-                        race_entry_id=entry_id,
-                        feature_def_id=feature_def.id,
-                        value=value,
-                        computed_at=datetime.utcnow(),
-                        data_complete=data_complete,
-                    ))
-            else:
-                db.add(ComputedFeature(
-                    race_entry_id=entry_id,
-                    feature_def_id=feature_def.id,
-                    value=value,
-                    computed_at=datetime.utcnow(),
-                    data_complete=data_complete,
-                    version_id=version_id,
-                ))
+            # For versioned: always insert.  For unversioned: also just
+            # insert since we already filtered out existing entries above.
+            new_features.append(ComputedFeature(
+                race_entry_id=entry_id,
+                feature_def_id=feature_def.id,
+                value=value,
+                computed_at=datetime.utcnow(),
+                data_complete=data_complete,
+                version_id=version_id,
+            ))
 
             stats["computed"] += 1
 
-        db.commit()
+        # Bulk insert the batch
+        if new_features:
+            db.bulk_save_objects(new_features)
+            db.commit()
 
-        if (i + batch_size) % 500 == 0:
-            logger.info(
-                "Feature '%s': %d/%d entries computed (%d incomplete)",
-                feature_def.name, min(i + batch_size, len(entry_ids)),
-                len(entry_ids), stats["incomplete"],
-            )
+        logger.info(
+            "Feature '%s': %d/%d entries computed (%d incomplete)",
+            feature_def.name, min(i + len(batch), len(entry_ids)),
+            len(entry_ids), stats["incomplete"],
+        )
 
     if stats["incomplete"]:
         logger.warning(

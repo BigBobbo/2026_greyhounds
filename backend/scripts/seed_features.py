@@ -513,12 +513,18 @@ def seed():
     try:
         existing = {f.name for f in db.query(FeatureDefinition).all()}
         added = 0
+        errors = 0
         for feat_data in PRESET_FEATURES:
             if feat_data["name"] not in existing:
-                db.add(FeatureDefinition(**feat_data))
-                added += 1
-        db.commit()
-        print(f"Seeded {added} new features ({len(existing)} already existed)")
+                try:
+                    db.add(FeatureDefinition(**feat_data))
+                    db.commit()
+                    added += 1
+                except Exception as e:
+                    db.rollback()
+                    errors += 1
+                    print(f"  ERROR seeding '{feat_data['name']}': {e}", flush=True)
+        print(f"Seeded {added} new features, {errors} errors ({len(existing)} already existed)", flush=True)
     finally:
         db.close()
 

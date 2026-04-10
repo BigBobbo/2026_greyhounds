@@ -402,7 +402,7 @@ export default function FeatureBuilder() {
         <div className="bg-white rounded-lg shadow p-5 mb-6">
           <div className="flex items-center justify-between mb-3">
             <h2 className="font-semibold">Materialization Progress</h2>
-            <button onClick={fetchCoverage} className="text-xs text-blue-500 hover:underline">
+            <button onClick={() => fetchCoverage()} className="text-xs text-blue-500 hover:underline">
               Refresh
             </button>
           </div>

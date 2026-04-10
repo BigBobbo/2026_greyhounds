@@ -16,8 +16,10 @@ Features are grouped into categories and tiered by expected predictive impact. E
 
 Before implementing, know what already exists:
 
-**Visual features** (in `backend/scripts/seed_features.py` — 26 features):
+**Visual/code features** (in `backend/scripts/seed_features.py` — 40 features):
 - Time: `mean_finish_time_last5`, `min_finish_time_last10`, `mean_finish_time_last5_same_dist`, `stdev_finish_time_last5`, `finish_time_trend_last5`
+- Going-adjusted time: `mean_adjusted_time_last5`, `mean_adjusted_time_last5_same_dist`, `best_adjusted_time_last10`, `best_adjusted_time_last10_same_dist`
+- EWM (recency-weighted): `ewm_finish_time_last10`, `ewm_position_last10`, `ewm_adjusted_time_last10`
 - Position: `mean_position_last5`, `win_rate_last10`, `place_rate_last10`, `win_rate_same_track`, `win_rate_same_trap`
 - Sectional: `mean_sectional_last5`
 - Weight: `mean_weight_last5`
@@ -25,18 +27,32 @@ Before implementing, know what already exists:
 - SP: `mean_sp_last5`
 - Experience: `career_runs`, `runs_at_track`, `runs_at_distance`
 - Code features: `days_since_last_race`, `days_since_last_win`, `improving_form`, `track_distance_affinity`, `trap_win_rate_at_track`, `trap_place_rate_at_track`, `races_in_last_30_days`, `grade_change`, `going_win_rate`, `finish_position_stdev_last5`
+- Trouble-in-running: `trouble_rate_last10`, `first_bend_trouble_rate`
+- Rest/fitness: `optimal_rest_window`, `rest_category`
+- Bayesian-smoothed: `bayesian_win_rate`, `bayesian_place_rate`
 
-**Built-in features** (in `backend/ml/race_features.py` — 8 features):
+**Built-in features** (in `backend/ml/race_features.py` — 21 features):
 - `trap_win_rate_at_track`, `grade_movement`, `days_since_last`, `weight_change`, `early_speed_ratio`, `is_front_runner`, `career_races`, `position_consistency`
+- `dog_age_years`, `dog_age_squared`
+- `early_speed_x_trap`, `early_speed_x_inside`, `early_speed_x_outside`, `front_runner_x_inside`, `front_runner_x_outside`
+- `trainer_win_rate`, `trainer_place_rate`, `trainer_win_rate_at_track`
+- `sire_progeny_win_rate`, `sire_progeny_mean_time_at_dist`
+- `track_speed_rating`
 
-**Race-relative features** (added in `backend/ml/dataset_builder.py`):
-- `__vs_field` (value minus field mean) and `__rank` (rank within race) variants of all features
+**SP-derived features** (in `backend/ml/dataset_builder.py`):
+- `current_sp_decimal`, `current_sp_implied_prob`, `sp_rank_in_field`, `market_overround`
+
+**Pace shape features** (in `backend/ml/dataset_builder.py`):
+- `num_front_runners_in_race`, `is_sole_front_runner`, `pace_pressure`, `early_speed_rank`, `is_predicted_leader`
+
+**Race-relative features** (in `backend/ml/dataset_builder.py`):
+- `__vs_field` (value minus field mean) and `__rank` (rank within race) variants of key features
 
 ---
 
-## TIER 1: High-Impact, Low-to-Medium Effort
+## TIER 1: High-Impact, Low-to-Medium Effort [COMPLETED]
 
-These features have the strongest evidence of predictive value and can be implemented within the existing architecture.
+These features have been implemented. See PR #11.
 
 ---
 
@@ -384,7 +400,10 @@ Then seed new features:
 
 ---
 
-## TIER 2: Strong Evidence, Moderate Effort
+## TIER 2: Strong Evidence, Moderate Effort [COMPLETED]
+
+Implemented: 2.1 (trainer stats), 2.2 (sire/dam), 2.3 (trouble-in-running), 2.4 (track speed rating), 2.6 (rest windows), 2.7 (Bayesian rates).
+Deferred: 2.5 (SP drift) — requires `odds_snapshots` table to be populated by odds scraping.
 
 ---
 

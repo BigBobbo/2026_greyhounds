@@ -31,6 +31,7 @@ from app.models.track import Track
 from app.services.feature_engine import get_dog_history, get_race_context, compute_visual_feature
 from app.services.feature_sandbox import execute_feature_code
 from app.models.feature_definition import FeatureDefinition
+from ml.race_features import compute_race_context_features
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,14 @@ def compute_features_for_entries(
     db: Session,
     entry_ids: list[int],
     feature_defs: list[FeatureDefinition],
+    include_builtin: bool = True,
 ) -> pd.DataFrame:
-    """Compute features for specific race entries on-the-fly (no caching)."""
+    """Compute features for specific race entries on-the-fly (no caching).
+
+    Args:
+        include_builtin: If True, also compute built-in race-context features
+            (trap bias, grade movement, days since last, etc.)
+    """
     rows = {}
 
     for entry_id in entry_ids:
@@ -84,6 +91,11 @@ def compute_features_for_entries(
                 value, _ = execute_feature_code(feat.code, history, ctx)
 
             feature_values[feat.name] = value
+
+        # Add built-in race-context features
+        if include_builtin:
+            builtin = compute_race_context_features(db, entry_id, history, ctx)
+            feature_values.update(builtin)
 
         rows[entry_id] = feature_values
 
@@ -237,11 +249,12 @@ def predict_race(
     if not experiment or experiment.status != "completed":
         raise ValueError(f"Experiment {experiment_id} not found or not completed")
 
-    # Load model artifact (trainer + preprocessing info)
+    # Load model artifact (trainer + preprocessing info + calibrator)
     artifact = load_trained_model(experiment)
     trainer = artifact["trainer"]
     feature_medians = artifact.get("feature_medians", {})
     is_ranking = artifact.get("is_ranking", False)
+    calibrator = artifact.get("calibrator")
 
     # Get race entries with SP odds
     entries = (
@@ -324,6 +337,17 @@ def predict_race(
             win_probs = None
     else:
         win_probs = None
+
+    # Apply probability calibration if calibrator is available
+    if calibrator is not None and win_probs is not None:
+        try:
+            calibrated = calibrator.predict(win_probs)
+            # Re-normalize to sum to 1 within the race after calibration
+            total = calibrated.sum()
+            if total > 0:
+                win_probs = calibrated / total
+        except Exception as e:
+            logger.warning("Calibration failed, using raw probabilities: %s", e)
 
     # Compute race-level confidence metrics
     race_confidence = _compute_confidence(win_probs) if win_probs is not None else None
@@ -428,6 +452,113 @@ def save_predictions(db: Session, predictions: list[dict[str, Any]]) -> int:
 
     db.commit()
     return saved
+
+
+def predict_race_ensemble(
+    db: Session,
+    experiment_ids: list[int],
+    race_id: int,
+    weights: list[float] | None = None,
+    bankroll: float = 100.0,
+) -> list[dict[str, Any]]:
+    """
+    Generate ensemble predictions by combining multiple trained models.
+
+    Averages calibrated win probabilities across models (weighted if weights provided),
+    then re-normalizes to sum to 1 within the race.
+
+    Args:
+        experiment_ids: List of completed experiment IDs to ensemble
+        weights: Optional weights for each model (must sum to 1). If None, equal weighting.
+        bankroll: Current bankroll for Kelly staking
+
+    Returns list of prediction dicts (same format as predict_race).
+    """
+    if len(experiment_ids) < 2:
+        raise ValueError("Ensemble requires at least 2 experiments")
+
+    if weights is None:
+        weights = [1.0 / len(experiment_ids)] * len(experiment_ids)
+    elif len(weights) != len(experiment_ids):
+        raise ValueError("weights must match experiment_ids length")
+    else:
+        total_w = sum(weights)
+        weights = [w / total_w for w in weights]
+
+    # Get individual predictions from each model
+    all_predictions: list[list[dict[str, Any]]] = []
+    for exp_id in experiment_ids:
+        try:
+            preds = predict_race(db, exp_id, race_id, bankroll=bankroll)
+            if preds:
+                all_predictions.append(preds)
+        except Exception as e:
+            logger.warning("Ensemble: experiment %d failed: %s", exp_id, e)
+
+    if not all_predictions:
+        raise ValueError("No experiments produced predictions")
+
+    if len(all_predictions) == 1:
+        return all_predictions[0]
+
+    # Build a map of entry_id -> weighted average win_probability
+    entry_probs: dict[int, float] = {}
+    entry_data: dict[int, dict] = {}
+
+    for model_idx, preds in enumerate(all_predictions):
+        w = weights[model_idx] if model_idx < len(weights) else weights[-1]
+        for pred in preds:
+            eid = pred["race_entry_id"]
+            wp = pred.get("win_probability") or 0.0
+            entry_probs[eid] = entry_probs.get(eid, 0.0) + wp * w
+            if eid not in entry_data:
+                entry_data[eid] = pred.copy()
+
+    # Re-normalize probabilities to sum to 1
+    total_prob = sum(entry_probs.values())
+    if total_prob > 0:
+        for eid in entry_probs:
+            entry_probs[eid] /= total_prob
+
+    # Build final prediction list with ensemble probabilities
+    predictions = []
+    for eid, base_pred in entry_data.items():
+        win_prob = entry_probs[eid]
+        pred = base_pred.copy()
+        pred["win_probability"] = win_prob
+        pred["experiment_id"] = experiment_ids  # list to indicate ensemble
+
+        # Recompute Kelly staking with ensemble probability
+        sp_decimal = None
+        entry = db.query(RaceEntry).filter(RaceEntry.id == eid).first()
+        if entry:
+            sp_decimal = entry.sp_decimal
+
+        if win_prob is not None and win_prob > 0:
+            kelly = _compute_kelly_stake(win_prob, sp_decimal, bankroll=bankroll)
+            pred["kelly"] = kelly
+
+            if sp_decimal and sp_decimal > 1:
+                implied = 1.0 / sp_decimal
+                pred["edge"] = round(win_prob - implied, 4)
+                pred["is_value"] = win_prob > implied * 1.05
+            else:
+                pred["edge"] = None
+                pred["is_value"] = None
+
+        predictions.append(pred)
+
+    # Compute race-level confidence
+    probs = np.array([p["win_probability"] for p in predictions])
+    race_confidence = _compute_confidence(probs)
+    for pred in predictions:
+        pred["confidence"] = race_confidence["confidence_score"]
+        pred["confidence_tier"] = race_confidence["confidence_tier"]
+        pred["margin"] = race_confidence["margin"]
+        pred["entropy"] = race_confidence["entropy"]
+
+    predictions.sort(key=lambda p: p.get("win_probability") or 0, reverse=True)
+    return predictions
 
 
 def predict_upcoming_races(

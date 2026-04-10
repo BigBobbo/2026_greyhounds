@@ -21,6 +21,9 @@ class XGBoostTrainer(BaseTrainer):
         model_params.setdefault("random_state", 42)
 
         if target_type == "classification":
+            # Handle class imbalance: win is ~16.7% in 6-dog races
+            # scale_pos_weight = neg_count / pos_count ≈ 5.0
+            model_params.setdefault("scale_pos_weight", 5.0)
             self.model = XGBClassifier(**model_params)
         else:
             self.model = XGBRegressor(**model_params)

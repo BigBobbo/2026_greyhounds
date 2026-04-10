@@ -3,6 +3,7 @@ Dataset builder: assembles feature matrices + target variables for ML training.
 
 Handles:
 - Building feature matrix from computed features
+- Computing built-in race-context features (trap bias, grade movement, etc.)
 - Adding target variables (win, position, time)
 - Time-based train/val/test splitting
 - Race-level grouping (all dogs in same race stay in same split)
@@ -31,6 +32,7 @@ def build_dataset(
     split_config: dict[str, Any] | None = None,
     only_complete: bool = False,
     version_id: int | None = None,
+    include_builtin_features: bool = True,
 ) -> dict[str, Any]:
     """
     Build a complete dataset for model training.
@@ -44,6 +46,8 @@ def build_dataset(
             training on features computed with partial dog histories.
         version_id: If provided, use features from this version snapshot.
             If None, uses unversioned features.
+        include_builtin_features: If True, add built-in race-context features
+            (trap bias, grade movement, days since last, weight change, etc.)
 
     Returns:
         {
@@ -96,6 +100,20 @@ def build_dataset(
         db, feature_ids, entry_ids,
         only_complete=only_complete, version_id=version_id,
     )
+
+    if X.empty and not include_builtin_features:
+        raise ValueError("Feature matrix is empty — have features been materialized?")
+
+    # Compute built-in race-context features
+    if include_builtin_features:
+        logger.info("Computing built-in race-context features...")
+        builtin_X = _compute_builtin_features(db, entry_ids)
+        if not builtin_X.empty:
+            if X.empty:
+                X = builtin_X
+            else:
+                X = X.join(builtin_X, how="outer")
+            logger.info("Added %d built-in features, matrix now %d columns", builtin_X.shape[1], X.shape[1])
 
     if X.empty:
         raise ValueError("Feature matrix is empty — have features been materialized?")
@@ -266,6 +284,45 @@ def _time_based_split(
     )
 
     return X_train, y_train, X_val, y_val, X_test, y_test
+
+
+def _compute_builtin_features(db: Session, entry_ids: list[int]) -> pd.DataFrame:
+    """Compute built-in race-context features for a list of entries.
+
+    These are features that require field-level or track-level statistics
+    and can't be easily expressed via the visual feature builder.
+
+    Computed in batches for efficiency, but some features (trap_win_rate)
+    require per-entry DB queries, so this is slower than materialized features.
+    """
+    from ml.race_features import compute_race_context_features
+    from app.services.feature_engine import get_dog_history, get_race_context
+
+    rows = {}
+    batch_size = 500
+    for i in range(0, len(entry_ids), batch_size):
+        batch = entry_ids[i:i + batch_size]
+        for entry_id in batch:
+            ctx = get_race_context(db, entry_id)
+            if not ctx:
+                continue
+
+            dog_id = ctx["dog_id"]
+            race_date = ctx["race_date"]
+            history = get_dog_history(db, dog_id, race_date)
+
+            features = compute_race_context_features(db, entry_id, history, ctx)
+            rows[entry_id] = features
+
+        if (i + len(batch)) % 5000 == 0 or (i + len(batch)) >= len(entry_ids):
+            logger.info("Built-in features: %d/%d entries computed", min(i + len(batch), len(entry_ids)), len(entry_ids))
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame.from_dict(rows, orient="index")
+    df.index.name = "race_entry_id"
+    return df
 
 
 def _compute_group_sizes(race_ids: pd.Series) -> list[int]:

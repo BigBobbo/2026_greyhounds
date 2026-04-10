@@ -21,6 +21,8 @@ class LightGBMTrainer(BaseTrainer):
         model_params.setdefault("random_state", 42)
 
         if target_type == "classification":
+            # Handle class imbalance: win is ~16.7% in 6-dog races
+            model_params.setdefault("is_unbalance", True)
             self.model = LGBMClassifier(**model_params)
         else:
             self.model = LGBMRegressor(**model_params)

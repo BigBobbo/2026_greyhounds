@@ -1,5 +1,6 @@
 """Predictions API: generate, view, and manage race predictions."""
 
+import logging
 from datetime import date
 from threading import Thread
 from typing import Any
@@ -7,6 +8,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.database import get_db, SessionLocal
 from app.models.dog import Dog
@@ -163,6 +166,134 @@ def get_upcoming_predictions(
         "experiment_id": experiment_id,
         "races_predicted": len(results),
         "races": results,
+    }
+
+
+@router.get("/race/{race_id}/ensemble")
+def predict_race_ensemble(
+    race_id: int,
+    experiment_ids: str = Query(..., description="Comma-separated experiment IDs"),
+    weights: str | None = Query(default=None, description="Comma-separated weights (must match experiment_ids)"),
+    bankroll: float = Query(default=100.0, ge=1),
+    db: Session = Depends(get_db),
+):
+    """Generate ensemble predictions by combining multiple trained models."""
+    from app.services.prediction_service import predict_race_ensemble as ensemble_predict
+
+    race = db.query(Race).filter(Race.id == race_id).first()
+    if not race:
+        raise HTTPException(status_code=404, detail="Race not found")
+
+    exp_ids = [int(x.strip()) for x in experiment_ids.split(",")]
+    w = [float(x.strip()) for x in weights.split(",")] if weights else None
+
+    try:
+        preds = ensemble_predict(db, exp_ids, race_id, weights=w, bankroll=bankroll)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    track = db.query(Track).filter(Track.id == race.track_id).first()
+
+    return {
+        "race_id": race_id,
+        "race_date": str(race.race_date),
+        "race_number": race.race_number,
+        "track_name": track.name if track else None,
+        "distance_m": race.distance_m,
+        "grade": race.grade,
+        "ensemble_experiment_ids": exp_ids,
+        "predictions": preds,
+    }
+
+
+@router.get("/best-bets")
+def get_best_bets(
+    experiment_id: int,
+    race_date: date,
+    bankroll: float = Query(default=100.0, ge=1),
+    min_confidence: str = Query(default="moderate", description="Minimum confidence tier: strong, moderate, weak"),
+    min_edge: float = Query(default=0.05, description="Minimum edge over market odds"),
+    limit: int = Query(default=10, le=50),
+    db: Session = Depends(get_db),
+):
+    """
+    Get the best betting opportunities for a given date.
+
+    Scans all races for the date, generates predictions, and returns
+    the top value bets ranked by edge — filtered by confidence tier.
+    """
+    from app.services.prediction_service import predict_race, save_predictions
+
+    tier_order = {"strong": 3, "moderate": 2, "weak": 1, "avoid": 0}
+    min_tier_value = tier_order.get(min_confidence, 2)
+
+    # Get all races for the date
+    races = (
+        db.query(Race, Track.name.label("track_name"), Track.code.label("track_code"))
+        .join(Track, Race.track_id == Track.id)
+        .filter(Race.race_date == race_date)
+        .order_by(Track.name, Race.race_number)
+        .all()
+    )
+
+    if not races:
+        return {"race_date": str(race_date), "best_bets": [], "races_scanned": 0}
+
+    all_value_bets = []
+    races_scanned = 0
+
+    for race_row in races:
+        race = race_row.Race
+        try:
+            preds = predict_race(db, experiment_id, race.id, bankroll=bankroll)
+            races_scanned += 1
+
+            if preds:
+                save_predictions(db, preds)
+
+            for pred in preds:
+                edge = pred.get("edge")
+                kelly = pred.get("kelly", {})
+                confidence_tier = pred.get("confidence_tier", "avoid")
+                tier_value = tier_order.get(confidence_tier, 0)
+
+                if (
+                    edge is not None
+                    and edge >= min_edge
+                    and kelly.get("bet", False)
+                    and tier_value >= min_tier_value
+                ):
+                    all_value_bets.append({
+                        "race_id": race.id,
+                        "race_number": race.race_number,
+                        "track_name": race_row.track_name,
+                        "track_code": race_row.track_code,
+                        "distance_m": race.distance_m,
+                        "grade": race.grade,
+                        "dog_name": pred["dog_name"],
+                        "trap": pred["trap"],
+                        "win_probability": pred.get("win_probability"),
+                        "edge": edge,
+                        "confidence_tier": confidence_tier,
+                        "confidence_score": pred.get("confidence"),
+                        "kelly_stake": kelly.get("stake"),
+                        "kelly_stake_pct": kelly.get("stake_pct"),
+                        "expected_value": kelly.get("expected_value"),
+                        "implied_prob": kelly.get("implied_prob"),
+                    })
+        except Exception as e:
+            logger.warning("Best bets: race %d failed: %s", race.id, e)
+
+    # Sort by edge (highest first) and limit
+    all_value_bets.sort(key=lambda b: b["edge"], reverse=True)
+    best_bets = all_value_bets[:limit]
+
+    return {
+        "race_date": str(race_date),
+        "experiment_id": experiment_id,
+        "races_scanned": races_scanned,
+        "total_value_bets": len(all_value_bets),
+        "best_bets": best_bets,
     }
 
 

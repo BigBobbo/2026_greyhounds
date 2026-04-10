@@ -5,7 +5,8 @@ Training service: orchestrates the full ML training pipeline.
 2. Build dataset
 3. Train model
 4. Evaluate
-5. Save model + metrics to DB
+5. Calibrate probabilities (isotonic regression)
+6. Save model + metrics to DB
 """
 
 import logging
@@ -16,6 +17,7 @@ from typing import Any
 
 import joblib
 import numpy as np
+from sklearn.isotonic import IsotonicRegression
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -186,7 +188,43 @@ def run_training(db: Session, experiment_id: int) -> None:
             except Exception as e:
                 logger.warning("Betting metrics failed: %s", e)
 
-        # 5. Additional evaluation data
+        # 5. Fit probability calibrator on validation set (isotonic regression)
+        calibrator = None
+        test_proba_calibrated = None
+        if (target_type == "classification" or is_ranking) and test_proba is not None:
+            try:
+                if is_ranking:
+                    val_scores = trainer.predict(X_val)
+                    val_proba = trainer.scores_to_proba(val_scores, group_val)
+                    y_val_binary = (y_val == 1).astype(float).values
+                else:
+                    val_proba = trainer.predict_proba(X_val)
+                    y_val_binary = y_val.values
+
+                if val_proba is not None and len(val_proba) > 10:
+                    calibrator = IsotonicRegression(
+                        y_min=0.01, y_max=0.99, out_of_bounds="clip",
+                    )
+                    calibrator.fit(val_proba, y_val_binary)
+
+                    # Re-calibrate test probabilities for evaluation
+                    test_proba_calibrated = calibrator.predict(test_proba)
+                    logger.info(
+                        "Calibrator fitted. Test proba range: [%.3f, %.3f] -> calibrated: [%.3f, %.3f]",
+                        test_proba.min(), test_proba.max(),
+                        test_proba_calibrated.min(), test_proba_calibrated.max(),
+                    )
+                    # Add calibrated metrics alongside raw metrics
+                    all_metrics["calibrated_brier_score"] = float(
+                        np.mean((test_proba_calibrated - (y_test_binary if is_ranking else y_test.values)) ** 2)
+                    )
+                    all_metrics["raw_brier_score"] = float(
+                        np.mean((test_proba - (y_test_binary if is_ranking else y_test.values)) ** 2)
+                    )
+            except Exception as e:
+                logger.warning("Calibration fitting failed: %s", e)
+
+        # 6. Additional evaluation data
         confusion = None
         roc_data = None
         calibration = None
@@ -201,8 +239,10 @@ def run_training(db: Session, experiment_id: int) -> None:
                 confusion = compute_confusion_matrix(y_binary, test_pred)
 
             if test_proba is not None:
-                roc_data = compute_roc_data(y_binary, test_proba)
-                calibration = compute_calibration_data(y_binary, test_proba)
+                # Use calibrated probabilities for evaluation if available
+                eval_proba = test_proba_calibrated if calibrator is not None else test_proba
+                roc_data = compute_roc_data(y_binary, eval_proba)
+                calibration = compute_calibration_data(y_binary, eval_proba)
 
         # SHAP (skip if too slow — limit samples)
         try:
@@ -212,19 +252,20 @@ def run_training(db: Session, experiment_id: int) -> None:
         except Exception as e:
             logger.warning("SHAP failed: %s", e)
 
-        # 6. Save model + preprocessing artifacts
+        # 7. Save model + preprocessing artifacts
         model_dir = settings.model_artifacts_dir
         os.makedirs(model_dir, exist_ok=True)
         model_path = os.path.join(model_dir, f"experiment_{experiment_id}.joblib")
-        # Save the trainer along with feature medians for consistent imputation
+        # Save the trainer along with feature medians and calibrator
         artifact = {
             "trainer": trainer,
             "feature_medians": dataset.get("feature_medians", {}),
             "is_ranking": is_ranking,
+            "calibrator": calibrator,
         }
         joblib.dump(artifact, model_path)
 
-        # 7. Update experiment record
+        # 8. Update experiment record
         duration = time.time() - start_time
         experiment.status = "completed"
         experiment.metrics = all_metrics
@@ -383,6 +424,26 @@ def run_optuna_optimization(
             except Exception as e:
                 logger.warning("Optuna betting metrics failed: %s", e)
 
+        # Fit calibrator on validation set
+        calibrator = None
+        if (target_type == "classification" or is_ranking) and test_proba is not None:
+            try:
+                if is_ranking:
+                    val_scores_cal = trainer.predict(X_val)
+                    val_proba_cal = trainer.scores_to_proba(val_scores_cal, group_val)
+                    y_val_binary = (y_val == 1).astype(float).values
+                else:
+                    val_proba_cal = trainer.predict_proba(X_val)
+                    y_val_binary = y_val.values
+
+                if val_proba_cal is not None and len(val_proba_cal) > 10:
+                    calibrator = IsotonicRegression(
+                        y_min=0.01, y_max=0.99, out_of_bounds="clip",
+                    )
+                    calibrator.fit(val_proba_cal, y_val_binary)
+            except Exception as e:
+                logger.warning("Optuna calibration fitting failed: %s", e)
+
         # SHAP analysis (same as standard training path)
         shap_data = None
         try:
@@ -400,6 +461,7 @@ def run_optuna_optimization(
             "trainer": trainer,
             "feature_medians": dataset.get("feature_medians", {}),
             "is_ranking": is_ranking,
+            "calibrator": calibrator,
         }
         joblib.dump(artifact, model_path)
 
@@ -415,8 +477,10 @@ def run_optuna_optimization(
             y_binary = (y_test == 1).astype(float).values if is_ranking else y_test.values
             pred_binary = (test_proba > 0.5).astype(float) if is_ranking else test_pred
             experiment.confusion_matrix = compute_confusion_matrix(y_binary, pred_binary)
-            experiment.roc_data = compute_roc_data(y_binary, test_proba)
-            calibration = compute_calibration_data(y_binary, test_proba)
+            # Use calibrated probabilities if available
+            eval_proba = calibrator.predict(test_proba) if calibrator is not None else test_proba
+            experiment.roc_data = compute_roc_data(y_binary, eval_proba)
+            calibration = compute_calibration_data(y_binary, eval_proba)
             experiment.calibration_data = {
                 "calibration": calibration,
                 "betting": betting_data,

@@ -3,6 +3,14 @@ import { Link } from 'react-router-dom';
 import api from '../api/client';
 import type { Experiment, FeatureDefinition } from '../types/models';
 
+interface FeatureVersion {
+  id: number;
+  name: string;
+  description: string | null;
+  created_at: string;
+  feature_count?: number;
+}
+
 const ALGORITHMS = [
   { value: 'lambdarank', label: 'LambdaRank (Recommended)' },
   { value: 'xgboost', label: 'XGBoost' },
@@ -20,6 +28,7 @@ const TARGETS = [
 export default function TrainingLab() {
   const [experiments, setExperiments] = useState<Experiment[]>([]);
   const [features, setFeatures] = useState<FeatureDefinition[]>([]);
+  const [versions, setVersions] = useState<FeatureVersion[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -29,6 +38,7 @@ export default function TrainingLab() {
   const [algorithm, setAlgorithm] = useState('lambdarank');
   const [target, setTarget] = useState('win_prob');
   const [selectedFeatures, setSelectedFeatures] = useState<number[]>([]);
+  const [selectedVersionId, setSelectedVersionId] = useState<number | null>(null);
   const [autoTune, setAutoTune] = useState(false);
   const [optunTrials, setOptunTrials] = useState(50);
 
@@ -39,9 +49,11 @@ export default function TrainingLab() {
     Promise.all([
       api.get<Experiment[]>('/training/experiments'),
       api.get<FeatureDefinition[]>('/features/?enabled_only=true'),
-    ]).then(([expRes, featRes]) => {
+      api.get<FeatureVersion[]>('/features/versions'),
+    ]).then(([expRes, featRes, verRes]) => {
       setExperiments(expRes.data);
       setFeatures(featRes.data);
+      setVersions(verRes.data);
       if (featRes.data.length > 0 && selectedFeatures.length === 0) {
         setSelectedFeatures(featRes.data.map(f => f.id));
       }
@@ -61,16 +73,21 @@ export default function TrainingLab() {
 
     setCreating(true);
     try {
+      const splitConfig: Record<string, any> = {
+        test_after: testAfter,
+        val_pct: 0.15,
+      };
+      if (selectedVersionId !== null) {
+        splitConfig.version_id = selectedVersionId;
+      }
+
       await api.post('/training/experiments', {
         name,
         algorithm,
         target,
         hyperparameters: {},
         feature_set: selectedFeatures,
-        split_config: {
-          test_after: testAfter,
-          val_pct: 0.15,
-        },
+        split_config: splitConfig,
         auto_tune: autoTune,
         optuna_trials: optunTrials,
       });
@@ -215,6 +232,28 @@ export default function TrainingLab() {
           </div>
 
           <div className="mb-4">
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Feature Version
+            </label>
+            <select
+              value={selectedVersionId ?? ''}
+              onChange={(e) => setSelectedVersionId(e.target.value ? Number(e.target.value) : null)}
+              className="border rounded-md px-3 py-2 text-sm w-full"
+            >
+              <option value="">Latest (unversioned)</option>
+              {versions.map(v => (
+                <option key={v.id} value={v.id}>
+                  {v.name}{v.description ? ` — ${v.description}` : ''} ({new Date(v.created_at).toLocaleDateString()})
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-400 mt-1">
+              Select a versioned snapshot for reproducibility, or use "Latest" for the most recent feature values.
+              {versions.length === 0 && ' Create versions in the Feature Builder page.'}
+            </p>
+          </div>
+
+          <div className="mb-4">
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
@@ -293,7 +332,8 @@ export default function TrainingLab() {
           )}
 
           <div className="bg-blue-50 border border-blue-200 rounded-md p-3 mb-4 text-sm text-blue-800">
-            <strong>Training plan:</strong> Train {algorithm === 'lambdarank' ? 'LambdaRank (LightGBM Ranker)' : algorithm.toUpperCase()} to predict <strong>{algorithm === 'lambdarank' ? 'race ranking (win probability derived via softmax)' : target}</strong> using {selectedFeatures.length} features.
+            <strong>Training plan:</strong> Train {algorithm === 'lambdarank' ? 'LambdaRank (LightGBM Ranker)' : algorithm.toUpperCase()} to predict <strong>{algorithm === 'lambdarank' ? 'race ranking (win probability derived via softmax)' : target}</strong> using {selectedFeatures.length} features
+            {selectedVersionId ? <> from version <strong>{versions.find(v => v.id === selectedVersionId)?.name}</strong></> : ' (latest unversioned)'}.
             Train on all data before <strong>{testAfter}</strong>, test on data after.
             {autoTune && ` Auto-tune with ${optunTrials} Optuna trials.`}
             {' '}Betting P&L will be evaluated by simulating $1 flat bets + Kelly criterion on the test set.

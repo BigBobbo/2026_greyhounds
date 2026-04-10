@@ -73,6 +73,7 @@ export default function ExperimentDetail() {
         const STAGE_LABELS: Record<string, string> = {
           starting: 'Starting',
           building_dataset: 'Building dataset',
+          building_dataset_cached: 'Building dataset (cached)',
           training_model: 'Training model',
           evaluating: 'Evaluating',
           calibrating: 'Calibrating',
@@ -84,6 +85,12 @@ export default function ExperimentDetail() {
           if (!stage) return null;
           const m = stage.match(/^optuna_trial_(\d+)_of_(\d+)$/);
           if (m) return `Optuna trial ${m[1]}/${m[2]}`;
+          const featMatch = stage.match(/^building_dataset_features_(\d+)_of_(\d+)$/);
+          if (featMatch) {
+            const done = Math.round(Number(featMatch[1]) / 1000);
+            const total = Math.round(Number(featMatch[2]) / 1000);
+            return `Building features (${done}k/${total}k)`;
+          }
           return STAGE_LABELS[stage] || stage;
         };
         const ageSec = exp.heartbeat_at

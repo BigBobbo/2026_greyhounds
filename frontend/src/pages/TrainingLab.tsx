@@ -101,6 +101,7 @@ export default function TrainingLab() {
   const STAGE_LABELS: Record<string, string> = {
     starting: 'Starting',
     building_dataset: 'Building dataset',
+    building_dataset_cached: 'Building dataset (cached)',
     training_model: 'Training model',
     evaluating: 'Evaluating',
     calibrating: 'Calibrating',
@@ -114,6 +115,13 @@ export default function TrainingLab() {
     // Handle optuna trial stages like "optuna_trial_3_of_50"
     const optunaMatch = stage.match(/^optuna_trial_(\d+)_of_(\d+)$/);
     if (optunaMatch) return `Optuna trial ${optunaMatch[1]}/${optunaMatch[2]}`;
+    // Handle dataset feature progress like "building_dataset_features_230000_of_300000"
+    const featMatch = stage.match(/^building_dataset_features_(\d+)_of_(\d+)$/);
+    if (featMatch) {
+      const done = Math.round(Number(featMatch[1]) / 1000);
+      const total = Math.round(Number(featMatch[2]) / 1000);
+      return `Building features (${done}k/${total}k)`;
+    }
     return STAGE_LABELS[stage] || stage;
   };
 

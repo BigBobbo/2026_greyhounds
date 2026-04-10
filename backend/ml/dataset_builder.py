@@ -10,6 +10,7 @@ Handles:
 """
 
 import logging
+import os
 from datetime import date
 from typing import Any
 
@@ -18,9 +19,14 @@ import pandas as pd
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.race import Race
 from app.models.race_entry import RaceEntry
 from ml.feature_store import build_feature_matrix
+
+BUILTIN_CACHE_PATH = os.path.join(
+    os.path.dirname(settings.model_artifacts_dir), "cache", "builtin_features.parquet"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +39,7 @@ def build_dataset(
     only_complete: bool = False,
     version_id: int | None = None,
     include_builtin_features: bool = True,
+    progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     """
     Build a complete dataset for model training.
@@ -107,7 +114,7 @@ def build_dataset(
     # Compute built-in race-context features
     if include_builtin_features:
         logger.info("Computing built-in race-context features...")
-        builtin_X = _compute_builtin_features(db, entry_ids)
+        builtin_X = _compute_builtin_features(db, entry_ids, progress_callback=progress_callback)
         if not builtin_X.empty:
             if X.empty:
                 X = builtin_X
@@ -286,21 +293,78 @@ def _time_based_split(
     return X_train, y_train, X_val, y_val, X_test, y_test
 
 
-def _compute_builtin_features(db: Session, entry_ids: list[int]) -> pd.DataFrame:
+def _compute_builtin_features(
+    db: Session,
+    entry_ids: list[int],
+    progress_callback: Any | None = None,
+) -> pd.DataFrame:
     """Compute built-in race-context features for a list of entries.
 
-    These are features that require field-level or track-level statistics
-    and can't be easily expressed via the visual feature builder.
-
-    Computed in batches for efficiency, but some features (trap_win_rate)
-    require per-entry DB queries, so this is slower than materialized features.
+    Uses a parquet file cache so features are only computed once per entry.
+    On subsequent calls, only new/missing entries are computed and appended
+    to the cache.
     """
+    requested = set(entry_ids)
+
+    # Load cache
+    cached_df = pd.DataFrame()
+    if os.path.exists(BUILTIN_CACHE_PATH):
+        try:
+            cached_df = pd.read_parquet(BUILTIN_CACHE_PATH)
+            cached_df.index.name = "race_entry_id"
+        except Exception as e:
+            logger.warning("Failed to read builtin features cache, recomputing: %s", e)
+            cached_df = pd.DataFrame()
+
+    # Determine which entries still need computing
+    cached_ids = set(cached_df.index) if not cached_df.empty else set()
+    missing_ids = sorted(requested - cached_ids)
+
+    if missing_ids:
+        logger.info(
+            "Built-in features: %d cached, %d to compute",
+            len(requested) - len(missing_ids), len(missing_ids),
+        )
+        if progress_callback:
+            progress_callback(f"building_dataset_features_{len(requested) - len(missing_ids)}_of_{len(requested)}")
+
+        new_df = _compute_builtin_features_uncached(db, missing_ids, progress_callback=progress_callback)
+
+        # Append new results to cache and save
+        if not new_df.empty:
+            if cached_df.empty:
+                cached_df = new_df
+            else:
+                cached_df = pd.concat([cached_df, new_df])
+
+            os.makedirs(os.path.dirname(BUILTIN_CACHE_PATH), exist_ok=True)
+            cached_df.to_parquet(BUILTIN_CACHE_PATH)
+            logger.info("Built-in features cache updated: %d total entries", len(cached_df))
+    else:
+        logger.info("Built-in features: all %d entries served from cache", len(requested))
+        if progress_callback:
+            progress_callback("building_dataset_cached")
+
+    # Return only the requested entries
+    available = cached_df.index.intersection(entry_ids)
+    if len(available) == 0:
+        return pd.DataFrame()
+    return cached_df.loc[available]
+
+
+def _compute_builtin_features_uncached(
+    db: Session,
+    entry_ids: list[int],
+    progress_callback: Any | None = None,
+) -> pd.DataFrame:
+    """Compute built-in race-context features from scratch (no cache)."""
     from ml.race_features import compute_race_context_features
     from app.services.feature_engine import get_dog_history, get_race_context
 
+    total = len(entry_ids)
     rows = {}
     batch_size = 500
-    for i in range(0, len(entry_ids), batch_size):
+    for i in range(0, total, batch_size):
         batch = entry_ids[i:i + batch_size]
         for entry_id in batch:
             ctx = get_race_context(db, entry_id)
@@ -314,8 +378,11 @@ def _compute_builtin_features(db: Session, entry_ids: list[int]) -> pd.DataFrame
             features = compute_race_context_features(db, entry_id, history, ctx)
             rows[entry_id] = features
 
-        if (i + len(batch)) % 5000 == 0 or (i + len(batch)) >= len(entry_ids):
-            logger.info("Built-in features: %d/%d entries computed", min(i + len(batch), len(entry_ids)), len(entry_ids))
+        done = min(i + len(batch), total)
+        if done % 5000 == 0 or done >= total:
+            logger.info("Built-in features: %d/%d entries computed", done, total)
+        if progress_callback and (done % 10000 == 0 or done >= total):
+            progress_callback(f"building_dataset_features_{done}_of_{total}")
 
     if not rows:
         return pd.DataFrame()

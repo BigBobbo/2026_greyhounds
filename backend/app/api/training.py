@@ -1,5 +1,6 @@
 """Training API: create experiments, trigger training, view results."""
 
+import os
 from threading import Thread
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -101,3 +102,14 @@ def delete_experiment(experiment_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Experiment not found")
     db.delete(experiment)
     db.commit()
+
+
+@router.delete("/cache/builtin-features", status_code=200)
+def clear_builtin_features_cache():
+    """Clear the built-in features cache. Useful after scraping new race data."""
+    from ml.dataset_builder import BUILTIN_CACHE_PATH
+
+    if os.path.exists(BUILTIN_CACHE_PATH):
+        os.remove(BUILTIN_CACHE_PATH)
+        return {"detail": "Built-in features cache cleared"}
+    return {"detail": "No cache to clear"}

@@ -125,7 +125,14 @@ export default function ExperimentDetail() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <div className="bg-white rounded-lg shadow p-4">
           <p className="text-xs text-gray-500">Algorithm</p>
-          <p className="font-semibold">{exp.algorithm}</p>
+          <p className="font-semibold">
+            {exp.algorithm}
+            {exp.metrics?.optuna_n_trials && (
+              <span className="ml-1.5 text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full">
+                Optuna: {exp.metrics.optuna_n_trials} trials
+              </span>
+            )}
+          </p>
         </div>
         <div className="bg-white rounded-lg shadow p-4">
           <p className="text-xs text-gray-500">Target</p>
@@ -146,7 +153,9 @@ export default function ExperimentDetail() {
         <div className="bg-white rounded-lg shadow p-5 mb-6">
           <h2 className="font-semibold mb-3">Metrics</h2>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {Object.entries(exp.metrics).map(([key, val]) => (
+            {Object.entries(exp.metrics)
+              .filter(([key]) => !key.startsWith('optuna_') && !key.startsWith('betting_'))
+              .map(([key, val]) => (
               <div key={key} className="border rounded-md p-3">
                 <p className="text-xs text-gray-500">{key}</p>
                 <p className="font-mono text-lg">{typeof val === 'number' ? val.toFixed(4) : String(val)}</p>

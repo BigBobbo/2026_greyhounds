@@ -3,6 +3,11 @@ import os
 import sys
 import traceback
 
+# Ensure the project root (/app) is on sys.path so that
+# `from scripts.X import ...` and `from app.X import ...` both work
+# when this file is invoked as `python scripts/start.py`.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 def main():
     port = os.environ.get("PORT", "8000")

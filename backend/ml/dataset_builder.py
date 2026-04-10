@@ -130,8 +130,14 @@ def build_dataset(
 
     logger.info("After alignment: %d entries with %d features", len(X), X.shape[1])
 
+    # Add SP-derived features from the current race
+    X = _add_sp_features(X, entries_df)
+
     # Add race-relative features (compare each dog to its race field)
     X = add_race_relative_features(X, entries_df["race_id"])
+
+    # Add pace shape features (front-runner count, early speed rank, etc.)
+    X = _add_pace_shape_features(X, entries_df["race_id"])
 
     # Build target variable
     y = _build_target(entries_df, target)
@@ -348,6 +354,71 @@ def _compute_group_sizes(race_ids: pd.Series) -> list[int]:
             count = 1
     groups.append(count)
     return groups
+
+
+def _add_sp_features(X: pd.DataFrame, entries_df: pd.DataFrame) -> pd.DataFrame:
+    """Add starting-price-derived features from the current race.
+
+    SP is the single strongest predictor of race outcomes (Benter 1994).
+    These features use information known before the race starts.
+    """
+    sp = entries_df["sp_decimal"]
+    race_ids = entries_df["race_id"]
+
+    valid_sp = sp.notna() & (sp > 0)
+    if valid_sp.sum() == 0:
+        return X
+
+    X = X.copy()
+    X["current_sp_decimal"] = sp
+    X.loc[valid_sp, "current_sp_implied_prob"] = 1.0 / sp[valid_sp]
+
+    # SP rank within the race (1 = favourite / shortest price)
+    X["sp_rank_in_field"] = sp.groupby(race_ids).rank(method="min")
+
+    # Market overround per race (sum of implied probs)
+    X["market_overround"] = (
+        (1.0 / sp[valid_sp])
+        .groupby(race_ids[valid_sp])
+        .transform("sum")
+    )
+
+    logger.info("Added 4 SP-derived features")
+    return X
+
+
+def _add_pace_shape_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataFrame:
+    """Add race-level pace shape features that require seeing all runners.
+
+    These capture tactical dynamics: how many front-runners in the race,
+    whether a dog is the sole leader, and early-speed rank in the field.
+    """
+    X = X.copy()
+
+    if "is_front_runner" in X.columns:
+        front_runner_count = X["is_front_runner"].groupby(race_ids).transform(
+            lambda x: (x > 0.5).sum()
+        )
+        X["num_front_runners_in_race"] = front_runner_count
+
+        X["is_sole_front_runner"] = (
+            (X["is_front_runner"] > 0.5) & (front_runner_count == 1)
+        ).astype(float)
+
+        X["pace_pressure"] = X["is_front_runner"] * front_runner_count
+
+    if "early_speed_ratio" in X.columns:
+        # Lower early_speed_ratio = faster to first bend, so rank ascending
+        X["early_speed_rank"] = X["early_speed_ratio"].groupby(race_ids).rank(method="min")
+        X["is_predicted_leader"] = (X["early_speed_rank"] == 1).astype(float)
+
+    n_added = sum(1 for c in ["num_front_runners_in_race", "is_sole_front_runner",
+                               "pace_pressure", "early_speed_rank", "is_predicted_leader"]
+                  if c in X.columns)
+    if n_added:
+        logger.info("Added %d pace-shape features", n_added)
+
+    return X
 
 
 def add_race_relative_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataFrame:

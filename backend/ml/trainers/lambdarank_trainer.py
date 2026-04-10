@@ -5,7 +5,8 @@ all dogs within a race.  Training uses race-level groups so the model
 sees the full competitive field at once.
 
 At prediction time the raw ranking scores are converted to win
-probabilities via softmax over the race.
+probabilities via softmax over the race, then calibrated using
+isotonic regression fitted on the validation set.
 """
 
 from typing import Any
@@ -13,6 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
+from sklearn.isotonic import IsotonicRegression
 
 from ml.trainers.base import BaseTrainer, TrainResult
 
@@ -42,6 +44,7 @@ class LambdaRankTrainer(BaseTrainer):
         }
         self.model: lgb.LGBMRanker | None = None
         self._feature_names: list[str] = []
+        self.calibrator: IsotonicRegression | None = None
 
     def train(self, X_train, y_train, X_val, y_val,
               group_train=None, group_val=None) -> TrainResult:
@@ -75,8 +78,19 @@ class LambdaRankTrainer(BaseTrainer):
             eval_at=[1, 3],
         )
 
-        # Evaluate: compute ranking metrics on validation set
+        # Fit calibrator on validation set:
+        # Convert raw scores to uncalibrated probabilities via softmax,
+        # then fit isotonic regression to map those to true win rates.
         val_scores = self.model.predict(X_val)
+        val_proba_raw = self.scores_to_proba(val_scores, group_val)
+        y_val_binary = (np.asarray(y_val, dtype=float) == 1).astype(float)
+
+        self.calibrator = IsotonicRegression(
+            y_min=0.01, y_max=0.99, out_of_bounds="clip",
+        )
+        self.calibrator.fit(val_proba_raw, y_val_binary)
+
+        # Evaluate: compute ranking metrics on validation set
         metrics = self._compute_ranking_metrics(y_val, val_scores, group_val)
 
         importance = self.get_feature_importance()
@@ -154,12 +168,18 @@ class LambdaRankTrainer(BaseTrainer):
             return None
         return self.model.predict(X)
 
-    def scores_to_proba(self, scores: np.ndarray, group_sizes: list[int] | None = None) -> np.ndarray:
+    def scores_to_proba(self, scores: np.ndarray, group_sizes: list[int] | None = None,
+                         calibrate: bool = True) -> np.ndarray:
         """Convert raw ranking scores to win probabilities via softmax per race.
+
+        If a calibrator is fitted (isotonic regression), applies calibration
+        to map softmax outputs to true win rates, then re-normalizes within
+        each race so probabilities still sum to 1.0.
 
         Args:
             scores: Raw model scores for all entries.
             group_sizes: Number of dogs per race. If None, treat all as one race.
+            calibrate: Whether to apply isotonic calibration (default True).
 
         Returns:
             Array of probabilities that sum to 1.0 within each race group.
@@ -169,14 +189,26 @@ class LambdaRankTrainer(BaseTrainer):
         if group_sizes is None:
             group_sizes = [len(scores)]
 
+        # Step 1: softmax per race
         idx = 0
         for g_size in group_sizes:
             g_scores = scores[idx:idx + g_size]
-            # Softmax with numerical stability
             shifted = g_scores - np.max(g_scores)
             exp_scores = np.exp(shifted)
             proba[idx:idx + g_size] = exp_scores / exp_scores.sum()
             idx += g_size
+
+        # Step 2: calibrate (maps raw softmax probs to true win rates)
+        if calibrate and self.calibrator is not None:
+            proba = self.calibrator.predict(proba)
+            # Re-normalize within each race so they still sum to 1.0
+            idx = 0
+            for g_size in group_sizes:
+                g_proba = proba[idx:idx + g_size]
+                g_sum = g_proba.sum()
+                if g_sum > 0:
+                    proba[idx:idx + g_size] = g_proba / g_sum
+                idx += g_size
 
         return proba
 

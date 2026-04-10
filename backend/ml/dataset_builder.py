@@ -112,6 +112,9 @@ def build_dataset(
 
     logger.info("After alignment: %d entries with %d features", len(X), X.shape[1])
 
+    # Add race-relative features (compare each dog to its race field)
+    X = add_race_relative_features(X, entries_df["race_id"])
+
     # Build target variable
     y = _build_target(entries_df, target)
 
@@ -288,3 +291,69 @@ def _compute_group_sizes(race_ids: pd.Series) -> list[int]:
             count = 1
     groups.append(count)
     return groups
+
+
+def add_race_relative_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataFrame:
+    """Add race-relative features that compare each dog to the race field.
+
+    These features can't be computed as standalone per-dog features because
+    they need to see all dogs in the same race.  They are derived from the
+    existing per-dog features by computing within-race statistics.
+
+    For each numeric feature column, adds:
+      - {col}__vs_field_mean: dog's value minus race average
+      - {col}__rank_in_field: 1-based rank within race (1 = best for time-like
+        features, 1 = highest for rate-like features)
+
+    Also adds:
+      - num_runners: how many dogs in this race
+    """
+    if X.empty or race_ids.empty:
+        return X
+
+    X = X.copy()
+    race_ids_aligned = race_ids.loc[X.index]
+
+    # Pick key features to create relative versions of (avoid creating
+    # relative features of relative features or niche columns)
+    KEY_FEATURES = [
+        "mean_finish_time_last5",
+        "min_finish_time_last10",
+        "mean_position_last5",
+        "win_rate_last10",
+        "place_rate_last10",
+        "mean_sectional_last5",
+        "mean_beaten_dist_last5",
+        "mean_sp_last5",
+        "career_runs",
+        "days_since_last_race",
+        "stdev_finish_time_last5",
+    ]
+
+    cols_to_process = [c for c in KEY_FEATURES if c in X.columns]
+
+    for col in cols_to_process:
+        # vs field mean: how does this dog compare to the average of the field
+        race_mean = X[col].groupby(race_ids_aligned).transform("mean")
+        X[f"{col}__vs_field"] = X[col] - race_mean
+
+        # Rank within race (ascending = lower values get rank 1)
+        # For time/position/beaten_dist: lower is better, so ascending rank
+        # For win_rate/place_rate/career_runs: higher is better, so descending rank
+        higher_is_better = col in (
+            "win_rate_last10", "place_rate_last10", "career_runs",
+            "mean_sp_last5",  # higher SP = longer shot, but here we want market rank
+        )
+        X[f"{col}__rank"] = X[col].groupby(race_ids_aligned).rank(
+            ascending=not higher_is_better, method="min",
+        )
+
+    # Number of runners in the race
+    X["num_runners"] = race_ids_aligned.groupby(race_ids_aligned).transform("count").astype(float)
+
+    logger.info(
+        "Added %d race-relative features (%d base columns x 2 + num_runners)",
+        len(cols_to_process) * 2 + 1, len(cols_to_process),
+    )
+
+    return X

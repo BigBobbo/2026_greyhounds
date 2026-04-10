@@ -1,9 +1,10 @@
-"""XGBoost trainer implementation."""
+"""XGBoost trainer implementation with isotonic calibration."""
 
 from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 from xgboost import XGBClassifier, XGBRegressor
 
 from ml.trainers.base import BaseTrainer, TrainResult
@@ -13,6 +14,7 @@ class XGBoostTrainer(BaseTrainer):
     def __init__(self, params: dict[str, Any], target_type: str = "classification"):
         super().__init__(params)
         self.target_type = target_type
+        self.calibrator: IsotonicRegression | None = None
 
         model_params = {k: v for k, v in params.items() if k not in ("target_type",)}
         model_params.setdefault("verbosity", 0)
@@ -34,6 +36,13 @@ class XGBoostTrainer(BaseTrainer):
         if self.target_type == "classification":
             val_proba = self.model.predict_proba(X_val)[:, 1]
             val_pred = self.model.predict(X_val)
+
+            # Fit isotonic calibrator on validation set
+            self.calibrator = IsotonicRegression(
+                y_min=0.01, y_max=0.99, out_of_bounds="clip",
+            )
+            self.calibrator.fit(val_proba, np.asarray(y_val, dtype=float))
+
             metrics = compute_metrics(y_val, val_pred, val_proba, "classification")
         else:
             val_pred = self.model.predict(X_val)
@@ -45,9 +54,12 @@ class XGBoostTrainer(BaseTrainer):
     def predict(self, X):
         return self.model.predict(X)
 
-    def predict_proba(self, X):
+    def predict_proba(self, X, calibrate: bool = True):
         if self.target_type == "classification":
-            return self.model.predict_proba(X)[:, 1]
+            raw = self.model.predict_proba(X)[:, 1]
+            if calibrate and self.calibrator is not None:
+                return self.calibrator.predict(raw)
+            return raw
         return None
 
     def get_feature_importance(self) -> dict[str, float]:

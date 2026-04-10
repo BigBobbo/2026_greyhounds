@@ -298,17 +298,27 @@ def predict_race(
             X[col] = 0
     X = X[feature_names]
 
+    # Add race-relative features (same as training)
+    # All entries belong to one race, so create a constant race_id series
+    from ml.dataset_builder import add_race_relative_features
+    race_id_series = pd.Series(race_id, index=X.index, name="race_id")
+    X = add_race_relative_features(X, race_id_series)
+
+    # Fill any NaN in new relative features
+    X = X.fillna(0)
+
     # Generate predictions
     raw_scores = trainer.predict(X)
 
-    # Compute probabilities
+    # Compute probabilities (calibration is built into the trainer)
     if is_ranking:
-        # LambdaRank: softmax over raw ranking scores
-        win_probs = _softmax(raw_scores)
+        # LambdaRank: softmax + isotonic calibration (built into scores_to_proba)
+        win_probs = trainer.scores_to_proba(raw_scores, group_sizes=[len(X)])
     elif hasattr(trainer, "predict_proba"):
+        # Pointwise classifiers: predict_proba now applies calibration internally
         raw_proba = trainer.predict_proba(X)
         if raw_proba is not None:
-            # Softmax normalization (better than naive division)
+            # Normalize within race via softmax for multi-dog comparison
             win_probs = _softmax(np.log(np.clip(raw_proba, 1e-10, 1.0)))
         else:
             win_probs = None

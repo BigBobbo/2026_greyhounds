@@ -56,6 +56,7 @@ export default function ExperimentDetail() {
   // Betting P&L data
   const bettingRaw = (exp.calibration_data as any)?.betting;
   const pnlData: { race: number; pnl: number }[] = bettingRaw?.pnl_by_race || [];
+  const kellyPnlData: { race: number; pnl: number }[] = bettingRaw?.kelly_pnl_by_race || [];
 
   // Confusion matrix
   const cm = exp.confusion_matrix as number[][] | null;
@@ -156,19 +157,38 @@ export default function ExperimentDetail() {
               <p className="text-xs text-gray-400">ROI {bettingRaw.favourite_roi}%</p>
             </div>
           </div>
-          {pnlData.length > 0 && (
-            <div>
-              <h3 className="text-sm font-medium text-gray-600 mb-2">Cumulative P&L (Top Pick)</h3>
-              <ResponsiveContainer width="100%" height={250}>
-                <LineChart data={pnlData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="race" label={{ value: 'Race #', position: 'bottom', offset: -5 }} />
-                  <YAxis label={{ value: 'P&L ($)', angle: -90, position: 'left' }} />
-                  <Tooltip formatter={(v: any) => [`$${v}`, 'P&L']} />
-                  <Line type="monotone" dataKey="pnl" stroke="#3b82f6" strokeWidth={2} dot={false} />
-                  <Line type="monotone" dataKey={() => 0} stroke="#d1d5db" strokeDasharray="5 5" dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
+          {(pnlData.length > 0 || kellyPnlData.length > 0) && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {pnlData.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-medium text-gray-600 mb-2">Cumulative P&L (Flat $1 Top Pick)</h3>
+                  <ResponsiveContainer width="100%" height={250}>
+                    <LineChart data={pnlData}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="race" label={{ value: 'Race #', position: 'bottom', offset: -5 }} />
+                      <YAxis label={{ value: 'P&L ($)', angle: -90, position: 'left' }} />
+                      <Tooltip formatter={(v: any) => [`$${v}`, 'Flat P&L']} />
+                      <Line type="monotone" dataKey="pnl" stroke="#3b82f6" strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey={() => 0} stroke="#d1d5db" strokeDasharray="5 5" dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+              {kellyPnlData.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-medium text-gray-600 mb-2">Cumulative P&L (Kelly Criterion)</h3>
+                  <ResponsiveContainer width="100%" height={250}>
+                    <LineChart data={kellyPnlData}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="race" label={{ value: 'Race #', position: 'bottom', offset: -5 }} />
+                      <YAxis label={{ value: 'P&L ($)', angle: -90, position: 'left' }} />
+                      <Tooltip formatter={(v: any) => [`$${v}`, 'Kelly P&L']} />
+                      <Line type="monotone" dataKey="pnl" stroke="#10b981" strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey={() => 0} stroke="#d1d5db" strokeDasharray="5 5" dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
             </div>
           )}
         </div>

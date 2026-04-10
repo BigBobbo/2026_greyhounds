@@ -9,6 +9,7 @@ from app.models.feature_version import FeatureVersion
 from app.models.experiment import Experiment
 from app.models.prediction import Prediction
 from app.models.scrape_log import ScrapeLog
+from app.models.bankroll import BankrollConfig, BetRecord
 
 __all__ = [
     "Track",
@@ -22,4 +23,6 @@ __all__ = [
     "Experiment",
     "Prediction",
     "ScrapeLog",
+    "BankrollConfig",
+    "BetRecord",
 ]

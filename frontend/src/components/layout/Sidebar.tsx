@@ -7,6 +7,7 @@ const navItems = [
   { to: '/features', label: 'Features', icon: '~' },
   { to: '/training', label: 'Training Lab', icon: '~' },
   { to: '/predictions', label: 'Predictions', icon: '~' },
+  { to: '/bankroll', label: 'Bankroll', icon: '~' },
   { to: '/scraping', label: 'Scraping', icon: '~' },
 ];
 

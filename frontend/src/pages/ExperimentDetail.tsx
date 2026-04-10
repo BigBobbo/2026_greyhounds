@@ -207,7 +207,7 @@ export default function ExperimentDetail() {
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="race" label={{ value: 'Race #', position: 'bottom', offset: -5 }} />
                       <YAxis label={{ value: 'P&L ($)', angle: -90, position: 'left' }} />
-                      <Tooltip formatter={(v: any, name: string) => [`$${v}`, name === 'pnl' ? 'Model Top Pick' : name === 'fav_pnl' ? 'Favourite' : name]} />
+                      <Tooltip formatter={(v: any, name) => [`$${v}`, name === 'pnl' ? 'Model Top Pick' : name === 'fav_pnl' ? 'Favourite' : String(name ?? '')]} />
                       <Legend formatter={(value: string) => value === 'pnl' ? 'Model Top Pick' : value === 'fav_pnl' ? 'Favourite (baseline)' : value} />
                       <Line type="monotone" dataKey="pnl" stroke="#3b82f6" strokeWidth={2} dot={false} name="pnl" />
                       <Line type="monotone" dataKey="fav_pnl" stroke="#f59e0b" strokeWidth={2} dot={false} strokeDasharray="6 3" name="fav_pnl" />

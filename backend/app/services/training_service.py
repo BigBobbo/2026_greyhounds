@@ -351,6 +351,37 @@ def run_optuna_optimization(
         all_metrics["optuna_best_value"] = float(study.best_value)
         all_metrics["optuna_n_trials"] = n_trials
 
+        # Betting P&L evaluation
+        meta_test = dataset.get("meta_test")
+        betting_data = None
+        can_eval_betting = (
+            (target_type == "classification" or is_ranking)
+            and test_proba is not None
+            and meta_test is not None
+        )
+        if can_eval_betting:
+            try:
+                from ml.evaluation import compute_betting_metrics
+                y_binary_bet = (y_test == 1).astype(float).values if is_ranking else y_test.values
+                betting = compute_betting_metrics(
+                    y_binary_bet,
+                    test_proba,
+                    meta_test["sp_decimal"].values,
+                    meta_test["race_id"].values,
+                )
+                betting_data = betting
+                all_metrics["betting_top_pick_pnl"] = betting["top_pick_pnl"]
+                all_metrics["betting_top_pick_roi"] = betting["top_pick_roi"]
+                all_metrics["betting_top_pick_strike_rate"] = betting["top_pick_strike_rate"]
+                all_metrics["betting_value_pnl"] = betting["value_bet_pnl"]
+                all_metrics["betting_value_roi"] = betting["value_bet_roi"]
+                all_metrics["betting_favourite_pnl"] = betting["favourite_pnl"]
+                all_metrics["betting_favourite_roi"] = betting["favourite_roi"]
+                all_metrics["betting_kelly_pnl"] = betting.get("kelly_pnl", 0)
+                all_metrics["betting_kelly_roi"] = betting.get("kelly_roi", 0)
+            except Exception as e:
+                logger.warning("Optuna betting metrics failed: %s", e)
+
         # Save model + preprocessing artifacts
         model_dir = settings.model_artifacts_dir
         os.makedirs(model_dir, exist_ok=True)
@@ -374,7 +405,11 @@ def run_optuna_optimization(
             pred_binary = (test_proba > 0.5).astype(float) if is_ranking else test_pred
             experiment.confusion_matrix = compute_confusion_matrix(y_binary, pred_binary)
             experiment.roc_data = compute_roc_data(y_binary, test_proba)
-            experiment.calibration_data = compute_calibration_data(y_binary, test_proba)
+            calibration = compute_calibration_data(y_binary, test_proba)
+            experiment.calibration_data = {
+                "calibration": calibration,
+                "betting": betting_data,
+            } if calibration or betting_data else None
 
         db.commit()
         logger.info("Optuna experiment %d completed. Best: %s", experiment_id, best_params)

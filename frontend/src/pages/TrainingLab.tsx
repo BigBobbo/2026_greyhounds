@@ -198,7 +198,7 @@ export default function TrainingLab() {
                     value={optunTrials}
                     onChange={(e) => setOptunTrials(parseInt(e.target.value) || 50)}
                     min={10}
-                    max={200}
+                    max={1000}
                     className="border rounded px-2 py-1 w-20 text-xs ml-2"
                   />
                   <span className="text-xs text-gray-400">trials</span>
@@ -310,7 +310,21 @@ export default function TrainingLab() {
                       <p className="text-xs text-gray-400">Test after: {(exp.split_config as any).test_after}</p>
                     )}
                   </td>
-                  <td className="px-4 py-3">{exp.algorithm}</td>
+                  <td className="px-4 py-3">
+                    {exp.algorithm}
+                    {exp.metrics?.optuna_n_trials && (
+                      <span className="ml-1.5 text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full">
+                        Optuna: {exp.metrics.optuna_n_trials} trials
+                      </span>
+                    )}
+                    {exp.hyperparameters && Object.keys(exp.hyperparameters).length > 0 && (
+                      <p className="text-xs text-gray-400 mt-1 truncate max-w-xs" title={Object.entries(exp.hyperparameters).map(([k, v]) => `${k}: ${typeof v === 'number' ? (v % 1 === 0 ? v : Number(v).toPrecision(3)) : v}`).join(', ')}>
+                        {Object.entries(exp.hyperparameters).map(([k, v]) =>
+                          `${k}: ${typeof v === 'number' ? (v % 1 === 0 ? v : Number(v).toPrecision(3)) : v}`
+                        ).join(', ')}
+                      </p>
+                    )}
+                  </td>
                   <td className="px-4 py-3">{exp.target}</td>
                   <td className="px-4 py-3">
                     <span className={`px-2 py-0.5 rounded-full text-xs ${statusColor(exp.status)}`}>

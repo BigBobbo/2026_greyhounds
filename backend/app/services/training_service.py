@@ -288,6 +288,7 @@ def run_optuna_optimization(
         y_train = dataset["y_train"]
         X_val = dataset["X_val"]
         y_val = dataset["y_val"]
+        feature_names = dataset["feature_names"]
         target_type = "regression" if experiment.target == "finish_time" else "classification"
 
         # Persist the actual cutoff dates so prediction service can guard against leakage
@@ -382,6 +383,15 @@ def run_optuna_optimization(
             except Exception as e:
                 logger.warning("Optuna betting metrics failed: %s", e)
 
+        # SHAP analysis (same as standard training path)
+        shap_data = None
+        try:
+            shap_data = compute_shap_summary(
+                trainer.model, X_test, feature_names, max_samples=300,
+            )
+        except Exception as e:
+            logger.warning("SHAP failed: %s", e)
+
         # Save model + preprocessing artifacts
         model_dir = settings.model_artifacts_dir
         os.makedirs(model_dir, exist_ok=True)
@@ -396,6 +406,7 @@ def run_optuna_optimization(
         experiment.status = "completed"
         experiment.metrics = all_metrics
         experiment.feature_importance = result.feature_importance
+        experiment.shap_summary = shap_data
         experiment.training_duration_s = time.time() - start_time
         experiment.model_path = model_path
         experiment.completed_at = datetime.utcnow()

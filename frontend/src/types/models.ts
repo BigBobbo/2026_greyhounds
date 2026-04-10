@@ -92,6 +92,8 @@ export interface Experiment {
   error_message: string | null;
   created_at: string | null;
   completed_at: string | null;
+  heartbeat_at: string | null;
+  training_stage: string | null;
 }
 
 export interface Prediction {

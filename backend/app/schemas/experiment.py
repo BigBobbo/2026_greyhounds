@@ -35,6 +35,8 @@ class ExperimentResponse(BaseModel):
     error_message: str | None = None
     created_at: datetime | None = None
     completed_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    training_stage: str | None = None
 
     model_config = {"from_attributes": True}
 

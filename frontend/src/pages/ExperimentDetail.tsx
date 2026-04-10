@@ -69,11 +69,51 @@ export default function ExperimentDetail() {
         <span className={`px-2 py-0.5 rounded-full text-xs ${statusColor}`}>{exp.status}</span>
       </div>
 
-      {exp.status === 'running' && (
-        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
-          <p className="text-yellow-700">Training in progress... This page auto-refreshes.</p>
-        </div>
-      )}
+      {exp.status === 'running' && (() => {
+        const STAGE_LABELS: Record<string, string> = {
+          starting: 'Starting',
+          building_dataset: 'Building dataset',
+          training_model: 'Training model',
+          evaluating: 'Evaluating',
+          calibrating: 'Calibrating',
+          computing_shap: 'Computing SHAP',
+          saving_model: 'Saving model',
+          retraining_best: 'Retraining best',
+        };
+        const formatStage = (stage: string | null) => {
+          if (!stage) return null;
+          const m = stage.match(/^optuna_trial_(\d+)_of_(\d+)$/);
+          if (m) return `Optuna trial ${m[1]}/${m[2]}`;
+          return STAGE_LABELS[stage] || stage;
+        };
+        const ageSec = exp.heartbeat_at
+          ? Math.floor((Date.now() - new Date(exp.heartbeat_at + 'Z').getTime()) / 1000)
+          : null;
+        const isStale = ageSec !== null && ageSec > 120;
+        const ageStr = ageSec !== null
+          ? (ageSec < 60 ? `${ageSec}s ago` : ageSec < 3600 ? `${Math.floor(ageSec / 60)}m ago` : `${Math.floor(ageSec / 3600)}h ago`)
+          : null;
+
+        return isStale ? (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+            <p className="text-red-700 font-medium">Training appears to have stalled or crashed.</p>
+            <p className="text-red-600 text-sm mt-1">
+              Last heartbeat: {ageStr}
+              {exp.training_stage && <> &middot; Stage: {formatStage(exp.training_stage)}</>}
+            </p>
+          </div>
+        ) : (
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
+            <p className="text-yellow-700">
+              Training in progress{exp.training_stage ? <>: <strong>{formatStage(exp.training_stage)}</strong></> : '...'}
+            </p>
+            <p className="text-yellow-600 text-sm mt-1">
+              {ageStr ? `Last heartbeat ${ageStr}` : 'Waiting for first heartbeat...'}
+              {' '}&middot; This page auto-refreshes.
+            </p>
+          </div>
+        );
+      })()}
 
       {exp.error_message && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">

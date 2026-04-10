@@ -382,6 +382,128 @@ PRESET_FEATURES = [
         "config_json": {"metric": "finish_position", "aggregation": "count", "window": {"type": "all"}, "filters": {"same_distance": True}},
         "input_columns": ["finish_position"],
     },
+    # === Trouble-in-running features ===
+    {
+        "name": "trouble_rate_last10",
+        "display_name": "Trouble in Running Rate (last 10)",
+        "description": "Fraction of last 10 races where the dog encountered trouble (checked, bumped, crowded, fell, hampered). Higher = more unlucky.",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    if dog_history.empty:
+        return None
+    recent = dog_history.tail(10)
+    comments = recent["comment"].dropna().str.lower()
+    if comments.empty:
+        return 0.0
+    trouble_keywords = ["ck", "bmp", "crd", "fell", "hampered", "baulked", "stumbled", "crowded", "checked", "bumped"]
+    trouble_count = comments.apply(lambda c: 1 if sum(1 for kw in trouble_keywords if kw in c) > 0 else 0).sum()
+    return float(trouble_count) / float(len(recent))
+""",
+        "input_columns": ["comment"],
+    },
+    {
+        "name": "first_bend_trouble_rate",
+        "display_name": "First Bend Trouble Rate (last 10)",
+        "description": "Fraction of last 10 races with trouble specifically at the first bend",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    if dog_history.empty:
+        return None
+    recent = dog_history.tail(10)
+    comments = recent["comment"].dropna().str.lower()
+    if comments.empty:
+        return 0.0
+    first_bend_patterns = ["ck 1", "bmp 1", "crd 1", "crowded 1", "checked 1", "bumped 1"]
+    trouble_count = comments.apply(lambda c: 1 if sum(1 for p in first_bend_patterns if p in c) > 0 else 0).sum()
+    return float(trouble_count) / float(len(recent))
+""",
+        "input_columns": ["comment"],
+    },
+    # === Rest / fitness features ===
+    {
+        "name": "optimal_rest_window",
+        "display_name": "Optimal Rest Window",
+        "description": "Binary: 1.0 if 7-14 days since last race (optimal), 0.0 otherwise. Based on research showing greyhounds peak with 7-14 day rest intervals.",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    if dog_history.empty:
+        return None
+    last_race_date = dog_history["race_date"].max()
+    current_date = race_context.get("race_date")
+    if last_race_date is None or current_date is None:
+        return None
+    days_rest = (current_date - last_race_date).days
+    return 1.0 if 7 <= days_rest <= 14 else 0.0
+""",
+        "input_columns": ["race_date"],
+    },
+    {
+        "name": "rest_category",
+        "display_name": "Rest Category",
+        "description": "Categorized rest: 1=short (<5 days), 2=quick turnaround (5-6), 3=optimal (7-14), 4=freshened (15-28), 5=layoff (29+). Encoded as integer.",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    if dog_history.empty:
+        return None
+    last_race_date = dog_history["race_date"].max()
+    current_date = race_context.get("race_date")
+    if last_race_date is None or current_date is None:
+        return None
+    days = (current_date - last_race_date).days
+    if days < 5:
+        return 1.0
+    elif days < 7:
+        return 2.0
+    elif days <= 14:
+        return 3.0
+    elif days <= 28:
+        return 4.0
+    else:
+        return 5.0
+""",
+        "input_columns": ["race_date"],
+    },
+    # === Bayesian-smoothed rate features ===
+    {
+        "name": "bayesian_win_rate",
+        "display_name": "Bayesian-Smoothed Win Rate",
+        "description": "Win rate smoothed with Bayesian prior (Beta(1,5) prior ~ 17% base rate for 6-runner races). Prevents noisy estimates from small samples.",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    if dog_history.empty:
+        return None
+    positions = dog_history["finish_position"].dropna()
+    if positions.empty:
+        return None
+    wins = (positions == 1).sum()
+    total = len(positions)
+    prior_alpha = 1.0
+    prior_beta = 5.0
+    smoothed = (wins + prior_alpha) / (total + prior_alpha + prior_beta)
+    return float(smoothed)
+""",
+        "input_columns": ["finish_position"],
+    },
+    {
+        "name": "bayesian_place_rate",
+        "display_name": "Bayesian-Smoothed Place Rate",
+        "description": "Place rate (top 3) smoothed with Bayesian prior (Beta(3,3) prior ~ 50% base rate)",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    if dog_history.empty:
+        return None
+    positions = dog_history["finish_position"].dropna()
+    if positions.empty:
+        return None
+    places = (positions <= 3).sum()
+    total = len(positions)
+    prior_alpha = 3.0
+    prior_beta = 3.0
+    smoothed = (places + prior_alpha) / (total + prior_alpha + prior_beta)
+    return float(smoothed)
+""",
+        "input_columns": ["finish_position"],
+    },
 ]
 
 

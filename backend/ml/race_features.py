@@ -12,6 +12,7 @@ These are computed on-the-fly alongside user-defined features.
 """
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 import numpy as np
@@ -90,15 +91,12 @@ def compute_race_context_features(
 
     # 9. Dog age in years (greyhounds peak at 2-3.5 years)
     dog_id = race_context.get("dog_id")
-    if dog_id:
-        dog = db.query(Dog).filter(Dog.id == dog_id).first()
-        if dog and dog.birth_date and race_context.get("race_date"):
-            age = (race_context["race_date"] - dog.birth_date).days / 365.25
-            features["dog_age_years"] = age
-            features["dog_age_squared"] = age ** 2
-        else:
-            features["dog_age_years"] = None
-            features["dog_age_squared"] = None
+    dog = db.query(Dog).filter(Dog.id == dog_id).first() if dog_id else None
+
+    if dog and dog.birth_date and race_context.get("race_date"):
+        age = (race_context["race_date"] - dog.birth_date).days / 365.25
+        features["dog_age_years"] = age
+        features["dog_age_squared"] = age ** 2
     else:
         features["dog_age_years"] = None
         features["dog_age_squared"] = None
@@ -123,6 +121,30 @@ def compute_race_context_features(
     else:
         features["front_runner_x_inside"] = None
         features["front_runner_x_outside"] = None
+
+    # 11. Trainer performance stats (win/place rate overall and at this track)
+    trainer_stats = _trainer_stats(
+        db,
+        dog.trainer_name if dog else None,
+        race_context.get("track_id"),
+        race_context.get("race_date"),
+    )
+    features.update(trainer_stats)
+
+    # 12. Sire progeny stats (breeding quality signal)
+    sire_stats = _sire_stats(
+        db,
+        dog.sire if dog else None,
+        race_context.get("distance_m"),
+        race_context.get("race_date"),
+    )
+    features.update(sire_stats)
+
+    # 13. Track-normalized speed rating (dog's best time vs track/distance average)
+    features["track_speed_rating"] = _track_speed_rating(
+        db, dog_history, race_context.get("track_id"),
+        race_context.get("distance_m"), race_context.get("race_date"),
+    )
 
     return features
 
@@ -261,6 +283,164 @@ def _position_consistency(dog_history: pd.DataFrame, n_recent: int = 10) -> floa
     return float(positions.std())
 
 
+def _trainer_stats(
+    db: Session,
+    trainer_name: str | None,
+    track_id: int | None,
+    before_date=None,
+    days_window: int = 90,
+    min_runners: int = 20,
+) -> dict[str, float | None]:
+    """Trainer win/place rate in the last N days, overall and at this track."""
+    result = {
+        "trainer_win_rate": None,
+        "trainer_place_rate": None,
+        "trainer_win_rate_at_track": None,
+    }
+
+    if not trainer_name:
+        return result
+
+    cutoff = before_date - timedelta(days=days_window) if before_date else None
+
+    base_query = (
+        db.query(
+            func.count(RaceEntry.id).label("total"),
+            func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
+            func.sum(case((RaceEntry.finish_position <= 3, 1), else_=0)).label("places"),
+        )
+        .join(Race, RaceEntry.race_id == Race.id)
+        .join(Dog, RaceEntry.dog_id == Dog.id)
+        .filter(
+            Dog.trainer_name == trainer_name,
+            Race.status == "resulted",
+            RaceEntry.finish_position.isnot(None),
+        )
+    )
+    if before_date:
+        base_query = base_query.filter(Race.race_date < before_date)
+    if cutoff:
+        base_query = base_query.filter(Race.race_date >= cutoff)
+
+    row = base_query.first()
+    if row and row.total and row.total >= min_runners:
+        result["trainer_win_rate"] = float(row.wins) / float(row.total)
+        result["trainer_place_rate"] = float(row.places) / float(row.total)
+
+    # Trainer at this specific track
+    if track_id:
+        track_row = base_query.filter(Race.track_id == track_id).first()
+        if track_row and track_row.total and track_row.total >= 10:
+            result["trainer_win_rate_at_track"] = float(track_row.wins) / float(track_row.total)
+
+    return result
+
+
+def _sire_stats(
+    db: Session,
+    sire_name: str | None,
+    distance_m: int | None,
+    before_date=None,
+    min_progeny_runs: int = 50,
+) -> dict[str, float | None]:
+    """Win rate and mean time of sire's progeny."""
+    result = {"sire_progeny_win_rate": None, "sire_progeny_mean_time_at_dist": None}
+
+    if not sire_name:
+        return result
+
+    query = (
+        db.query(
+            func.count(RaceEntry.id).label("total"),
+            func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
+        )
+        .join(Dog, RaceEntry.dog_id == Dog.id)
+        .join(Race, RaceEntry.race_id == Race.id)
+        .filter(
+            Dog.sire == sire_name,
+            Race.status == "resulted",
+            RaceEntry.finish_position.isnot(None),
+        )
+    )
+    if before_date:
+        query = query.filter(Race.race_date < before_date)
+
+    row = query.first()
+    if row and row.total and row.total >= min_progeny_runs:
+        result["sire_progeny_win_rate"] = float(row.wins) / float(row.total)
+
+    # Mean time of progeny at this distance
+    if distance_m:
+        time_query = (
+            db.query(func.avg(RaceEntry.finish_time))
+            .join(Dog, RaceEntry.dog_id == Dog.id)
+            .join(Race, RaceEntry.race_id == Race.id)
+            .filter(
+                Dog.sire == sire_name,
+                Race.status == "resulted",
+                Race.distance_m == distance_m,
+                RaceEntry.finish_time.isnot(None),
+            )
+        )
+        if before_date:
+            time_query = time_query.filter(Race.race_date < before_date)
+
+        avg_time = time_query.scalar()
+        if avg_time:
+            result["sire_progeny_mean_time_at_dist"] = float(avg_time)
+
+    return result
+
+
+def _track_speed_rating(
+    db: Session,
+    dog_history: pd.DataFrame,
+    track_id: int | None,
+    distance_m: int | None,
+    before_date=None,
+    days_window: int = 180,
+    min_races: int = 50,
+) -> float | None:
+    """Dog's best adjusted time vs the track/distance average.
+
+    Negative = faster than standard (good). Positive = slower.
+    """
+    if dog_history.empty or not track_id or not distance_m:
+        return None
+
+    # Get dog's best adjusted time at this distance from history
+    same_dist = dog_history[dog_history["distance_m"] == distance_m]
+    if "adjusted_time" not in same_dist.columns:
+        return None
+    dog_times = same_dist["adjusted_time"].dropna().tail(10)
+    if dog_times.empty:
+        return None
+    dog_best = float(dog_times.min())
+
+    cutoff = before_date - timedelta(days=days_window) if before_date else None
+
+    query = (
+        db.query(func.count(RaceEntry.id), func.avg(RaceEntry.adjusted_time))
+        .join(Race, RaceEntry.race_id == Race.id)
+        .filter(
+            Race.track_id == track_id,
+            Race.distance_m == distance_m,
+            Race.status == "resulted",
+            RaceEntry.adjusted_time.isnot(None),
+        )
+    )
+    if before_date:
+        query = query.filter(Race.race_date < before_date)
+    if cutoff:
+        query = query.filter(Race.race_date >= cutoff)
+
+    count, avg_time = query.first()
+    if not count or count < min_races or avg_time is None:
+        return None
+
+    return float(dog_best - avg_time)
+
+
 # Registry of built-in feature names for the UI/API
 BUILTIN_FEATURE_NAMES = [
     "trap_win_rate_at_track",
@@ -278,4 +458,10 @@ BUILTIN_FEATURE_NAMES = [
     "early_speed_x_outside",
     "front_runner_x_inside",
     "front_runner_x_outside",
+    "trainer_win_rate",
+    "trainer_place_rate",
+    "trainer_win_rate_at_track",
+    "sire_progeny_win_rate",
+    "sire_progeny_mean_time_at_dist",
+    "track_speed_rating",
 ]

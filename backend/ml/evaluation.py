@@ -165,7 +165,9 @@ def compute_betting_metrics(
     df["implied_prob"] = 1.0 / df["sp"]
 
     # --- Strategy 1: Bet $1 on model's top pick per race ---
+    # Also compute favourite (lowest SP) baseline in the same loop for alignment
     top_pick_results = []
+    fav_profits = []
     for race_id, group in df.groupby("race_id"):
         if len(group) == 0:
             continue
@@ -179,6 +181,10 @@ def compute_betting_metrics(
             "prob": float(top["prob"]),
             "profit": float(profit),
         })
+        # Favourite = lowest SP (baseline)
+        fav = group.loc[group["sp"].idxmin()]
+        fav_profit = (fav["sp"] - 1) if fav["won"] else -1.0
+        fav_profits.append(float(fav_profit))
 
     top_pick_df = pd.DataFrame(top_pick_results)
     top_pick_pnl = float(top_pick_df["profit"].sum()) if len(top_pick_df) > 0 else 0
@@ -235,23 +241,20 @@ def compute_betting_metrics(
     kelly_total_staked = sum(r["stake"] for r in kelly_results) if kelly_results else 0
     kelly_pnl = sum(r["profit"] for r in kelly_results) if kelly_results else 0
 
-    # --- Baseline: Bet $1 on SP favourite per race ---
-    fav_results = []
-    for race_id, group in df.groupby("race_id"):
-        if len(group) == 0:
-            continue
-        fav = group.loc[group["sp"].idxmin()]  # lowest SP = favourite
-        profit = (fav["sp"] - 1) if fav["won"] else -1.0
-        fav_results.append(float(profit))
+    fav_pnl = sum(fav_profits) if fav_profits else 0
 
-    fav_pnl = sum(fav_results) if fav_results else 0
-
-    # Cumulative P&L for charting
+    # Cumulative P&L for charting (includes favourite baseline)
     cumulative = []
     running = 0.0
-    for r in top_pick_results:
+    fav_running = 0.0
+    for i, r in enumerate(top_pick_results):
         running += r["profit"]
-        cumulative.append({"race": len(cumulative) + 1, "pnl": round(running, 2)})
+        fav_running += fav_profits[i]
+        cumulative.append({
+            "race": len(cumulative) + 1,
+            "pnl": round(running, 2),
+            "fav_pnl": round(fav_running, 2),
+        })
 
     # Kelly cumulative P&L for charting
     kelly_cumulative = []
@@ -276,7 +279,7 @@ def compute_betting_metrics(
         "kelly_total_staked": round(kelly_total_staked, 2),
         "kelly_pnl_by_race": kelly_cumulative,
         "favourite_pnl": round(fav_pnl, 2),
-        "favourite_roi": round(fav_pnl / max(len(fav_results), 1) * 100, 2),
+        "favourite_roi": round(fav_pnl / max(len(fav_profits), 1) * 100, 2),
         "pnl_by_race": cumulative,
     }
 

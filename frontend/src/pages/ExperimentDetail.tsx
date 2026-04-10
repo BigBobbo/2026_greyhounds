@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, ScatterChart, Scatter } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LineChart, Line, ScatterChart, Scatter } from 'recharts';
 import api from '../api/client';
 import type { Experiment } from '../types/models';
 
@@ -55,7 +55,7 @@ export default function ExperimentDetail() {
 
   // Betting P&L data
   const bettingRaw = (exp.calibration_data as any)?.betting;
-  const pnlData: { race: number; pnl: number }[] = bettingRaw?.pnl_by_race || [];
+  const pnlData: { race: number; pnl: number; fav_pnl?: number }[] = bettingRaw?.pnl_by_race || [];
   const kellyPnlData: { race: number; pnl: number }[] = bettingRaw?.kelly_pnl_by_race || [];
 
   // Confusion matrix
@@ -167,9 +167,11 @@ export default function ExperimentDetail() {
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="race" label={{ value: 'Race #', position: 'bottom', offset: -5 }} />
                       <YAxis label={{ value: 'P&L ($)', angle: -90, position: 'left' }} />
-                      <Tooltip formatter={(v: any) => [`$${v}`, 'Flat P&L']} />
-                      <Line type="monotone" dataKey="pnl" stroke="#3b82f6" strokeWidth={2} dot={false} />
-                      <Line type="monotone" dataKey={() => 0} stroke="#d1d5db" strokeDasharray="5 5" dot={false} />
+                      <Tooltip formatter={(v: any, name: string) => [`$${v}`, name === 'pnl' ? 'Model Top Pick' : name === 'fav_pnl' ? 'Favourite' : name]} />
+                      <Legend formatter={(value: string) => value === 'pnl' ? 'Model Top Pick' : value === 'fav_pnl' ? 'Favourite (baseline)' : value} />
+                      <Line type="monotone" dataKey="pnl" stroke="#3b82f6" strokeWidth={2} dot={false} name="pnl" />
+                      <Line type="monotone" dataKey="fav_pnl" stroke="#f59e0b" strokeWidth={2} dot={false} strokeDasharray="6 3" name="fav_pnl" />
+                      <Line type="monotone" dataKey={() => 0} stroke="#d1d5db" strokeDasharray="5 5" dot={false} legendType="none" />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>

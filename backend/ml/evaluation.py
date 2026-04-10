@@ -197,7 +197,12 @@ def compute_betting_metrics(
     value_winners = int(value_bets["won"].sum())
 
     # --- Strategy 3: Kelly criterion staking (fractional Kelly) ---
+    # Use a hybrid approach: bet on the model's top pick per race,
+    # but size the bet using Kelly based on the probability edge.
+    # We use a lower min-edge threshold than value betting since we're
+    # already filtering to the model's top pick (higher conviction).
     kelly_fraction = 0.25  # Quarter Kelly for safety
+    kelly_min_edge = 0.02  # 2% min edge (lower than value betting's 5%)
     bankroll = 100.0
     kelly_results = []
     for race_id, group in df.groupby("race_id"):
@@ -207,9 +212,15 @@ def compute_betting_metrics(
         b = top["sp"] - 1
         if b <= 0:
             continue
+
+        # Check if there's a minimum probability edge
+        edge = top["prob"] - top["implied_prob"]
+        if edge < kelly_min_edge:
+            continue
+
         f_star = (b * top["prob"] - (1 - top["prob"])) / b
         if f_star <= 0:
-            continue  # No edge, skip
+            continue
         stake_pct = min(f_star * kelly_fraction, 0.05)  # Cap at 5% of bankroll
         stake = bankroll * stake_pct
         profit = stake * (top["sp"] - 1) if top["won"] else -stake
@@ -218,6 +229,7 @@ def compute_betting_metrics(
             "won": bool(top["won"]),
             "stake": round(float(stake), 2),
             "profit": round(float(profit), 2),
+            "edge": round(float(edge), 4),
         })
 
     kelly_total_staked = sum(r["stake"] for r in kelly_results) if kelly_results else 0

@@ -14,7 +14,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 
 from ml.trainers.base import BaseTrainer, TrainResult
 
@@ -80,15 +82,20 @@ class LambdaRankTrainer(BaseTrainer):
 
         # Fit calibrator on validation set:
         # Convert raw scores to uncalibrated probabilities via softmax,
-        # then fit isotonic regression to map those to true win rates.
+        # then fit Platt scaling (logistic regression) to map those to true
+        # win rates.  Platt scaling is smoother than isotonic and preserves
+        # probability ordering better, which is critical for maintaining
+        # the ranking model's edge signal for Kelly criterion staking.
         val_scores = self.model.predict(X_val)
-        val_proba_raw = self.scores_to_proba(val_scores, group_val)
+        val_proba_raw = self.scores_to_proba(val_scores, group_val, calibrate=False)
         y_val_binary = (np.asarray(y_val, dtype=float) == 1).astype(float)
 
-        self.calibrator = IsotonicRegression(
-            y_min=0.01, y_max=0.99, out_of_bounds="clip",
-        )
-        self.calibrator.fit(val_proba_raw, y_val_binary)
+        # Platt scaling: fit logistic regression on log-odds of raw probabilities
+        self.calibrator = LogisticRegression(C=1.0, max_iter=1000)
+        # Reshape for sklearn
+        log_odds = np.log(np.clip(val_proba_raw, 1e-6, 1 - 1e-6) /
+                          (1 - np.clip(val_proba_raw, 1e-6, 1 - 1e-6)))
+        self.calibrator.fit(log_odds.reshape(-1, 1), y_val_binary)
 
         # Evaluate: compute ranking metrics on validation set
         metrics = self._compute_ranking_metrics(y_val, val_scores, group_val)
@@ -198,9 +205,11 @@ class LambdaRankTrainer(BaseTrainer):
             proba[idx:idx + g_size] = exp_scores / exp_scores.sum()
             idx += g_size
 
-        # Step 2: calibrate (maps raw softmax probs to true win rates)
+        # Step 2: calibrate via Platt scaling (maps softmax probs to true win rates)
         if calibrate and self.calibrator is not None:
-            proba = self.calibrator.predict(proba)
+            log_odds = np.log(np.clip(proba, 1e-6, 1 - 1e-6) /
+                              (1 - np.clip(proba, 1e-6, 1 - 1e-6)))
+            proba = self.calibrator.predict_proba(log_odds.reshape(-1, 1))[:, 1]
             # Re-normalize within each race so they still sum to 1.0
             idx = 0
             for g_size in group_sizes:

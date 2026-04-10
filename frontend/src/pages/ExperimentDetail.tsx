@@ -125,7 +125,14 @@ export default function ExperimentDetail() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <div className="bg-white rounded-lg shadow p-4">
           <p className="text-xs text-gray-500">Algorithm</p>
-          <p className="font-semibold">{exp.algorithm}</p>
+          <p className="font-semibold">
+            {exp.algorithm}
+            {exp.metrics?.optuna_n_trials && (
+              <span className="ml-1.5 text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full">
+                Optuna: {exp.metrics.optuna_n_trials} trials
+              </span>
+            )}
+          </p>
         </div>
         <div className="bg-white rounded-lg shadow p-4">
           <p className="text-xs text-gray-500">Target</p>
@@ -146,7 +153,9 @@ export default function ExperimentDetail() {
         <div className="bg-white rounded-lg shadow p-5 mb-6">
           <h2 className="font-semibold mb-3">Metrics</h2>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {Object.entries(exp.metrics).map(([key, val]) => (
+            {Object.entries(exp.metrics)
+              .filter(([key]) => !key.startsWith('optuna_') && !key.startsWith('betting_'))
+              .map(([key, val]) => (
               <div key={key} className="border rounded-md p-3">
                 <p className="text-xs text-gray-500">{key}</p>
                 <p className="font-mono text-lg">{typeof val === 'number' ? val.toFixed(4) : String(val)}</p>
@@ -207,7 +216,7 @@ export default function ExperimentDetail() {
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="race" label={{ value: 'Race #', position: 'bottom', offset: -5 }} />
                       <YAxis label={{ value: 'P&L ($)', angle: -90, position: 'left' }} />
-                      <Tooltip formatter={(v: any, name: any) => [`$${v}`, name === 'pnl' ? 'Model Top Pick' : name === 'fav_pnl' ? 'Favourite' : String(name ?? '')]} />
+                      <Tooltip formatter={(v: any, name) => [`$${v}`, name === 'pnl' ? 'Model Top Pick' : name === 'fav_pnl' ? 'Favourite' : String(name ?? '')]} />
                       <Legend formatter={(value: string) => value === 'pnl' ? 'Model Top Pick' : value === 'fav_pnl' ? 'Favourite (baseline)' : value} />
                       <Line type="monotone" dataKey="pnl" stroke="#3b82f6" strokeWidth={2} dot={false} name="pnl" />
                       <Line type="monotone" dataKey="fav_pnl" stroke="#f59e0b" strokeWidth={2} dot={false} strokeDasharray="6 3" name="fav_pnl" />

@@ -19,6 +19,7 @@ import pandas as pd
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
+from app.models.dog import Dog
 from app.models.race import Race
 from app.models.race_entry import RaceEntry
 from app.models.track import Track
@@ -86,6 +87,42 @@ def compute_race_context_features(
 
     # 8. Consistency score (stdev of finish positions, lower = more consistent)
     features["position_consistency"] = _position_consistency(dog_history)
+
+    # 9. Dog age in years (greyhounds peak at 2-3.5 years)
+    dog_id = race_context.get("dog_id")
+    if dog_id:
+        dog = db.query(Dog).filter(Dog.id == dog_id).first()
+        if dog and dog.birth_date and race_context.get("race_date"):
+            age = (race_context["race_date"] - dog.birth_date).days / 365.25
+            features["dog_age_years"] = age
+            features["dog_age_squared"] = age ** 2
+        else:
+            features["dog_age_years"] = None
+            features["dog_age_squared"] = None
+    else:
+        features["dog_age_years"] = None
+        features["dog_age_squared"] = None
+
+    # 10. Pace/trap interaction features
+    trap = race_context.get("trap")
+    early_speed = features.get("early_speed_ratio")
+    front_runner = features.get("is_front_runner")
+
+    if trap is not None and early_speed is not None:
+        features["early_speed_x_trap"] = early_speed * trap
+        features["early_speed_x_inside"] = early_speed * (1.0 if trap <= 2 else 0.0)
+        features["early_speed_x_outside"] = early_speed * (1.0 if trap >= 5 else 0.0)
+    else:
+        features["early_speed_x_trap"] = None
+        features["early_speed_x_inside"] = None
+        features["early_speed_x_outside"] = None
+
+    if trap is not None and front_runner is not None:
+        features["front_runner_x_inside"] = front_runner * (1.0 if trap <= 2 else 0.0)
+        features["front_runner_x_outside"] = front_runner * (1.0 if trap >= 5 else 0.0)
+    else:
+        features["front_runner_x_inside"] = None
+        features["front_runner_x_outside"] = None
 
     return features
 
@@ -234,4 +271,11 @@ BUILTIN_FEATURE_NAMES = [
     "is_front_runner",
     "career_races",
     "position_consistency",
+    "dog_age_years",
+    "dog_age_squared",
+    "early_speed_x_trap",
+    "early_speed_x_inside",
+    "early_speed_x_outside",
+    "front_runner_x_inside",
+    "front_runner_x_outside",
 ]

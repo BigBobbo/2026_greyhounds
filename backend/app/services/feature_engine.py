@@ -3,8 +3,8 @@ Feature computation engine for visual (JSON config) features.
 
 Visual feature configs follow this schema:
 {
-    "metric": "finish_time" | "finish_position" | "weight_kg" | "sp_decimal" | "beaten_distance" | "sectional_time",
-    "aggregation": "mean" | "median" | "min" | "max" | "stdev" | "count" | "win_rate" | "place_rate" | "trend",
+    "metric": "finish_time" | "finish_position" | "weight_kg" | "sp_decimal" | "beaten_distance" | "sectional_time" | "adjusted_time",
+    "aggregation": "mean" | "median" | "min" | "max" | "stdev" | "count" | "win_rate" | "place_rate" | "trend" | "ewm",
     "window": {"type": "last_n", "n": 5} | {"type": "days", "n": 90} | {"type": "all"},
     "filters": {
         "same_track": true/false,
@@ -50,6 +50,7 @@ def get_dog_history(
             RaceEntry.finish_position,
             RaceEntry.finish_time,
             RaceEntry.sectional_time,
+            RaceEntry.adjusted_time,
             RaceEntry.beaten_distance,
             RaceEntry.weight_kg,
             RaceEntry.sp_decimal,
@@ -61,7 +62,9 @@ def get_dog_history(
             Race.grade,
             Race.race_type,
             Race.going,
+            Race.going_allowance,
             Race.num_runners,
+            Race.prize_money,
             Track.name.label("track_name"),
             Track.code.label("track_code"),
         )
@@ -82,9 +85,10 @@ def get_dog_history(
 
     columns = [
         "trap", "finish_position", "finish_time", "sectional_time",
-        "beaten_distance", "weight_kg", "sp_decimal", "starting_price",
-        "comment", "race_date", "track_id", "distance_m", "grade",
-        "race_type", "going", "num_runners", "track_name", "track_code",
+        "adjusted_time", "beaten_distance", "weight_kg", "sp_decimal",
+        "starting_price", "comment", "race_date", "track_id", "distance_m",
+        "grade", "race_type", "going", "going_allowance", "num_runners",
+        "prize_money", "track_name", "track_code",
     ]
     df = pd.DataFrame(rows, columns=columns)
     # Sort chronologically (oldest first)
@@ -191,6 +195,13 @@ def _aggregate(series: pd.Series, aggregation: str, df: pd.DataFrame) -> float |
         y = series.values.astype(float)
         slope = np.polyfit(x, y, 1)[0]
         return float(slope)
+    elif aggregation == "ewm":
+        # Exponential weighted mean: most recent race gets highest weight.
+        # alpha=0.5 means each older race gets half the weight of the next newer one.
+        # Series must be in chronological order (oldest first, which it is after sort).
+        if len(series) < 2:
+            return float(series.iloc[0])
+        return float(series.ewm(alpha=0.5, adjust=True).mean().iloc[-1])
     else:
         return series.mean()
 

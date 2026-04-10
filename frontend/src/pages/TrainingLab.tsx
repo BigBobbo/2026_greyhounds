@@ -98,6 +98,38 @@ export default function TrainingLab() {
     }
   };
 
+  const STAGE_LABELS: Record<string, string> = {
+    starting: 'Starting',
+    building_dataset: 'Building dataset',
+    training_model: 'Training model',
+    evaluating: 'Evaluating',
+    calibrating: 'Calibrating',
+    computing_shap: 'Computing SHAP',
+    saving_model: 'Saving model',
+    retraining_best: 'Retraining best',
+  };
+
+  const formatStage = (stage: string | null) => {
+    if (!stage) return null;
+    // Handle optuna trial stages like "optuna_trial_3_of_50"
+    const optunaMatch = stage.match(/^optuna_trial_(\d+)_of_(\d+)$/);
+    if (optunaMatch) return `Optuna trial ${optunaMatch[1]}/${optunaMatch[2]}`;
+    return STAGE_LABELS[stage] || stage;
+  };
+
+  const heartbeatAgeSeconds = (heartbeat: string | null) => {
+    if (!heartbeat) return null;
+    return Math.floor((Date.now() - new Date(heartbeat + 'Z').getTime()) / 1000);
+  };
+
+  const formatHeartbeatAge = (seconds: number) => {
+    if (seconds < 60) return `${seconds}s ago`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    return `${Math.floor(seconds / 3600)}h ago`;
+  };
+
+  const STALE_THRESHOLD_S = 120;
+
   const primaryMetric = (exp: Experiment) => {
     if (!exp.metrics) return '-';
     const pnl = exp.metrics['betting_top_pick_pnl'];
@@ -327,9 +359,32 @@ export default function TrainingLab() {
                   </td>
                   <td className="px-4 py-3">{exp.target}</td>
                   <td className="px-4 py-3">
-                    <span className={`px-2 py-0.5 rounded-full text-xs ${statusColor(exp.status)}`}>
-                      {exp.status}
-                    </span>
+                    {exp.status === 'running' ? (() => {
+                      const age = heartbeatAgeSeconds(exp.heartbeat_at);
+                      const isStale = age !== null && age > STALE_THRESHOLD_S;
+                      return (
+                        <div>
+                          <span className={`px-2 py-0.5 rounded-full text-xs ${isStale ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                            {isStale ? 'stale' : 'running'}
+                          </span>
+                          {exp.training_stage && (
+                            <p className="text-xs text-gray-500 mt-1">{formatStage(exp.training_stage)}</p>
+                          )}
+                          {age !== null && (
+                            <p className={`text-xs mt-0.5 ${isStale ? 'text-red-500 font-medium' : 'text-gray-400'}`}>
+                              {isStale ? `No heartbeat for ${formatHeartbeatAge(age)}` : `Heartbeat ${formatHeartbeatAge(age)}`}
+                            </p>
+                          )}
+                          {age === null && (
+                            <p className="text-xs mt-0.5 text-red-500 font-medium">No heartbeat</p>
+                          )}
+                        </div>
+                      );
+                    })() : (
+                      <span className={`px-2 py-0.5 rounded-full text-xs ${statusColor(exp.status)}`}>
+                        {exp.status}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3 font-mono text-xs">{primaryMetric(exp)}</td>
                   <td className="px-4 py-3 text-xs text-gray-500">

@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, text
 from sqlalchemy.orm import Session
 
 from app.models.computed_feature import ComputedFeature
@@ -33,6 +33,19 @@ logger = logging.getLogger(__name__)
 # Default lookback window (days) used when checking whether a dog's history
 # is complete.  90 days covers most "last N" features comfortably.
 _DEFAULT_COMPLETENESS_WINDOW_DAYS = 90
+
+
+def _wal_checkpoint(db: Session) -> None:
+    """Run a passive WAL checkpoint to reclaim disk space.
+
+    PASSIVE mode checkpoints as much as possible without blocking concurrent
+    readers/writers, which is safe to run between batches.
+    """
+    try:
+        raw_conn = db.get_bind().raw_connection()
+        raw_conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    except Exception as e:
+        logger.debug("WAL checkpoint skipped: %s", e)
 
 
 def _feature_window_days(feature_def: FeatureDefinition) -> int:
@@ -308,8 +321,40 @@ def materialize_feature(
 
         # Bulk insert the batch
         if new_features:
-            db.bulk_save_objects(new_features)
-            db.commit()
+            try:
+                db.bulk_save_objects(new_features)
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                if "disk is full" in str(e) or "database or disk is full" in str(e):
+                    # WAL file likely bloated — checkpoint and retry once
+                    logger.warning(
+                        "Disk full during batch commit for '%s', "
+                        "running WAL checkpoint and retrying...",
+                        feature_def.name,
+                    )
+                    _wal_checkpoint(db)
+                    try:
+                        db.bulk_save_objects(new_features)
+                        db.commit()
+                    except Exception as retry_err:
+                        db.rollback()
+                        logger.error(
+                            "Retry failed for feature '%s': %s. "
+                            "Returning partial results.",
+                            feature_def.name, retry_err,
+                        )
+                        return stats
+                else:
+                    raise
+
+            # Free session memory — these objects are persisted and no
+            # longer needed in the identity map.
+            db.expunge_all()
+
+            # Reclaim WAL disk space between batches to prevent the WAL
+            # file from growing unbounded during large materializations.
+            _wal_checkpoint(db)
 
         logger.info(
             "Feature '%s': %d/%d entries computed (%d incomplete)",

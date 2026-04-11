@@ -1,5 +1,6 @@
 """Feature definition CRUD + preview + materialization endpoints."""
 
+import logging
 from threading import Thread
 from typing import Any
 
@@ -18,6 +19,8 @@ from app.schemas.feature import (
 )
 from app.services.feature_engine import get_dog_history, compute_visual_feature
 from app.services.feature_sandbox import execute_feature_code, validate_feature_code
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/features", tags=["features"])
 
@@ -383,9 +386,17 @@ def trigger_materialization(req: MaterializeRequest, db: Session = Depends(get_d
             for f in features:
                 feat = db2.query(FeatureDefinition).filter(FeatureDefinition.id == f.id).first()
                 if feat:
-                    materialize_feature(
-                        db2, feat, force=req.force, version_id=version_id,
-                    )
+                    try:
+                        materialize_feature(
+                            db2, feat, force=req.force, version_id=version_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to materialize feature '%s' (id=%d), "
+                            "continuing with remaining features",
+                            f.name, f.id,
+                        )
+                        db2.rollback()
         finally:
             db2.close()
 

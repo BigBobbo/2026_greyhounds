@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, distinct
 from sqlalchemy.orm import Session
 
 from app.models.computed_feature import ComputedFeature
@@ -454,11 +454,16 @@ def get_feature_coverage(
             If None, counts unversioned (version_id IS NULL) features.
     """
     features = db.query(FeatureDefinition).all()
-    total_entries = db.query(func.count(RaceEntry.id)).scalar() or 0
+    total_entries = (
+        db.query(func.count(RaceEntry.id))
+        .join(Race, RaceEntry.race_id == Race.id)
+        .filter(Race.status == "resulted")
+        .scalar() or 0
+    )
 
     result = []
     for f in features:
-        base_q = db.query(func.count(ComputedFeature.id)).filter(
+        base_q = db.query(func.count(distinct(ComputedFeature.race_entry_id))).filter(
             ComputedFeature.feature_def_id == f.id,
         )
         if version_id is not None:

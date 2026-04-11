@@ -131,31 +131,33 @@ def list_versions(db: Session = Depends(get_db)):
     from app.models.feature_version import FeatureVersion
     from app.models.computed_feature import ComputedFeature
 
-    versions = (
-        db.query(FeatureVersion)
+    count_sub = (
+        db.query(
+            ComputedFeature.version_id,
+            sqlfunc.count(ComputedFeature.id).label("feature_count"),
+        )
+        .group_by(ComputedFeature.version_id)
+        .subquery()
+    )
+
+    rows = (
+        db.query(FeatureVersion, sqlfunc.coalesce(count_sub.c.feature_count, 0))
+        .outerjoin(count_sub, FeatureVersion.id == count_sub.c.version_id)
         .order_by(FeatureVersion.created_at.desc())
         .all()
     )
-    result = []
-    for v in versions:
-        try:
-            count = (
-                db.query(sqlfunc.count(ComputedFeature.id))
-                .filter(ComputedFeature.version_id == v.id)
-                .scalar() or 0
-            )
-        except Exception:
-            db.rollback()
-            count = 0
-        result.append({
+
+    return [
+        {
             "id": v.id,
             "name": v.name,
             "description": v.description,
             "created_at": v.created_at,
             "coverage_snapshot": v.coverage_snapshot,
             "feature_count": count,
-        })
-    return result
+        }
+        for v, count in rows
+    ]
 
 
 @router.post("/versions", status_code=201)

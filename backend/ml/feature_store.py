@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import and_, func, text
+from sqlalchemy import and_, case, func, text
 from sqlalchemy.orm import Session
 
 from app.models.computed_feature import ComputedFeature
@@ -501,30 +501,37 @@ def get_feature_coverage(
     features = db.query(FeatureDefinition).all()
     total_entries = db.query(func.count(RaceEntry.id)).scalar() or 0
 
-    result = []
-    for f in features:
-        base_q = db.query(func.count(ComputedFeature.id)).filter(
-            ComputedFeature.feature_def_id == f.id,
+    # Single query to get both computed and incomplete counts per feature
+    version_filter = (
+        ComputedFeature.version_id == version_id
+        if version_id is not None
+        else ComputedFeature.version_id.is_(None)
+    )
+    counts = (
+        db.query(
+            ComputedFeature.feature_def_id,
+            func.count(ComputedFeature.id).label("computed"),
+            func.sum(
+                case((ComputedFeature.data_complete == False, 1), else_=0)
+            ).label("incomplete"),
         )
-        if version_id is not None:
-            base_q = base_q.filter(ComputedFeature.version_id == version_id)
-        else:
-            base_q = base_q.filter(ComputedFeature.version_id.is_(None))
+        .filter(version_filter)
+        .group_by(ComputedFeature.feature_def_id)
+        .all()
+    )
+    counts_map = {row.feature_def_id: (row.computed, row.incomplete or 0) for row in counts}
 
-        computed = base_q.scalar() or 0
-        incomplete = (
-            base_q.filter(ComputedFeature.data_complete.is_(False)).scalar() or 0
-        )
-        result.append({
+    return [
+        {
             "feature_id": f.id,
             "name": f.name,
             "display_name": f.display_name,
             "feature_type": f.feature_type,
             "enabled": f.enabled,
-            "computed_count": computed,
-            "incomplete_count": incomplete,
+            "computed_count": counts_map.get(f.id, (0, 0))[0],
+            "incomplete_count": counts_map.get(f.id, (0, 0))[1],
             "total_entries": total_entries,
-            "coverage_pct": round(computed / total_entries * 100, 1) if total_entries > 0 else 0,
-        })
-
-    return result
+            "coverage_pct": round(counts_map.get(f.id, (0, 0))[0] / total_entries * 100, 1) if total_entries > 0 else 0,
+        }
+        for f in features
+    ]

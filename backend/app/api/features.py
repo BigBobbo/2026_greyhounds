@@ -383,12 +383,15 @@ def trigger_materialization(req: MaterializeRequest, db: Session = Depends(get_d
         return MaterializeResponse(message="No enabled features to materialize")
 
     version_id = req.version_id
+    # Capture IDs now — the ORM objects will be detached once the request
+    # session closes, so we can't access their attributes in the thread.
+    feature_ids = [f.id for f in features]
 
     def _run():
         db2 = SessionLocal()
         try:
-            for f in features:
-                feat = db2.query(FeatureDefinition).filter(FeatureDefinition.id == f.id).first()
+            for fid in feature_ids:
+                feat = db2.query(FeatureDefinition).filter(FeatureDefinition.id == fid).first()
                 if feat:
                     try:
                         materialize_feature(
@@ -398,7 +401,7 @@ def trigger_materialization(req: MaterializeRequest, db: Session = Depends(get_d
                         logger.exception(
                             "Failed to materialize feature '%s' (id=%d), "
                             "continuing with remaining features",
-                            f.name, f.id,
+                            feat.name, feat.id,
                         )
                         db2.rollback()
         finally:

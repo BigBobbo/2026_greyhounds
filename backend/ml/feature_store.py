@@ -203,6 +203,13 @@ def materialize_feature(
     """
     stats = {"computed": 0, "skipped": 0, "errors": 0, "incomplete": 0}
 
+    # Cache attributes before any expunge_all() detaches the ORM object
+    feature_name = feature_def.name
+    feature_id = feature_def.id
+    feature_type = feature_def.feature_type
+    feature_config = feature_def.config_json
+    feature_code = feature_def.code
+
     # Get entries to compute for
     if race_entry_ids:
         entries_query = db.query(RaceEntry.id).filter(RaceEntry.id.in_(race_entry_ids))
@@ -217,7 +224,7 @@ def materialize_feature(
         # Exclude entries that already have this feature computed (for this version)
         already_computed = (
             db.query(ComputedFeature.race_entry_id)
-            .filter(ComputedFeature.feature_def_id == feature_def.id)
+            .filter(ComputedFeature.feature_def_id == feature_id)
         )
         if version_id is not None:
             already_computed = already_computed.filter(
@@ -232,12 +239,12 @@ def materialize_feature(
     entry_ids = [row[0] for row in entries_query.all()]
 
     if not entry_ids:
-        logger.info("No entries to compute for feature %s", feature_def.name)
+        logger.info("No entries to compute for feature %s", feature_name)
         return stats
 
     logger.info(
         "Materializing feature '%s' for %d entries (version_id=%s)",
-        feature_def.name, len(entry_ids), version_id,
+        feature_name, len(entry_ids), version_id,
     )
 
     # --- Pre-compute coverage gaps ONCE for the full date range ---
@@ -292,11 +299,11 @@ def materialize_feature(
             # Compute the feature
             value = None
 
-            if feature_def.feature_type == "visual":
-                config = feature_def.config_json or {}
+            if feature_type == "visual":
+                config = feature_config or {}
                 value = compute_visual_feature(history, config, ctx)
-            elif feature_def.feature_type == "code":
-                code = feature_def.code or ""
+            elif feature_type == "code":
+                code = feature_code or ""
                 value, error = execute_feature_code(code, history, ctx)
                 if error:
                     stats["errors"] += 1
@@ -310,7 +317,7 @@ def materialize_feature(
             # insert since we already filtered out existing entries above.
             new_features.append(ComputedFeature(
                 race_entry_id=entry_id,
-                feature_def_id=feature_def.id,
+                feature_def_id=feature_id,
                 value=value,
                 computed_at=datetime.utcnow(),
                 data_complete=data_complete,
@@ -331,7 +338,7 @@ def materialize_feature(
                     logger.warning(
                         "Disk full during batch commit for '%s', "
                         "running WAL checkpoint and retrying...",
-                        feature_def.name,
+                        feature_name,
                     )
                     _wal_checkpoint(db)
                     try:
@@ -342,7 +349,7 @@ def materialize_feature(
                         logger.error(
                             "Retry failed for feature '%s': %s. "
                             "Returning partial results.",
-                            feature_def.name, retry_err,
+                            feature_name, retry_err,
                         )
                         return stats
                 else:
@@ -358,7 +365,7 @@ def materialize_feature(
 
         logger.info(
             "Feature '%s': %d/%d entries computed (%d incomplete)",
-            feature_def.name, min(i + len(batch), len(entry_ids)),
+            feature_name, min(i + len(batch), len(entry_ids)),
             len(entry_ids), stats["incomplete"],
         )
 
@@ -366,12 +373,12 @@ def materialize_feature(
         logger.warning(
             "Feature '%s': %d/%d entries flagged as INCOMPLETE (dog history "
             "may be missing races from tracks with scrape gaps)",
-            feature_def.name, stats["incomplete"], stats["computed"],
+            feature_name, stats["incomplete"], stats["computed"],
         )
 
     logger.info(
         "Feature '%s' done: %d computed, %d skipped, %d errors, %d incomplete",
-        feature_def.name, stats["computed"], stats["skipped"],
+        feature_name, stats["computed"], stats["skipped"],
         stats["errors"], stats["incomplete"],
     )
     return stats

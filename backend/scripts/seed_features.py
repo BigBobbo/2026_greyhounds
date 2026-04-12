@@ -504,6 +504,80 @@ PRESET_FEATURES = [
 """,
         "input_columns": ["finish_position"],
     },
+    # === Seasonality features ===
+    {
+        "name": "race_month_sin",
+        "display_name": "Race Month (sin)",
+        "description": "Sine encoding of race month for cyclical seasonality — captures time-of-year effects (e.g. track conditions, daylight, temperature) without a hard boundary between December and January.",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    import math
+    race_date = race_context.get('race_date')
+    if race_date is None:
+        return None
+    month = race_date.month
+    return float(math.sin(2 * math.pi * month / 12))
+""",
+        "input_columns": ["race_date"],
+    },
+    {
+        "name": "race_month_cos",
+        "display_name": "Race Month (cos)",
+        "description": "Cosine encoding of race month — paired with sin encoding so the model can learn any seasonal pattern without discontinuity at year boundaries.",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    import math
+    race_date = race_context.get('race_date')
+    if race_date is None:
+        return None
+    month = race_date.month
+    return float(math.cos(2 * math.pi * month / 12))
+""",
+        "input_columns": ["race_date"],
+    },
+    {
+        "name": "day_of_week",
+        "display_name": "Day of Week",
+        "description": "Day of week as integer (0=Monday, 6=Sunday). Different days may have different race quality, field strength, or track conditions.",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    race_date = race_context.get('race_date')
+    if race_date is None:
+        return None
+    return float(race_date.weekday())
+""",
+        "input_columns": ["race_date"],
+    },
+    {
+        "name": "day_of_week_sin",
+        "display_name": "Day of Week (sin)",
+        "description": "Sine encoding of day of week for cyclical representation — avoids hard boundary between Sunday and Monday.",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    import math
+    race_date = race_context.get('race_date')
+    if race_date is None:
+        return None
+    dow = race_date.weekday()
+    return float(math.sin(2 * math.pi * dow / 7))
+""",
+        "input_columns": ["race_date"],
+    },
+    {
+        "name": "day_of_week_cos",
+        "display_name": "Day of Week (cos)",
+        "description": "Cosine encoding of day of week — paired with sin encoding for full cyclical representation.",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    import math
+    race_date = race_context.get('race_date')
+    if race_date is None:
+        return None
+    dow = race_date.weekday()
+    return float(math.cos(2 * math.pi * dow / 7))
+""",
+        "input_columns": ["race_date"],
+    },
 ]
 
 

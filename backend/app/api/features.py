@@ -419,8 +419,8 @@ def clear_all_computed_features():
     Delete ALL computed features (across all versions) and all feature versions.
     Also removes model artifacts from disk.
 
-    Uses a direct sqlite3 connection (bypassing SQLAlchemy) with batched
-    deletes to work even when the disk is nearly full.
+    Uses DROP TABLE + recreate instead of DELETE to work on a full disk
+    (DROP doesn't need WAL/journal space, it just frees pages).
 
     This does NOT delete:
     - Scraped data (tracks, dogs, races, race_entries)
@@ -439,7 +439,9 @@ def clear_all_computed_features():
 
     try:
         conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
+        # Use DELETE journal mode — it's more space-efficient for drops
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.execute("PRAGMA foreign_keys=OFF")
         cursor = conn.cursor()
 
         # 1. Count what we're about to delete
@@ -450,31 +452,42 @@ def clear_all_computed_features():
             "SELECT COUNT(*) FROM feature_versions"
         ).fetchone()[0]
 
-        # 2. Delete computed features in batches to keep WAL size manageable
-        total_deleted = 0
-        batch_size = 50000
-        while True:
-            cursor.execute(
-                "DELETE FROM computed_features WHERE id IN "
-                "(SELECT id FROM computed_features LIMIT ?)",
-                (batch_size,),
+        # 2. Drop and recreate computed_features (no WAL overhead)
+        cursor.execute("DROP TABLE IF EXISTS computed_features")
+        cursor.execute("""
+            CREATE TABLE computed_features (
+                id INTEGER PRIMARY KEY,
+                race_entry_id INTEGER NOT NULL REFERENCES race_entries(id),
+                feature_def_id INTEGER NOT NULL REFERENCES feature_definitions(id),
+                value FLOAT,
+                computed_at DATETIME,
+                data_complete BOOLEAN DEFAULT 1,
+                version_id INTEGER REFERENCES feature_versions(id),
+                CONSTRAINT uq_computed_entry_feature_version
+                    UNIQUE (race_entry_id, feature_def_id, version_id)
             )
-            deleted = cursor.rowcount
-            conn.commit()
-            total_deleted += deleted
-            logger.info("Deleted batch: %d rows (total: %d)", deleted, total_deleted)
+        """)
+        cursor.execute(
+            "CREATE INDEX ix_computed_features_race_entry_id "
+            "ON computed_features (race_entry_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX ix_computed_features_version_id "
+            "ON computed_features (version_id)"
+        )
+        conn.commit()
 
-            # WAL checkpoint between batches to reuse WAL space
-            try:
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except Exception:
-                pass
-
-            if deleted < batch_size:
-                break
-
-        # 3. Delete all feature versions
-        cursor.execute("DELETE FROM feature_versions")
+        # 3. Drop and recreate feature_versions
+        cursor.execute("DROP TABLE IF EXISTS feature_versions")
+        cursor.execute("""
+            CREATE TABLE feature_versions (
+                id INTEGER PRIMARY KEY,
+                name VARCHAR NOT NULL UNIQUE,
+                description TEXT,
+                created_at DATETIME,
+                coverage_snapshot JSON
+            )
+        """)
         conn.commit()
 
         # 4. Remove model artifacts from disk
@@ -488,18 +501,17 @@ def clear_all_computed_features():
                 except OSError as e:
                     logger.warning("Failed to delete model artifact %s: %s", f, e)
 
-        # 5. Reclaim disk space.
+        # 5. Reclaim disk space via VACUUM
         vacuumed = False
         try:
             conn.execute("VACUUM")
             vacuumed = True
         except Exception as e:
-            logger.warning("VACUUM failed (may need more free space): %s", e)
-            try:
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                logger.info("Fell back to WAL TRUNCATE checkpoint")
-            except Exception as e2:
-                logger.warning("WAL TRUNCATE checkpoint also failed: %s", e2)
+            logger.warning("VACUUM failed: %s (space will be reused by SQLite)", e)
+
+        # Restore WAL mode for normal operation
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
 
         cursor.close()
         conn.close()
@@ -520,7 +532,7 @@ def clear_all_computed_features():
             f"Cleared {computed_count:,} computed features across "
             f"{version_count} versions. "
             f"Removed {models_deleted} model artifacts. "
-            f"{'Disk space reclaimed via VACUUM.' if vacuumed else 'VACUUM skipped — run manually when space available.'}"
+            f"{'Disk space reclaimed via VACUUM.' if vacuumed else 'VACUUM skipped — space will be reused by SQLite automatically.'}"
         ),
     }
 

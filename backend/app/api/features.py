@@ -452,14 +452,23 @@ def clear_all_computed_features(db: Session = Depends(get_db)):
             except OSError as e:
                 logger.warning("Failed to delete model artifact %s: %s", f, e)
 
-    # 5. VACUUM to reclaim disk space (SQLite doesn't free pages on DELETE)
+    # 5. Reclaim disk space.
+    # VACUUM rewrites the entire DB (most thorough but needs ~2x free space).
+    # If it fails (disk too full), fall back to a TRUNCATE WAL checkpoint
+    # which at least reclaims the WAL file.
+    vacuumed = False
     try:
         raw_conn = db.get_bind().raw_connection()
         raw_conn.execute("VACUUM")
         vacuumed = True
     except Exception as e:
         logger.warning("VACUUM failed (may need more free space): %s", e)
-        vacuumed = False
+        try:
+            raw_conn = db.get_bind().raw_connection()
+            raw_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            logger.info("Fell back to WAL TRUNCATE checkpoint")
+        except Exception as e2:
+            logger.warning("WAL TRUNCATE checkpoint also failed: %s", e2)
 
     return {
         "computed_features_deleted": computed_count,

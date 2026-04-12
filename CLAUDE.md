@@ -31,7 +31,7 @@ npm run preview      # Preview production build
 
 ### Docker / Production
 
-The Dockerfile builds the backend (Python 3.12-slim). Startup sequence (see `backend/Procfile`): create data dirs → alembic migrate → seed tracks → seed features → uvicorn. Deployed on Railway with persistent volume at `/app/data/`. Frontend deploys to Vercel.
+The Dockerfile builds the backend (Python 3.12-slim). Startup sequence (see `backend/Procfile`): create data dirs → alembic migrate → seed tracks → seed features → uvicorn. Deployed on Railway with persistent volume at `/app/data/`. Frontend deploys to Vercel. Railway auto-deploys from branch `claude/greyhound-prediction-app-4vNeO`.
 
 ## Architecture
 

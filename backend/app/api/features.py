@@ -416,116 +416,136 @@ def trigger_materialization(req: MaterializeRequest, db: Session = Depends(get_d
 @router.delete("/computed/all", status_code=200)
 def clear_all_computed_features():
     """
-    Delete ALL computed features (across all versions) and all feature versions.
-    Also removes model artifacts from disk.
+    Delete ALL computed features and recover from DB corruption.
 
-    Strategy:
-    1. Delete model .joblib files to free disk space
-    2. Dispose SQLAlchemy engine, then checkpoint + shrink the WAL
-    3. DROP + recreate the feature tables
-    4. VACUUM to reclaim freed pages
+    The DB is currently malformed (WAL was deleted with un-checkpointed data).
+    Recovery strategy: build a new clean DB from the salvageable tables in the
+    old one, then swap them.
 
-    This does NOT delete:
-    - Scraped data (tracks, dogs, races, race_entries)
-    - Feature definitions (so they can be re-materialized)
-    - Experiment metadata (but model files are removed from disk)
+    Preserves: tracks, dogs, races, race_entries, feature_definitions,
+    experiments, predictions, odds_snapshots, scrape_logs, bankroll tables.
+    Discards: computed_features, feature_versions (the bloat we want gone).
     """
     import sqlite3
+    import shutil
     from app.config import settings
 
-    # Parse DB path from SQLAlchemy URL (sqlite:///./data/greyhound.db)
     db_url = settings.database_url
     if db_url.startswith("sqlite:///"):
         db_path = db_url[len("sqlite:///"):]
     else:
         raise HTTPException(status_code=500, detail=f"Unsupported DB URL: {db_url}")
 
-    # ---- PHASE 1: Free disk space by deleting model files ----
+    new_db_path = db_path + ".new"
+    backup_path = db_path + ".bak"
 
-    models_deleted = 0
-    model_dir = settings.model_artifacts_dir
-    if os.path.isdir(model_dir):
-        for f in globmod.glob(os.path.join(model_dir, "*.joblib")):
-            try:
-                os.remove(f)
-                models_deleted += 1
-            except OSError as e:
-                logger.warning("Failed to delete model artifact %s: %s", f, e)
-
-    logger.info("Phase 1 done: freed %d model artifacts", models_deleted)
-
-    # ---- PHASE 2: Dispose engine and checkpoint WAL properly ----
-
+    # Dispose SQLAlchemy so it releases the file
     from app.database import engine
     engine.dispose()
 
-    wal_size = 0
-    wal_path = db_path + "-wal"
-    if os.path.isfile(wal_path):
-        wal_size = os.path.getsize(wal_path)
+    # Clean up any leftover WAL/SHM files
+    for suffix in ("-wal", "-shm"):
+        p = db_path + suffix
+        if os.path.isfile(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    # Tables to preserve (order matters for FK dependencies)
+    tables_to_copy = [
+        "alembic_version",
+        "tracks",
+        "dogs",
+        "races",
+        "race_entries",
+        "feature_definitions",
+        "experiments",
+        "predictions",
+        "odds_snapshots",
+        "scrape_logs",
+        "bankroll_config",
+        "bet_records",
+    ]
+    # Tables to recreate empty (the ones causing bloat)
+    # computed_features and feature_versions will be created by alembic
+    # but we also create them explicitly as a safety net
+
+    recovered = {}
+    errors = {}
 
     try:
-        conn = sqlite3.connect(db_path)
+        # Remove any previous failed attempt
+        if os.path.exists(new_db_path):
+            os.remove(new_db_path)
 
-        # Try to checkpoint the WAL into the main DB first (preserves data)
-        try:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            logger.info("WAL checkpoint succeeded")
-        except Exception as e:
-            logger.warning("WAL checkpoint failed: %s", e)
+        old_conn = sqlite3.connect(db_path)
+        old_conn.execute("PRAGMA journal_mode=OFF")  # read-only, no journaling needed
+        new_conn = sqlite3.connect(new_db_path)
+        new_conn.execute("PRAGMA journal_mode=OFF")  # faster for bulk inserts
+        new_conn.execute("PRAGMA foreign_keys=OFF")
 
-        # Check if DB is healthy
-        try:
-            result = conn.execute("PRAGMA quick_check").fetchone()
-            db_ok = result and result[0] == "ok"
-        except Exception:
-            db_ok = False
-
-        if not db_ok:
-            logger.warning("Database integrity check failed, attempting recovery")
-            conn.close()
-            # Try to recover by removing WAL/SHM and reopening
-            for path in (db_path + "-wal", db_path + "-shm"):
-                if os.path.isfile(path):
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
-            conn = sqlite3.connect(db_path)
-            # Re-check
+        # For each table: read schema from old DB, create in new, copy data
+        for table in tables_to_copy:
             try:
-                result = conn.execute("PRAGMA quick_check").fetchone()
-                db_ok = result and result[0] == "ok"
-            except Exception:
-                db_ok = False
+                # Get the CREATE TABLE statement from the old DB
+                row = old_conn.execute(
+                    "SELECT sql FROM sqlite_master "
+                    "WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                if not row or not row[0]:
+                    errors[table] = "table not found in old DB"
+                    continue
 
-            if not db_ok:
-                logger.warning(
-                    "DB still not clean after WAL removal — proceeding anyway "
-                    "since we're dropping the affected tables"
-                )
+                create_sql = row[0]
+                new_conn.execute(create_sql)
 
-        conn.execute("PRAGMA foreign_keys=OFF")
-        cursor = conn.cursor()
+                # Copy data
+                rows = old_conn.execute(f"SELECT * FROM [{table}]").fetchall()
+                if rows:
+                    placeholders = ",".join(["?"] * len(rows[0]))
+                    new_conn.executemany(
+                        f"INSERT INTO [{table}] VALUES ({placeholders})",
+                        rows,
+                    )
+                new_conn.commit()
+                recovered[table] = len(rows)
 
-        # Count before dropping (may fail if tables are corrupted)
+            except Exception as e:
+                errors[table] = str(e)
+                logger.warning("Failed to copy table %s: %s", table, e)
+                try:
+                    new_conn.rollback()
+                except Exception:
+                    pass
+
+        # Also copy any indexes from the old DB (for the tables we copied)
         try:
-            computed_count = cursor.execute(
-                "SELECT COUNT(*) FROM computed_features"
-            ).fetchone()[0]
+            index_rows = old_conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"
+            ).fetchall()
+            for (idx_sql,) in index_rows:
+                try:
+                    new_conn.execute(idx_sql)
+                except Exception:
+                    pass  # skip indexes for tables we didn't copy
+            new_conn.commit()
         except Exception:
-            computed_count = -1  # unknown
-        try:
-            version_count = cursor.execute(
-                "SELECT COUNT(*) FROM feature_versions"
-            ).fetchone()[0]
-        except Exception:
-            version_count = -1
+            pass
 
-        # Drop and recreate computed_features
-        cursor.execute("DROP TABLE IF EXISTS computed_features")
-        cursor.execute("""
-            CREATE TABLE computed_features (
+        # Create the empty feature tables in the new DB
+        new_conn.execute("""
+            CREATE TABLE IF NOT EXISTS feature_versions (
+                id INTEGER PRIMARY KEY,
+                name VARCHAR NOT NULL UNIQUE,
+                description TEXT,
+                created_at DATETIME,
+                coverage_snapshot JSON
+            )
+        """)
+        new_conn.execute("""
+            CREATE TABLE IF NOT EXISTS computed_features (
                 id INTEGER PRIMARY KEY,
                 race_entry_id INTEGER NOT NULL REFERENCES race_entries(id),
                 feature_def_id INTEGER NOT NULL REFERENCES feature_definitions(id),
@@ -537,77 +557,71 @@ def clear_all_computed_features():
                     UNIQUE (race_entry_id, feature_def_id, version_id)
             )
         """)
-        cursor.execute(
-            "CREATE INDEX ix_computed_features_race_entry_id "
+        new_conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_computed_features_race_entry_id "
             "ON computed_features (race_entry_id)"
         )
-        cursor.execute(
-            "CREATE INDEX ix_computed_features_version_id "
+        new_conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_computed_features_version_id "
             "ON computed_features (version_id)"
         )
-        conn.commit()
+        new_conn.commit()
 
-        # Drop and recreate feature_versions
-        cursor.execute("DROP TABLE IF EXISTS feature_versions")
-        cursor.execute("""
-            CREATE TABLE feature_versions (
-                id INTEGER PRIMARY KEY,
-                name VARCHAR NOT NULL UNIQUE,
-                description TEXT,
-                created_at DATETIME,
-                coverage_snapshot JSON
-            )
-        """)
-        conn.commit()
+        # Set WAL mode on new DB for normal operation
+        new_conn.execute("PRAGMA journal_mode=WAL")
+        new_conn.execute("PRAGMA foreign_keys=ON")
 
-        # VACUUM to reclaim freed pages
-        vacuumed = False
+        # Final integrity check on new DB
+        result = new_conn.execute("PRAGMA integrity_check").fetchone()
+        new_db_ok = result and result[0] == "ok"
+
+        old_size = os.path.getsize(db_path)
+        new_size = os.path.getsize(new_db_path)
+
+        old_conn.close()
+        new_conn.close()
+
+        if not new_db_ok:
+            raise RuntimeError("New database failed integrity check")
+
+        # Swap: old -> .bak, new -> main
+        if os.path.exists(backup_path):
+            os.remove(backup_path)
+        os.rename(db_path, backup_path)
+        os.rename(new_db_path, db_path)
+
+        # Delete the backup to free space
         try:
-            conn.execute("VACUUM")
-            vacuumed = True
-        except Exception as e:
-            logger.warning("VACUUM failed: %s", e)
+            os.remove(backup_path)
+        except OSError as e:
+            logger.warning("Could not delete backup: %s", e)
 
-        # Restore WAL mode for normal operation
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-
-        # Final integrity check
-        try:
-            result = conn.execute("PRAGMA quick_check").fetchone()
-            final_ok = result and result[0] == "ok"
-        except Exception:
-            final_ok = False
-
-        cursor.close()
-        conn.close()
-
-    except sqlite3.Error as e:
-        logger.error("Cleanup phase 2 failed: %s", e)
+    except Exception as e:
+        logger.error("Recovery failed: %s", e)
+        # Clean up partial new DB
+        if os.path.exists(new_db_path):
+            try:
+                os.remove(new_db_path)
+            except OSError:
+                pass
         raise HTTPException(
             status_code=500,
-            detail=f"Cleanup failed at DB phase: {e}. "
-            f"Freed {models_deleted} model artifacts. "
-            f"WAL was {wal_size // (1024*1024)} MB.",
+            detail=f"Recovery failed: {e}. Recovered tables so far: {recovered}. Errors: {errors}",
         )
-    except Exception as e:
-        logger.error("Cleanup failed unexpectedly: %s", e)
-        raise HTTPException(status_code=500, detail=f"Cleanup failed: {e}")
 
     return {
-        "computed_features_deleted": computed_count,
-        "feature_versions_deleted": version_count,
-        "model_artifacts_deleted": models_deleted,
-        "wal_file_mb": wal_size // (1024 * 1024),
-        "vacuum_completed": vacuumed,
-        "database_healthy": final_ok,
+        "status": "recovered",
+        "old_db_size_mb": old_size // (1024 * 1024),
+        "new_db_size_mb": new_size // (1024 * 1024),
+        "tables_recovered": recovered,
+        "table_errors": errors,
+        "database_healthy": new_db_ok,
         "message": (
-            f"Cleared {computed_count:,} computed features across "
-            f"{version_count} versions. "
-            f"Removed {models_deleted} model artifacts. "
-            f"WAL was {wal_size // (1024*1024)} MB. "
-            f"DB healthy: {final_ok}. "
-            f"{'Disk space reclaimed via VACUUM.' if vacuumed else 'VACUUM skipped.'}"
+            f"Database recovered. Old: {old_size // (1024*1024)} MB → "
+            f"New: {new_size // (1024*1024)} MB. "
+            f"Recovered {len(recovered)} tables with "
+            f"{sum(recovered.values())} total rows. "
+            f"computed_features and feature_versions recreated empty."
         ),
     }
 

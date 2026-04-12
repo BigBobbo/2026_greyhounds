@@ -1,6 +1,8 @@
 """Feature definition CRUD + preview + materialization endpoints."""
 
 import logging
+import os
+import glob as globmod
 from threading import Thread
 from typing import Any
 
@@ -409,4 +411,66 @@ def trigger_materialization(req: MaterializeRequest, db: Session = Depends(get_d
     return MaterializeResponse(
         message=f"Materialization started for {len(features)} features{version_msg} in background",
     )
+
+
+@router.delete("/computed/all", status_code=200)
+def clear_all_computed_features(db: Session = Depends(get_db)):
+    """
+    Delete ALL computed features (across all versions) and all feature versions.
+    Also removes model artifacts from disk.
+
+    This does NOT delete:
+    - Scraped data (tracks, dogs, races, race_entries)
+    - Feature definitions (so they can be re-materialized)
+    - Experiment metadata (but model files are removed from disk)
+    - Predictions, odds_snapshots, bet_records, etc.
+    """
+    from app.models.computed_feature import ComputedFeature
+    from app.models.feature_version import FeatureVersion
+    from app.config import settings
+
+    # 1. Count what we're about to delete
+    computed_count = db.query(ComputedFeature).count()
+    version_count = db.query(FeatureVersion).count()
+
+    # 2. Delete all computed features
+    db.query(ComputedFeature).delete()
+    db.commit()
+
+    # 3. Delete all feature versions
+    db.query(FeatureVersion).delete()
+    db.commit()
+
+    # 4. Remove model artifacts from disk
+    models_deleted = 0
+    model_dir = settings.model_artifacts_dir
+    if os.path.isdir(model_dir):
+        for f in globmod.glob(os.path.join(model_dir, "*.joblib")):
+            try:
+                os.remove(f)
+                models_deleted += 1
+            except OSError as e:
+                logger.warning("Failed to delete model artifact %s: %s", f, e)
+
+    # 5. VACUUM to reclaim disk space (SQLite doesn't free pages on DELETE)
+    try:
+        raw_conn = db.get_bind().raw_connection()
+        raw_conn.execute("VACUUM")
+        vacuumed = True
+    except Exception as e:
+        logger.warning("VACUUM failed (may need more free space): %s", e)
+        vacuumed = False
+
+    return {
+        "computed_features_deleted": computed_count,
+        "feature_versions_deleted": version_count,
+        "model_artifacts_deleted": models_deleted,
+        "vacuum_completed": vacuumed,
+        "message": (
+            f"Cleared {computed_count:,} computed features across "
+            f"{version_count} versions. "
+            f"Removed {models_deleted} model artifacts. "
+            f"{'Disk space reclaimed via VACUUM.' if vacuumed else 'VACUUM skipped — run manually when space available.'}"
+        ),
+    }
 

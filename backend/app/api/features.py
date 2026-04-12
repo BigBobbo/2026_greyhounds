@@ -419,10 +419,11 @@ def clear_all_computed_features():
     Delete ALL computed features (across all versions) and all feature versions.
     Also removes model artifacts from disk.
 
-    Strategy for a full disk:
-    1. Delete model .joblib files and the WAL file to free space first
-    2. Then DROP + recreate the database tables
-    3. VACUUM to reclaim freed pages
+    Strategy:
+    1. Delete model .joblib files to free disk space
+    2. Dispose SQLAlchemy engine, then checkpoint + shrink the WAL
+    3. DROP + recreate the feature tables
+    4. VACUUM to reclaim freed pages
 
     This does NOT delete:
     - Scraped data (tracks, dogs, races, race_entries)
@@ -439,11 +440,8 @@ def clear_all_computed_features():
     else:
         raise HTTPException(status_code=500, detail=f"Unsupported DB URL: {db_url}")
 
-    freed_files: list[str] = []
+    # ---- PHASE 1: Free disk space by deleting model files ----
 
-    # ---- PHASE 1: Free disk space by deleting files BEFORE any DB writes ----
-
-    # 1a. Delete model artifacts
     models_deleted = 0
     model_dir = settings.model_artifacts_dir
     if os.path.isdir(model_dir):
@@ -451,54 +449,78 @@ def clear_all_computed_features():
             try:
                 os.remove(f)
                 models_deleted += 1
-                freed_files.append(f)
             except OSError as e:
                 logger.warning("Failed to delete model artifact %s: %s", f, e)
 
-    # 1b. Delete the WAL file — this can be gigabytes.
-    # Safe to delete when we close all connections first; SQLite recreates
-    # it on next write. Any un-checkpointed data is lost, which is fine
-    # since we're about to drop the tables anyway.
-    wal_path = db_path + "-wal"
-    shm_path = db_path + "-shm"
-    wal_size = 0
+    logger.info("Phase 1 done: freed %d model artifacts", models_deleted)
 
-    # Close SQLAlchemy's connection pool so it releases the WAL file
+    # ---- PHASE 2: Dispose engine and checkpoint WAL properly ----
+
     from app.database import engine
     engine.dispose()
 
-    for path in (wal_path, shm_path):
-        if os.path.isfile(path):
-            try:
-                sz = os.path.getsize(path)
-                os.remove(path)
-                freed_files.append(path)
-                if path == wal_path:
-                    wal_size = sz
-                logger.info("Deleted %s (%d bytes)", path, sz)
-            except OSError as e:
-                logger.warning("Failed to delete %s: %s", path, e)
-
-    logger.info(
-        "Phase 1 done: freed %d model artifacts + WAL file (%d MB)",
-        models_deleted, wal_size // (1024 * 1024),
-    )
-
-    # ---- PHASE 2: Now we have disk space — drop and recreate tables ----
+    wal_size = 0
+    wal_path = db_path + "-wal"
+    if os.path.isfile(wal_path):
+        wal_size = os.path.getsize(wal_path)
 
     try:
         conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA journal_mode=DELETE")
+
+        # Try to checkpoint the WAL into the main DB first (preserves data)
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            logger.info("WAL checkpoint succeeded")
+        except Exception as e:
+            logger.warning("WAL checkpoint failed: %s", e)
+
+        # Check if DB is healthy
+        try:
+            result = conn.execute("PRAGMA quick_check").fetchone()
+            db_ok = result and result[0] == "ok"
+        except Exception:
+            db_ok = False
+
+        if not db_ok:
+            logger.warning("Database integrity check failed, attempting recovery")
+            conn.close()
+            # Try to recover by removing WAL/SHM and reopening
+            for path in (db_path + "-wal", db_path + "-shm"):
+                if os.path.isfile(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            conn = sqlite3.connect(db_path)
+            # Re-check
+            try:
+                result = conn.execute("PRAGMA quick_check").fetchone()
+                db_ok = result and result[0] == "ok"
+            except Exception:
+                db_ok = False
+
+            if not db_ok:
+                logger.warning(
+                    "DB still not clean after WAL removal — proceeding anyway "
+                    "since we're dropping the affected tables"
+                )
+
         conn.execute("PRAGMA foreign_keys=OFF")
         cursor = conn.cursor()
 
-        # Count before dropping
-        computed_count = cursor.execute(
-            "SELECT COUNT(*) FROM computed_features"
-        ).fetchone()[0]
-        version_count = cursor.execute(
-            "SELECT COUNT(*) FROM feature_versions"
-        ).fetchone()[0]
+        # Count before dropping (may fail if tables are corrupted)
+        try:
+            computed_count = cursor.execute(
+                "SELECT COUNT(*) FROM computed_features"
+            ).fetchone()[0]
+        except Exception:
+            computed_count = -1  # unknown
+        try:
+            version_count = cursor.execute(
+                "SELECT COUNT(*) FROM feature_versions"
+            ).fetchone()[0]
+        except Exception:
+            version_count = -1
 
         # Drop and recreate computed_features
         cursor.execute("DROP TABLE IF EXISTS computed_features")
@@ -550,6 +572,13 @@ def clear_all_computed_features():
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
 
+        # Final integrity check
+        try:
+            result = conn.execute("PRAGMA quick_check").fetchone()
+            final_ok = result and result[0] == "ok"
+        except Exception:
+            final_ok = False
+
         cursor.close()
         conn.close()
 
@@ -558,8 +587,8 @@ def clear_all_computed_features():
         raise HTTPException(
             status_code=500,
             detail=f"Cleanup failed at DB phase: {e}. "
-            f"But already freed {models_deleted} model artifacts "
-            f"and WAL file ({wal_size // (1024*1024)} MB).",
+            f"Freed {models_deleted} model artifacts. "
+            f"WAL was {wal_size // (1024*1024)} MB.",
         )
     except Exception as e:
         logger.error("Cleanup failed unexpectedly: %s", e)
@@ -569,14 +598,16 @@ def clear_all_computed_features():
         "computed_features_deleted": computed_count,
         "feature_versions_deleted": version_count,
         "model_artifacts_deleted": models_deleted,
-        "wal_file_deleted_mb": wal_size // (1024 * 1024),
+        "wal_file_mb": wal_size // (1024 * 1024),
         "vacuum_completed": vacuumed,
+        "database_healthy": final_ok,
         "message": (
             f"Cleared {computed_count:,} computed features across "
             f"{version_count} versions. "
             f"Removed {models_deleted} model artifacts. "
-            f"Deleted WAL file ({wal_size // (1024*1024)} MB). "
-            f"{'Disk space reclaimed via VACUUM.' if vacuumed else 'VACUUM skipped — space will be reused by SQLite automatically.'}"
+            f"WAL was {wal_size // (1024*1024)} MB. "
+            f"DB healthy: {final_ok}. "
+            f"{'Disk space reclaimed via VACUUM.' if vacuumed else 'VACUUM skipped.'}"
         ),
     }
 

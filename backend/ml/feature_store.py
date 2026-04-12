@@ -377,6 +377,22 @@ def materialize_feature(
     return stats
 
 
+def _wal_checkpoint_truncate(db: Session) -> None:
+    """Run a TRUNCATE WAL checkpoint to reclaim disk space.
+
+    TRUNCATE mode waits for all readers to finish, checkpoints the entire
+    WAL into the main database, then truncates the WAL file to zero bytes.
+    Use this after large operations (full materialization, bulk deletes) to
+    reclaim the WAL file space on disk.
+    """
+    try:
+        raw_conn = db.get_bind().raw_connection()
+        raw_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        logger.info("WAL TRUNCATE checkpoint completed — WAL file reclaimed")
+    except Exception as e:
+        logger.warning("WAL TRUNCATE checkpoint failed: %s", e)
+
+
 def materialize_all_features(
     db: Session,
     race_entry_ids: list[int] | None = None,
@@ -392,6 +408,10 @@ def materialize_all_features(
             db, feature_def, race_entry_ids, force, version_id=version_id,
         )
         results[feature_def.name] = stats
+
+    # After all features are materialized, do a full WAL checkpoint to
+    # reclaim the WAL file space on disk.
+    _wal_checkpoint_truncate(db)
 
     return results
 

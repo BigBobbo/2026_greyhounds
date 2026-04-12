@@ -414,27 +414,34 @@ def trigger_materialization(req: MaterializeRequest, db: Session = Depends(get_d
 
 
 @router.delete("/computed/all", status_code=200)
-def clear_all_computed_features(db: Session = Depends(get_db)):
+def clear_all_computed_features():
     """
     Delete ALL computed features (across all versions) and all feature versions.
     Also removes model artifacts from disk.
 
-    Uses raw SQL and batched deletes to work even when the disk is nearly full
-    (ORM bulk-delete can fail because SQLite needs WAL space for the transaction).
+    Uses a direct sqlite3 connection (bypassing SQLAlchemy) with batched
+    deletes to work even when the disk is nearly full.
 
     This does NOT delete:
     - Scraped data (tracks, dogs, races, race_entries)
     - Feature definitions (so they can be re-materialized)
     - Experiment metadata (but model files are removed from disk)
-    - Predictions, odds_snapshots, bet_records, etc.
     """
+    import sqlite3
     from app.config import settings
-    from sqlalchemy import text
 
-    raw_conn = db.get_bind().raw_connection()
-    cursor = raw_conn.cursor()
+    # Parse DB path from SQLAlchemy URL (sqlite:///./data/greyhound.db)
+    db_url = settings.database_url
+    if db_url.startswith("sqlite:///"):
+        db_path = db_url[len("sqlite:///"):]
+    else:
+        raise HTTPException(status_code=500, detail=f"Unsupported DB URL: {db_url}")
 
     try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        cursor = conn.cursor()
+
         # 1. Count what we're about to delete
         computed_count = cursor.execute(
             "SELECT COUNT(*) FROM computed_features"
@@ -448,17 +455,18 @@ def clear_all_computed_features(db: Session = Depends(get_db)):
         batch_size = 50000
         while True:
             cursor.execute(
-                f"DELETE FROM computed_features WHERE id IN "
-                f"(SELECT id FROM computed_features LIMIT {batch_size})"
+                "DELETE FROM computed_features WHERE id IN "
+                "(SELECT id FROM computed_features LIMIT ?)",
+                (batch_size,),
             )
             deleted = cursor.rowcount
-            raw_conn.commit()
+            conn.commit()
             total_deleted += deleted
             logger.info("Deleted batch: %d rows (total: %d)", deleted, total_deleted)
 
             # WAL checkpoint between batches to reuse WAL space
             try:
-                cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             except Exception:
                 pass
 
@@ -467,7 +475,7 @@ def clear_all_computed_features(db: Session = Depends(get_db)):
 
         # 3. Delete all feature versions
         cursor.execute("DELETE FROM feature_versions")
-        raw_conn.commit()
+        conn.commit()
 
         # 4. Remove model artifacts from disk
         models_deleted = 0
@@ -481,31 +489,27 @@ def clear_all_computed_features(db: Session = Depends(get_db)):
                     logger.warning("Failed to delete model artifact %s: %s", f, e)
 
         # 5. Reclaim disk space.
-        # VACUUM rewrites the entire DB (most thorough but needs ~2x free space).
-        # If it fails (disk too full), fall back to a TRUNCATE WAL checkpoint
-        # which at least reclaims the WAL file.
         vacuumed = False
         try:
-            cursor.execute("VACUUM")
+            conn.execute("VACUUM")
             vacuumed = True
         except Exception as e:
             logger.warning("VACUUM failed (may need more free space): %s", e)
             try:
-                cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 logger.info("Fell back to WAL TRUNCATE checkpoint")
             except Exception as e2:
                 logger.warning("WAL TRUNCATE checkpoint also failed: %s", e2)
 
-    except Exception as e:
-        logger.error("Cleanup failed: %s", e)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Cleanup failed: {e}",
-        )
-    finally:
         cursor.close()
-        # Expire all ORM objects so they don't reference stale state
-        db.expire_all()
+        conn.close()
+
+    except sqlite3.Error as e:
+        logger.error("Cleanup failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {e}")
+    except Exception as e:
+        logger.error("Cleanup failed unexpectedly: %s", e)
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {e}")
 
     return {
         "computed_features_deleted": computed_count,

@@ -442,6 +442,22 @@ def _track_speed_rating(
     return float(dog_best - avg_time)
 
 
+_SQLITE_VAR_LIMIT = 900  # SQLite default max is 999; leave headroom for other params
+
+
+def _chunked_query(db, query_fn, ids, id_column):
+    """Execute a query in chunks to avoid SQLite's variable limit.
+
+    query_fn: callable(chunk) that returns a SQLAlchemy query with .all()
+    Returns concatenated results from all chunks.
+    """
+    results = []
+    for i in range(0, len(ids), _SQLITE_VAR_LIMIT):
+        chunk = ids[i:i + _SQLITE_VAR_LIMIT]
+        results.extend(query_fn(chunk))
+    return results
+
+
 def compute_builtin_features_batch(
     db: Session,
     entry_ids: list[int],
@@ -458,28 +474,32 @@ def compute_builtin_features_batch(
 
     # --- 1. Bulk fetch entry + race + track + dog context ---
     logger.info("Batch builtin: fetching entry/race/dog context for %d entries...", len(entry_ids))
-    ctx_rows = (
-        db.query(
-            RaceEntry.id.label("entry_id"),
-            RaceEntry.trap,
-            RaceEntry.dog_id,
-            RaceEntry.days_since_last,
-            RaceEntry.weight_kg,
-            RaceEntry.race_id,
-            Race.track_id,
-            Race.distance_m,
-            Race.grade,
-            Race.race_date,
-            Race.race_type,
-            Dog.birth_date,
-            Dog.trainer_name,
-            Dog.sire,
+
+    def _ctx_query(chunk):
+        return (
+            db.query(
+                RaceEntry.id.label("entry_id"),
+                RaceEntry.trap,
+                RaceEntry.dog_id,
+                RaceEntry.days_since_last,
+                RaceEntry.weight_kg,
+                RaceEntry.race_id,
+                Race.track_id,
+                Race.distance_m,
+                Race.grade,
+                Race.race_date,
+                Race.race_type,
+                Dog.birth_date,
+                Dog.trainer_name,
+                Dog.sire,
+            )
+            .join(Race, RaceEntry.race_id == Race.id)
+            .join(Dog, RaceEntry.dog_id == Dog.id)
+            .filter(RaceEntry.id.in_(chunk))
+            .all()
         )
-        .join(Race, RaceEntry.race_id == Race.id)
-        .join(Dog, RaceEntry.dog_id == Dog.id)
-        .filter(RaceEntry.id.in_(entry_ids))
-        .all()
-    )
+
+    ctx_rows = _chunked_query(db, _ctx_query, entry_ids, RaceEntry.id)
 
     if not ctx_rows:
         return pd.DataFrame()
@@ -498,37 +518,39 @@ def compute_builtin_features_batch(
     unique_dog_ids = ctx_df["dog_id"].unique().tolist()
     logger.info("Batch builtin: fetching histories for %d unique dogs...", len(unique_dog_ids))
 
-    hist_rows = (
-        db.query(
-            RaceEntry.dog_id,
-            RaceEntry.trap,
-            RaceEntry.finish_position,
-            RaceEntry.finish_time,
-            RaceEntry.sectional_time,
-            RaceEntry.adjusted_time,
-            RaceEntry.beaten_distance,
-            RaceEntry.weight_kg,
-            RaceEntry.sp_decimal,
-            RaceEntry.starting_price,
-            RaceEntry.comment,
-            Race.race_date,
-            Race.track_id,
-            Race.distance_m,
-            Race.grade,
-            Race.race_type,
-            Race.going,
-            Race.going_allowance,
-            Race.num_runners,
-            Race.prize_money,
+    def _hist_query(chunk):
+        return (
+            db.query(
+                RaceEntry.dog_id,
+                RaceEntry.trap,
+                RaceEntry.finish_position,
+                RaceEntry.finish_time,
+                RaceEntry.sectional_time,
+                RaceEntry.adjusted_time,
+                RaceEntry.beaten_distance,
+                RaceEntry.weight_kg,
+                RaceEntry.sp_decimal,
+                RaceEntry.starting_price,
+                RaceEntry.comment,
+                Race.race_date,
+                Race.track_id,
+                Race.distance_m,
+                Race.grade,
+                Race.race_type,
+                Race.going,
+                Race.going_allowance,
+                Race.num_runners,
+                Race.prize_money,
+            )
+            .join(Race, RaceEntry.race_id == Race.id)
+            .filter(
+                RaceEntry.dog_id.in_(chunk),
+                Race.status == "resulted",
+            )
+            .all()
         )
-        .join(Race, RaceEntry.race_id == Race.id)
-        .filter(
-            RaceEntry.dog_id.in_(unique_dog_ids),
-            Race.status == "resulted",
-        )
-        .order_by(RaceEntry.dog_id, Race.race_date.desc())
-        .all()
-    )
+
+    hist_rows = _chunked_query(db, _hist_query, unique_dog_ids, RaceEntry.dog_id)
 
     hist_columns = [
         "dog_id", "trap", "finish_position", "finish_time", "sectional_time",
@@ -579,23 +601,26 @@ def compute_builtin_features_batch(
 
     trainer_overall: dict[str, dict] = {}
     if unique_trainers:
-        trainer_rows = (
-            db.query(
-                Dog.trainer_name,
-                func.count(RaceEntry.id).label("total"),
-                func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
-                func.sum(case((RaceEntry.finish_position <= 3, 1), else_=0)).label("places"),
+        def _trainer_overall_query(chunk):
+            return (
+                db.query(
+                    Dog.trainer_name,
+                    func.count(RaceEntry.id).label("total"),
+                    func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
+                    func.sum(case((RaceEntry.finish_position <= 3, 1), else_=0)).label("places"),
+                )
+                .join(Dog, RaceEntry.dog_id == Dog.id)
+                .join(Race, RaceEntry.race_id == Race.id)
+                .filter(
+                    Dog.trainer_name.in_(chunk),
+                    Race.status == "resulted",
+                    RaceEntry.finish_position.isnot(None),
+                )
+                .group_by(Dog.trainer_name)
+                .all()
             )
-            .join(Dog, RaceEntry.dog_id == Dog.id)
-            .join(Race, RaceEntry.race_id == Race.id)
-            .filter(
-                Dog.trainer_name.in_(unique_trainers),
-                Race.status == "resulted",
-                RaceEntry.finish_position.isnot(None),
-            )
-            .group_by(Dog.trainer_name)
-            .all()
-        )
+
+        trainer_rows = _chunked_query(db, _trainer_overall_query, unique_trainers, Dog.trainer_name)
         for row in trainer_rows:
             if row.total and row.total >= 20:
                 trainer_overall[row.trainer_name] = {
@@ -606,23 +631,26 @@ def compute_builtin_features_batch(
     # Trainer at track
     trainer_at_track: dict[tuple, float | None] = {}
     if unique_trainers:
-        trainer_track_rows = (
-            db.query(
-                Dog.trainer_name,
-                Race.track_id,
-                func.count(RaceEntry.id).label("total"),
-                func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
+        def _trainer_track_query(chunk):
+            return (
+                db.query(
+                    Dog.trainer_name,
+                    Race.track_id,
+                    func.count(RaceEntry.id).label("total"),
+                    func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
+                )
+                .join(Dog, RaceEntry.dog_id == Dog.id)
+                .join(Race, RaceEntry.race_id == Race.id)
+                .filter(
+                    Dog.trainer_name.in_(chunk),
+                    Race.status == "resulted",
+                    RaceEntry.finish_position.isnot(None),
+                )
+                .group_by(Dog.trainer_name, Race.track_id)
+                .all()
             )
-            .join(Dog, RaceEntry.dog_id == Dog.id)
-            .join(Race, RaceEntry.race_id == Race.id)
-            .filter(
-                Dog.trainer_name.in_(unique_trainers),
-                Race.status == "resulted",
-                RaceEntry.finish_position.isnot(None),
-            )
-            .group_by(Dog.trainer_name, Race.track_id)
-            .all()
-        )
+
+        trainer_track_rows = _chunked_query(db, _trainer_track_query, unique_trainers, Dog.trainer_name)
         for row in trainer_track_rows:
             if row.total and row.total >= 10:
                 trainer_at_track[(row.trainer_name, row.track_id)] = float(row.wins) / float(row.total)
@@ -633,22 +661,25 @@ def compute_builtin_features_batch(
 
     sire_win: dict[str, float | None] = {}
     if unique_sires:
-        sire_rows = (
-            db.query(
-                Dog.sire,
-                func.count(RaceEntry.id).label("total"),
-                func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
+        def _sire_win_query(chunk):
+            return (
+                db.query(
+                    Dog.sire,
+                    func.count(RaceEntry.id).label("total"),
+                    func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
+                )
+                .join(Dog, RaceEntry.dog_id == Dog.id)
+                .join(Race, RaceEntry.race_id == Race.id)
+                .filter(
+                    Dog.sire.in_(chunk),
+                    Race.status == "resulted",
+                    RaceEntry.finish_position.isnot(None),
+                )
+                .group_by(Dog.sire)
+                .all()
             )
-            .join(Dog, RaceEntry.dog_id == Dog.id)
-            .join(Race, RaceEntry.race_id == Race.id)
-            .filter(
-                Dog.sire.in_(unique_sires),
-                Race.status == "resulted",
-                RaceEntry.finish_position.isnot(None),
-            )
-            .group_by(Dog.sire)
-            .all()
-        )
+
+        sire_rows = _chunked_query(db, _sire_win_query, unique_sires, Dog.sire)
         for row in sire_rows:
             if row.total and row.total >= 50:
                 sire_win[row.sire] = float(row.wins) / float(row.total)
@@ -656,22 +687,25 @@ def compute_builtin_features_batch(
     # Sire mean time at distance
     sire_time_at_dist: dict[tuple, float | None] = {}
     if unique_sires:
-        sire_time_rows = (
-            db.query(
-                Dog.sire,
-                Race.distance_m,
-                func.avg(RaceEntry.finish_time).label("avg_time"),
+        def _sire_time_query(chunk):
+            return (
+                db.query(
+                    Dog.sire,
+                    Race.distance_m,
+                    func.avg(RaceEntry.finish_time).label("avg_time"),
+                )
+                .join(Dog, RaceEntry.dog_id == Dog.id)
+                .join(Race, RaceEntry.race_id == Race.id)
+                .filter(
+                    Dog.sire.in_(chunk),
+                    Race.status == "resulted",
+                    RaceEntry.finish_time.isnot(None),
+                )
+                .group_by(Dog.sire, Race.distance_m)
+                .all()
             )
-            .join(Dog, RaceEntry.dog_id == Dog.id)
-            .join(Race, RaceEntry.race_id == Race.id)
-            .filter(
-                Dog.sire.in_(unique_sires),
-                Race.status == "resulted",
-                RaceEntry.finish_time.isnot(None),
-            )
-            .group_by(Dog.sire, Race.distance_m)
-            .all()
-        )
+
+        sire_time_rows = _chunked_query(db, _sire_time_query, unique_sires, Dog.sire)
         for row in sire_time_rows:
             if row.avg_time:
                 sire_time_at_dist[(row.sire, row.distance_m)] = float(row.avg_time)

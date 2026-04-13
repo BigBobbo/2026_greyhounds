@@ -25,6 +25,7 @@ class Experiment(Base):
     training_duration_s = Column(Float)
     model_path = Column(String)
     error_message = Column(Text)
+    training_log = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime)
     heartbeat_at = Column(DateTime)

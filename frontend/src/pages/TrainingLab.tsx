@@ -421,9 +421,16 @@ export default function TrainingLab() {
                         </div>
                       );
                     })() : (
-                      <span className={`px-2 py-0.5 rounded-full text-xs ${statusColor(exp.status)}`}>
-                        {exp.status}
-                      </span>
+                      <div>
+                        <span className={`px-2 py-0.5 rounded-full text-xs ${statusColor(exp.status)}`}>
+                          {exp.status}
+                        </span>
+                        {exp.status === 'failed' && exp.error_message && (
+                          <p className="text-xs text-red-600 mt-1 max-w-xs truncate" title={exp.error_message}>
+                            {exp.error_message.split('\n')[0]}
+                          </p>
+                        )}
+                      </div>
                     )}
                   </td>
                   <td className="px-4 py-3 font-mono text-xs">{primaryMetric(exp)}</td>

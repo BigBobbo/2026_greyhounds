@@ -90,6 +90,7 @@ export interface Experiment {
   feature_importance: Record<string, number> | null;
   training_duration_s: number | null;
   error_message: string | null;
+  training_log: string | null;
   created_at: string | null;
   completed_at: string | null;
   heartbeat_at: string | null;

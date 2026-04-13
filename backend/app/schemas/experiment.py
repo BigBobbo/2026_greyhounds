@@ -33,6 +33,7 @@ class ExperimentResponse(BaseModel):
     feature_importance: Any | None = None
     training_duration_s: float | None = None
     error_message: str | None = None
+    training_log: str | None = None
     created_at: datetime | None = None
     completed_at: datetime | None = None
     heartbeat_at: datetime | None = None

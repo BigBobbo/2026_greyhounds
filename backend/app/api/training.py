@@ -15,7 +15,7 @@ from app.database import get_db, SessionLocal
 logger = logging.getLogger(__name__)
 from app.models.experiment import Experiment
 from app.models.feature_definition import FeatureDefinition
-from app.schemas.experiment import ExperimentCreate, ExperimentResponse
+from app.schemas.experiment import ExperimentCreate, ExperimentListItem, ExperimentResponse
 from ml.autoresearch import OBJECTIVE_DIRECTIONS
 from ml.trainers.base import BaseTrainer
 
@@ -26,7 +26,7 @@ class DefaultParamsResponse(BaseModel):
     params: dict
 
 
-@router.get("/experiments", response_model=list[ExperimentResponse])
+@router.get("/experiments", response_model=list[ExperimentListItem])
 def list_experiments(
     status: str | None = None,
     target: str | None = None,

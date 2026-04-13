@@ -15,6 +15,29 @@ class ExperimentCreate(BaseModel):
     optuna_trials: int = 50
 
 
+class ExperimentListItem(BaseModel):
+    """Lightweight schema for list endpoints — excludes heavy fields like training_log."""
+    id: int
+    name: str
+    description: str | None = None
+    algorithm: str
+    target: str
+    hyperparameters: dict[str, Any]
+    feature_set: list[int]
+    split_config: dict[str, Any] | None = None
+    status: str
+    metrics: dict[str, Any] | None = None
+    feature_importance: Any | None = None
+    training_duration_s: float | None = None
+    error_message: str | None = None
+    created_at: datetime | None = None
+    completed_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    training_stage: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
 class ExperimentResponse(BaseModel):
     id: int
     name: str

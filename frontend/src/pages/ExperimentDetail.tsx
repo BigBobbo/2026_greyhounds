@@ -136,7 +136,7 @@ export default function ExperimentDetail() {
       )}
 
       {/* Training Log */}
-      {exp.training_log && (
+      {exp.training_log ? (
         <div className="bg-gray-900 rounded-lg shadow mb-6 overflow-hidden">
           <button
             onClick={() => setLogExpanded(!isLogExpanded)}
@@ -160,6 +160,13 @@ export default function ExperimentDetail() {
               <div ref={logEndRef} />
             </div>
           )}
+        </div>
+      ) : (exp.status === 'failed' || exp.status === 'completed') && (
+        <div className="bg-gray-100 rounded-lg p-4 mb-6">
+          <p className="text-gray-500 text-sm">
+            No training log available. Logs are captured for experiments started after the logging update.
+            Try running a new experiment to see detailed logs.
+          </p>
         </div>
       )}
 

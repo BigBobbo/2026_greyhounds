@@ -65,7 +65,7 @@ export default function ExperimentDetail() {
     <div>
       <div className="flex items-center gap-3 mb-6">
         <Link to="/training" className="text-gray-400 hover:text-gray-600">&larr;</Link>
-        <h1 className="text-2xl font-bold">{exp.name}</h1>
+        <h1 className="text-xl sm:text-2xl font-bold truncate">{exp.name}</h1>
         <span className={`px-2 py-0.5 rounded-full text-xs ${statusColor}`}>{exp.status}</span>
       </div>
 
@@ -169,7 +169,7 @@ export default function ExperimentDetail() {
       {bettingRaw && (
         <div className="bg-white rounded-lg shadow p-5 mb-6">
           <h2 className="font-semibold mb-3">Betting Simulation ($1 per race)</h2>
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 mb-4">
             <div className="border rounded-md p-3">
               <p className="text-xs text-gray-500">Top Pick P&L</p>
               <p className={`font-mono text-xl font-bold ${bettingRaw.top_pick_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>

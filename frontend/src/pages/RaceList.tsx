@@ -36,7 +36,7 @@ export default function RaceList() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-4">Races</h1>
+      <h1 className="text-xl sm:text-2xl font-bold mb-4">Races</h1>
 
       {/* Filters */}
       <form onSubmit={handleFilter} className="bg-white rounded-lg shadow p-4 mb-4 flex flex-wrap gap-3 items-end">
@@ -75,17 +75,17 @@ export default function RaceList() {
           <p className="text-gray-400 text-sm mt-1">Try adjusting your filters or run the scraper</p>
         </div>
       ) : (
-        <div className="bg-white rounded-lg shadow overflow-hidden">
-          <table className="w-full text-sm text-left">
+        <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
+          <table className="w-full text-sm text-left min-w-[600px]">
             <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
               <tr>
-                <th className="px-4 py-3">Date</th>
-                <th className="px-4 py-3">Track</th>
-                <th className="px-4 py-3">Race #</th>
-                <th className="px-4 py-3">Distance</th>
-                <th className="px-4 py-3">Grade</th>
-                <th className="px-4 py-3">Runners</th>
-                <th className="px-4 py-3">Status</th>
+                <th className="px-3 sm:px-4 py-3">Date</th>
+                <th className="px-3 sm:px-4 py-3">Track</th>
+                <th className="px-3 sm:px-4 py-3">Race #</th>
+                <th className="px-3 sm:px-4 py-3">Distance</th>
+                <th className="px-3 sm:px-4 py-3">Grade</th>
+                <th className="px-3 sm:px-4 py-3">Runners</th>
+                <th className="px-3 sm:px-4 py-3">Status</th>
               </tr>
             </thead>
             <tbody className="divide-y">

@@ -269,25 +269,25 @@ export default function FeatureBuilder() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">Feature Builder</h1>
-        <div className="flex gap-2">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 sm:mb-6">
+        <h1 className="text-xl sm:text-2xl font-bold">Feature Builder</h1>
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={() => { setShowVersions(!showVersions); }}
-            className="bg-gray-100 text-gray-700 px-4 py-2 rounded-md text-sm hover:bg-gray-200"
+            className="bg-gray-100 text-gray-700 px-3 sm:px-4 py-2 rounded-md text-sm hover:bg-gray-200"
           >
             {showVersions ? 'Hide Versions' : 'Versions'}
           </button>
           <button
             onClick={() => { setShowCoverage(!showCoverage); if (!showCoverage) fetchCoverage(); }}
-            className="bg-gray-100 text-gray-700 px-4 py-2 rounded-md text-sm hover:bg-gray-200"
+            className="bg-gray-100 text-gray-700 px-3 sm:px-4 py-2 rounded-md text-sm hover:bg-gray-200"
           >
             {showCoverage ? 'Hide Progress' : 'Show Progress'}
           </button>
           <button
             onClick={handleMaterialize}
             disabled={materializing}
-            className="bg-green-600 text-white px-4 py-2 rounded-md text-sm hover:bg-green-700 disabled:opacity-50"
+            className="bg-green-600 text-white px-3 sm:px-4 py-2 rounded-md text-sm hover:bg-green-700 disabled:opacity-50"
           >
             {materializing ? 'Starting...' : selectedVersionId ? `Materialize into "${versions.find(v => v.id === selectedVersionId)?.name || selectedVersionId}"` : 'Materialize All'}
           </button>
@@ -304,7 +304,7 @@ export default function FeatureBuilder() {
           </p>
 
           {/* Create new version */}
-          <div className="flex gap-2 mb-4">
+          <div className="flex flex-col sm:flex-row gap-2 mb-4">
             <input
               type="text"
               value={newVersionName}
@@ -448,9 +448,9 @@ export default function FeatureBuilder() {
         </div>
       )}
 
-      <div className="flex gap-4">
+      <div className="flex flex-col md:flex-row gap-4">
         {/* Feature list sidebar */}
-        <div className="w-72 shrink-0">
+        <div className="w-full md:w-72 md:shrink-0">
           <div className="bg-white rounded-lg shadow p-4">
             <h2 className="font-semibold text-sm mb-3">
               Features ({features.length})
@@ -460,7 +460,7 @@ export default function FeatureBuilder() {
             ) : features.length === 0 ? (
               <p className="text-gray-400 text-sm">No features defined yet</p>
             ) : (
-              <ul className="space-y-2 max-h-[600px] overflow-y-auto">
+              <ul className="space-y-2 max-h-[300px] md:max-h-[600px] overflow-y-auto">
                 {features.map((f) => (
                   <li key={f.id} className="border rounded-md p-2 text-sm">
                     <div className="flex items-center justify-between">
@@ -518,7 +518,7 @@ export default function FeatureBuilder() {
             <div className="p-5">
               {activeTab === 'visual' ? (
                 <div className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-xs font-medium text-gray-600 mb-1">Metric</label>
                       <select
@@ -606,7 +606,7 @@ export default function FeatureBuilder() {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs font-medium text-gray-600 mb-1">Feature Name</label>
                       <input
@@ -649,7 +649,7 @@ export default function FeatureBuilder() {
               )}
 
               {/* Preview + Save row */}
-              <div className="flex items-end gap-3 mt-4 pt-4 border-t">
+              <div className="flex flex-wrap items-end gap-3 mt-4 pt-4 border-t">
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Dog ID (for preview)</label>
                   <input

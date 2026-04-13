@@ -168,8 +168,8 @@ export default function TrainingLab() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">Training Lab</h1>
+      <div className="flex items-center justify-between mb-4 sm:mb-6">
+        <h1 className="text-xl sm:text-2xl font-bold">Training Lab</h1>
         <button
           onClick={() => setShowForm(!showForm)}
           className="bg-blue-600 text-white px-4 py-2 rounded-md text-sm hover:bg-blue-700"
@@ -183,7 +183,7 @@ export default function TrainingLab() {
         <div className="bg-white rounded-lg shadow p-5 mb-6">
           <h2 className="font-semibold mb-4">Create New Experiment</h2>
 
-          <div className="grid grid-cols-2 gap-4 mb-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Name</label>
               <input
@@ -358,17 +358,17 @@ export default function TrainingLab() {
           <p className="text-gray-400 text-sm mt-1">Create one above to start training</p>
         </div>
       ) : (
-        <div className="bg-white rounded-lg shadow overflow-hidden">
-          <table className="w-full text-sm text-left">
+        <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
+          <table className="w-full text-sm text-left min-w-[700px]">
             <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
               <tr>
-                <th className="px-4 py-3">Name</th>
-                <th className="px-4 py-3">Algorithm</th>
-                <th className="px-4 py-3">Target</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Performance</th>
-                <th className="px-4 py-3">Duration</th>
-                <th className="px-4 py-3"></th>
+                <th className="px-3 sm:px-4 py-3">Name</th>
+                <th className="px-3 sm:px-4 py-3">Algorithm</th>
+                <th className="px-3 sm:px-4 py-3">Target</th>
+                <th className="px-3 sm:px-4 py-3">Status</th>
+                <th className="px-3 sm:px-4 py-3">Performance</th>
+                <th className="px-3 sm:px-4 py-3">Duration</th>
+                <th className="px-3 sm:px-4 py-3"></th>
               </tr>
             </thead>
             <tbody className="divide-y">

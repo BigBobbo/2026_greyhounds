@@ -149,8 +149,8 @@ export default function BankrollDashboard() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">Bankroll</h1>
+      <div className="flex items-center justify-between mb-4 sm:mb-6">
+        <h1 className="text-xl sm:text-2xl font-bold">Bankroll</h1>
         <div className="flex gap-2">
           <button
             onClick={() => setShowSettings(!showSettings)}
@@ -171,7 +171,7 @@ export default function BankrollDashboard() {
       {showSettings && (
         <div className="bg-white rounded-lg shadow p-5 mb-6">
           <h2 className="font-semibold mb-3">Bankroll Settings</h2>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-4">
             <div>
               <label className="block text-xs text-gray-500 mb-1">Starting Bankroll ($)</label>
               <input type="number" value={editBankroll} onChange={e => setEditBankroll(parseFloat(e.target.value) || 100)}
@@ -208,7 +208,7 @@ export default function BankrollDashboard() {
 
       {/* Summary cards */}
       {summary && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 sm:gap-4 mb-6">
           <div className="bg-white rounded-lg shadow p-4">
             <p className="text-xs text-gray-500">Bankroll</p>
             <p className="text-2xl font-bold font-mono">${summary.current_bankroll.toFixed(2)}</p>
@@ -293,19 +293,19 @@ export default function BankrollDashboard() {
               <p className="text-gray-500">No bets recorded yet</p>
             </div>
           ) : (
-            <div className="bg-white rounded-lg shadow overflow-hidden">
-              <table className="w-full text-sm text-left">
+            <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
+              <table className="w-full text-sm text-left min-w-[720px]">
                 <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
                   <tr>
-                    <th className="px-4 py-3">Date</th>
-                    <th className="px-4 py-3">Race</th>
-                    <th className="px-4 py-3">Dog</th>
-                    <th className="px-4 py-3">Odds</th>
-                    <th className="px-4 py-3">Edge</th>
-                    <th className="px-4 py-3">Stake</th>
-                    <th className="px-4 py-3">Result</th>
-                    <th className="px-4 py-3">P&L</th>
-                    <th className="px-4 py-3">Actions</th>
+                    <th className="px-3 sm:px-4 py-3">Date</th>
+                    <th className="px-3 sm:px-4 py-3">Race</th>
+                    <th className="px-3 sm:px-4 py-3">Dog</th>
+                    <th className="px-3 sm:px-4 py-3">Odds</th>
+                    <th className="px-3 sm:px-4 py-3">Edge</th>
+                    <th className="px-3 sm:px-4 py-3">Stake</th>
+                    <th className="px-3 sm:px-4 py-3">Result</th>
+                    <th className="px-3 sm:px-4 py-3">P&L</th>
+                    <th className="px-3 sm:px-4 py-3">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y">

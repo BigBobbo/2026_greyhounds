@@ -178,7 +178,7 @@ export default function Predictions() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Predictions</h1>
+      <h1 className="text-xl sm:text-2xl font-bold mb-4 sm:mb-6">Predictions</h1>
 
       {experiments.length === 0 ? (
         <div className="bg-white rounded-lg shadow p-8 text-center">
@@ -369,17 +369,17 @@ export default function Predictions() {
                   </div>
 
                   {/* Predictions table */}
-                  <div className="bg-white rounded-lg shadow overflow-hidden">
-                    <table className="w-full text-sm text-left">
+                  <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
+                    <table className="w-full text-sm text-left min-w-[560px]">
                       <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
                         <tr>
-                          <th className="px-4 py-3">Rank</th>
-                          <th className="px-4 py-3">Trap</th>
-                          <th className="px-4 py-3">Dog</th>
-                          <th className="px-4 py-3">Win Prob</th>
-                          <th className="px-4 py-3">Edge</th>
-                          <th className="px-4 py-3">Bet?</th>
-                          <th className="px-4 py-3">Stake</th>
+                          <th className="px-3 sm:px-4 py-3">Rank</th>
+                          <th className="px-3 sm:px-4 py-3">Trap</th>
+                          <th className="px-3 sm:px-4 py-3">Dog</th>
+                          <th className="px-3 sm:px-4 py-3">Win Prob</th>
+                          <th className="px-3 sm:px-4 py-3">Edge</th>
+                          <th className="px-3 sm:px-4 py-3">Bet?</th>
+                          <th className="px-3 sm:px-4 py-3">Stake</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y">
@@ -496,20 +496,20 @@ export default function Predictions() {
                   <p className="text-gray-400 text-sm mt-1">Predict some resulted races first</p>
                 </div>
               ) : (
-                <div className="bg-white rounded-lg shadow overflow-hidden">
-                  <table className="w-full text-sm text-left">
+                <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
+                  <table className="w-full text-sm text-left min-w-[720px]">
                     <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
                       <tr>
-                        <th className="px-4 py-3">Date</th>
-                        <th className="px-4 py-3">Track</th>
-                        <th className="px-4 py-3">Race</th>
-                        <th className="px-4 py-3">Dog</th>
-                        <th className="px-4 py-3">Trap</th>
-                        <th className="px-4 py-3">Win Prob</th>
-                        <th className="px-4 py-3">Edge</th>
-                        <th className="px-4 py-3">Actual Pos</th>
-                        <th className="px-4 py-3">SP</th>
-                        <th className="px-4 py-3">Value?</th>
+                        <th className="px-3 sm:px-4 py-3">Date</th>
+                        <th className="px-3 sm:px-4 py-3">Track</th>
+                        <th className="px-3 sm:px-4 py-3">Race</th>
+                        <th className="px-3 sm:px-4 py-3">Dog</th>
+                        <th className="px-3 sm:px-4 py-3">Trap</th>
+                        <th className="px-3 sm:px-4 py-3">Win Prob</th>
+                        <th className="px-3 sm:px-4 py-3">Edge</th>
+                        <th className="px-3 sm:px-4 py-3">Actual Pos</th>
+                        <th className="px-3 sm:px-4 py-3">SP</th>
+                        <th className="px-3 sm:px-4 py-3">Value?</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y">

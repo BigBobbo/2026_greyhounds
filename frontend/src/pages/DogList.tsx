@@ -27,7 +27,7 @@ export default function DogList() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-4">Dogs</h1>
+      <h1 className="text-xl sm:text-2xl font-bold mb-4">Dogs</h1>
 
       <form onSubmit={handleSearch} className="bg-white rounded-lg shadow p-4 mb-4 flex gap-3 items-end">
         <div className="flex-1 max-w-md">
@@ -58,14 +58,14 @@ export default function DogList() {
           <p className="text-gray-400 text-sm mt-1">{search ? 'Try a different search' : 'Run the scraper to populate dog data'}</p>
         </div>
       ) : (
-        <div className="bg-white rounded-lg shadow overflow-hidden">
-          <table className="w-full text-sm text-left">
+        <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
+          <table className="w-full text-sm text-left min-w-[480px]">
             <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
               <tr>
-                <th className="px-4 py-3">Name</th>
-                <th className="px-4 py-3">Trainer</th>
-                <th className="px-4 py-3">Sire</th>
-                <th className="px-4 py-3">Dam</th>
+                <th className="px-3 sm:px-4 py-3">Name</th>
+                <th className="px-3 sm:px-4 py-3">Trainer</th>
+                <th className="px-3 sm:px-4 py-3">Sire</th>
+                <th className="px-3 sm:px-4 py-3">Dam</th>
               </tr>
             </thead>
             <tbody className="divide-y">

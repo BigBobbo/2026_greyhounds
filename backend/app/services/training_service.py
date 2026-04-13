@@ -55,7 +55,10 @@ class _TrainingLogHandler(logging.Handler):
                 self._flush_to_db()
                 self._last_flush = now
         except Exception:
-            pass
+            # Don't let logging failures crash the training pipeline,
+            # but record the issue so it's diagnosable.
+            import sys
+            print(f"[TrainingLogHandler] emit failed: {sys.exc_info()[1]}", file=sys.stderr)
 
     def _flush_to_db(self) -> None:
         """Write the current log buffer to the experiment row."""
@@ -64,7 +67,12 @@ class _TrainingLogHandler(logging.Handler):
             self._experiment.heartbeat_at = datetime.utcnow()
             self._db.commit()
         except Exception:
-            pass
+            import sys
+            print(f"[TrainingLogHandler] DB flush failed: {sys.exc_info()[1]}", file=sys.stderr)
+            try:
+                self._db.rollback()
+            except Exception:
+                pass
 
     def get_log_text(self) -> str:
         return "\n".join(self.buffer)
@@ -352,14 +360,21 @@ def run_training(db: Session, experiment_id: int) -> None:
 
     except Exception as e:
         logger.error("Experiment %d failed: %s", experiment_id, e, exc_info=True)
-        experiment.status = "failed"
-        experiment.error_message = f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
-        experiment.training_duration_s = time.time() - start_time
-        experiment.completed_at = datetime.utcnow()
-        experiment.heartbeat_at = None
-        experiment.training_stage = None
-        experiment.training_log = log_handler.get_log_text()
-        db.commit()
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            experiment.status = "failed"
+            experiment.error_message = f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+            experiment.training_duration_s = time.time() - start_time
+            experiment.completed_at = datetime.utcnow()
+            experiment.heartbeat_at = None
+            experiment.training_stage = None
+            experiment.training_log = log_handler.get_log_text()
+            db.commit()
+        except Exception as commit_err:
+            logger.error("Failed to persist error for experiment %d: %s", experiment_id, commit_err)
     finally:
         root_logger.removeHandler(log_handler)
 
@@ -576,13 +591,20 @@ def run_optuna_optimization(
 
     except Exception as e:
         logger.error("Optuna experiment %d failed: %s", experiment_id, e, exc_info=True)
-        experiment.status = "failed"
-        experiment.error_message = f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
-        experiment.completed_at = datetime.utcnow()
-        experiment.heartbeat_at = None
-        experiment.training_stage = None
-        experiment.training_log = log_handler.get_log_text()
-        db.commit()
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            experiment.status = "failed"
+            experiment.error_message = f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+            experiment.completed_at = datetime.utcnow()
+            experiment.heartbeat_at = None
+            experiment.training_stage = None
+            experiment.training_log = log_handler.get_log_text()
+            db.commit()
+        except Exception as commit_err:
+            logger.error("Failed to persist error for Optuna experiment %d: %s", experiment_id, commit_err)
     finally:
         root_logger.removeHandler(log_handler)
 

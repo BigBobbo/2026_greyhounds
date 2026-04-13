@@ -94,6 +94,42 @@ def create_experiment(experiment: ExperimentCreate, db: Session = Depends(get_db
                 run_optuna_optimization(db2, exp_id, n_trials=optuna_trials)
             else:
                 run_training(db2, exp_id)
+        except Exception as e:
+            # Last-resort handler: if training_service failed to persist the error
+            # (e.g. DB session was unrecoverable), try with a fresh session.
+            logger.error("Training thread crashed for experiment %d: %s", exp_id, e, exc_info=True)
+            try:
+                db2.rollback()
+            except Exception:
+                pass
+            try:
+                import traceback as tb
+                from datetime import datetime
+                exp = db2.query(Experiment).filter(Experiment.id == exp_id).first()
+                if exp and exp.status == "running":
+                    exp.status = "failed"
+                    exp.error_message = f"{type(e).__name__}: {e}\n\n{tb.format_exc()}"
+                    exp.heartbeat_at = None
+                    exp.training_stage = None
+                    exp.completed_at = datetime.utcnow()
+                    db2.commit()
+            except Exception:
+                # If even this fails, try a completely fresh session
+                try:
+                    db3 = SessionLocal()
+                    import traceback as tb
+                    from datetime import datetime
+                    exp = db3.query(Experiment).filter(Experiment.id == exp_id).first()
+                    if exp and exp.status == "running":
+                        exp.status = "failed"
+                        exp.error_message = f"{type(e).__name__}: {e}\n\n{tb.format_exc()}"
+                        exp.heartbeat_at = None
+                        exp.training_stage = None
+                        exp.completed_at = datetime.utcnow()
+                        db3.commit()
+                    db3.close()
+                except Exception as final_err:
+                    logger.error("Could not persist failure for experiment %d: %s", exp_id, final_err)
         finally:
             db2.close()
 

@@ -295,61 +295,12 @@ def _time_based_split(
 def _compute_builtin_features(db: Session, entry_ids: list[int]) -> pd.DataFrame:
     """Compute built-in race-context features for a list of entries.
 
-    These are features that require field-level or track-level statistics
-    and can't be easily expressed via the visual feature builder.
-
-    Computed in batches for efficiency, but some features (trap_win_rate)
-    require per-entry DB queries, so this is slower than materialized features.
+    Uses bulk queries to avoid the N+1 problem — instead of ~8 DB queries per
+    entry, this runs ~10 aggregate queries total then assembles features in memory.
     """
-    from ml.race_features import compute_race_context_features
-    from app.services.feature_engine import get_dog_history, get_race_context
+    from ml.race_features import compute_builtin_features_batch
 
-    rows = {}
-    errors = 0
-    batch_size = 500
-    for i in range(0, len(entry_ids), batch_size):
-        batch = entry_ids[i:i + batch_size]
-        for entry_id in batch:
-            try:
-                ctx = get_race_context(db, entry_id)
-                if not ctx:
-                    continue
-
-                dog_id = ctx["dog_id"]
-                race_date = ctx["race_date"]
-                history = get_dog_history(db, dog_id, race_date)
-
-                features = compute_race_context_features(db, entry_id, history, ctx)
-                rows[entry_id] = features
-            except Exception as e:
-                errors += 1
-                if errors <= 10:
-                    logger.warning(
-                        "Built-in feature computation failed for entry %d: %s: %s",
-                        entry_id, type(e).__name__, e,
-                    )
-                elif errors == 11:
-                    logger.warning("Suppressing further per-entry errors (11+ so far)")
-
-        processed = min(i + len(batch), len(entry_ids))
-        logger.info(
-            "Built-in features: %d/%d entries computed%s",
-            processed, len(entry_ids),
-            f" ({errors} errors)" if errors else "",
-        )
-
-    if errors:
-        logger.warning(
-            "Built-in feature computation completed with %d errors out of %d entries",
-            errors, len(entry_ids),
-        )
-
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame.from_dict(rows, orient="index")
-    df.index.name = "race_entry_id"
-    return df
+    return compute_builtin_features_batch(db, entry_ids)
 
 
 def _compute_group_sizes(race_ids: pd.Series) -> list[int]:

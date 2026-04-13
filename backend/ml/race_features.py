@@ -12,12 +12,13 @@ These are computed on-the-fly alongside user-defined features.
 """
 
 import logging
+from collections import defaultdict
 from datetime import timedelta
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import case, func
+from sqlalchemy import case, func, text
 from sqlalchemy.orm import Session
 
 from app.models.dog import Dog
@@ -439,6 +440,435 @@ def _track_speed_rating(
         return None
 
     return float(dog_best - avg_time)
+
+
+def compute_builtin_features_batch(
+    db: Session,
+    entry_ids: list[int],
+) -> pd.DataFrame:
+    """Compute all built-in race-context features via bulk queries.
+
+    This replaces the per-entry approach (which issued ~8 DB queries per entry)
+    with a small number of bulk queries followed by in-memory joins.
+    """
+    if not entry_ids:
+        return pd.DataFrame()
+
+    entry_set = set(entry_ids)
+
+    # --- 1. Bulk fetch entry + race + track + dog context ---
+    logger.info("Batch builtin: fetching entry/race/dog context for %d entries...", len(entry_ids))
+    ctx_rows = (
+        db.query(
+            RaceEntry.id.label("entry_id"),
+            RaceEntry.trap,
+            RaceEntry.dog_id,
+            RaceEntry.days_since_last,
+            RaceEntry.weight_kg,
+            RaceEntry.race_id,
+            Race.track_id,
+            Race.distance_m,
+            Race.grade,
+            Race.race_date,
+            Race.race_type,
+            Dog.birth_date,
+            Dog.trainer_name,
+            Dog.sire,
+        )
+        .join(Race, RaceEntry.race_id == Race.id)
+        .join(Dog, RaceEntry.dog_id == Dog.id)
+        .filter(RaceEntry.id.in_(entry_ids))
+        .all()
+    )
+
+    if not ctx_rows:
+        return pd.DataFrame()
+
+    ctx_df = pd.DataFrame(ctx_rows, columns=[
+        "entry_id", "trap", "dog_id", "days_since_last", "weight_kg", "race_id",
+        "track_id", "distance_m", "grade", "race_date", "race_type",
+        "birth_date", "trainer_name", "sire",
+    ]).set_index("entry_id")
+
+    logger.info("Batch builtin: fetched context for %d entries", len(ctx_df))
+
+    # --- 2. Bulk fetch all dog histories (last 100 races per dog, before race date) ---
+    # We need history per (dog_id, race_date) pair. Fetch all historical entries for
+    # relevant dogs, then filter per-entry in memory.
+    unique_dog_ids = ctx_df["dog_id"].unique().tolist()
+    logger.info("Batch builtin: fetching histories for %d unique dogs...", len(unique_dog_ids))
+
+    hist_rows = (
+        db.query(
+            RaceEntry.dog_id,
+            RaceEntry.trap,
+            RaceEntry.finish_position,
+            RaceEntry.finish_time,
+            RaceEntry.sectional_time,
+            RaceEntry.adjusted_time,
+            RaceEntry.beaten_distance,
+            RaceEntry.weight_kg,
+            RaceEntry.sp_decimal,
+            RaceEntry.starting_price,
+            RaceEntry.comment,
+            Race.race_date,
+            Race.track_id,
+            Race.distance_m,
+            Race.grade,
+            Race.race_type,
+            Race.going,
+            Race.going_allowance,
+            Race.num_runners,
+            Race.prize_money,
+        )
+        .join(Race, RaceEntry.race_id == Race.id)
+        .filter(
+            RaceEntry.dog_id.in_(unique_dog_ids),
+            Race.status == "resulted",
+        )
+        .order_by(RaceEntry.dog_id, Race.race_date.desc())
+        .all()
+    )
+
+    hist_columns = [
+        "dog_id", "trap", "finish_position", "finish_time", "sectional_time",
+        "adjusted_time", "beaten_distance", "weight_kg", "sp_decimal",
+        "starting_price", "comment", "race_date", "track_id", "distance_m",
+        "grade", "race_type", "going", "going_allowance", "num_runners",
+        "prize_money",
+    ]
+    all_hist_df = pd.DataFrame(hist_rows, columns=hist_columns) if hist_rows else pd.DataFrame(columns=hist_columns)
+
+    # Index by dog for fast lookup
+    dog_histories: dict[int, pd.DataFrame] = {}
+    if not all_hist_df.empty:
+        for dog_id, group in all_hist_df.groupby("dog_id"):
+            dog_histories[dog_id] = group.sort_values("race_date").reset_index(drop=True)
+
+    logger.info("Batch builtin: loaded %d history rows for %d dogs", len(all_hist_df), len(dog_histories))
+
+    # --- 3. Bulk compute trap win rates (per track/distance/trap combo) ---
+    unique_combos = ctx_df[["track_id", "distance_m", "trap"]].drop_duplicates()
+    logger.info("Batch builtin: computing trap win rates for %d combos...", len(unique_combos))
+
+    trap_stats = (
+        db.query(
+            Race.track_id,
+            Race.distance_m,
+            RaceEntry.trap,
+            func.count(RaceEntry.id).label("total"),
+            func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
+        )
+        .join(Race, RaceEntry.race_id == Race.id)
+        .filter(
+            Race.status == "resulted",
+            RaceEntry.finish_position.isnot(None),
+        )
+        .group_by(Race.track_id, Race.distance_m, RaceEntry.trap)
+        .all()
+    )
+    # Key: (track_id, distance_m, trap) -> win_rate
+    trap_win_rates: dict[tuple, float | None] = {}
+    for row in trap_stats:
+        if row.total and row.total >= 30:
+            trap_win_rates[(row.track_id, row.distance_m, row.trap)] = float(row.wins) / float(row.total)
+
+    # --- 4. Bulk compute trainer stats (win/place rate in last 90 days) ---
+    unique_trainers = ctx_df["trainer_name"].dropna().unique().tolist()
+    logger.info("Batch builtin: computing trainer stats for %d trainers...", len(unique_trainers))
+
+    trainer_overall: dict[str, dict] = {}
+    if unique_trainers:
+        trainer_rows = (
+            db.query(
+                Dog.trainer_name,
+                func.count(RaceEntry.id).label("total"),
+                func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
+                func.sum(case((RaceEntry.finish_position <= 3, 1), else_=0)).label("places"),
+            )
+            .join(Dog, RaceEntry.dog_id == Dog.id)
+            .join(Race, RaceEntry.race_id == Race.id)
+            .filter(
+                Dog.trainer_name.in_(unique_trainers),
+                Race.status == "resulted",
+                RaceEntry.finish_position.isnot(None),
+            )
+            .group_by(Dog.trainer_name)
+            .all()
+        )
+        for row in trainer_rows:
+            if row.total and row.total >= 20:
+                trainer_overall[row.trainer_name] = {
+                    "win_rate": float(row.wins) / float(row.total),
+                    "place_rate": float(row.places) / float(row.total),
+                }
+
+    # Trainer at track
+    trainer_at_track: dict[tuple, float | None] = {}
+    if unique_trainers:
+        trainer_track_rows = (
+            db.query(
+                Dog.trainer_name,
+                Race.track_id,
+                func.count(RaceEntry.id).label("total"),
+                func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
+            )
+            .join(Dog, RaceEntry.dog_id == Dog.id)
+            .join(Race, RaceEntry.race_id == Race.id)
+            .filter(
+                Dog.trainer_name.in_(unique_trainers),
+                Race.status == "resulted",
+                RaceEntry.finish_position.isnot(None),
+            )
+            .group_by(Dog.trainer_name, Race.track_id)
+            .all()
+        )
+        for row in trainer_track_rows:
+            if row.total and row.total >= 10:
+                trainer_at_track[(row.trainer_name, row.track_id)] = float(row.wins) / float(row.total)
+
+    # --- 5. Bulk compute sire stats ---
+    unique_sires = ctx_df["sire"].dropna().unique().tolist()
+    logger.info("Batch builtin: computing sire stats for %d sires...", len(unique_sires))
+
+    sire_win: dict[str, float | None] = {}
+    if unique_sires:
+        sire_rows = (
+            db.query(
+                Dog.sire,
+                func.count(RaceEntry.id).label("total"),
+                func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
+            )
+            .join(Dog, RaceEntry.dog_id == Dog.id)
+            .join(Race, RaceEntry.race_id == Race.id)
+            .filter(
+                Dog.sire.in_(unique_sires),
+                Race.status == "resulted",
+                RaceEntry.finish_position.isnot(None),
+            )
+            .group_by(Dog.sire)
+            .all()
+        )
+        for row in sire_rows:
+            if row.total and row.total >= 50:
+                sire_win[row.sire] = float(row.wins) / float(row.total)
+
+    # Sire mean time at distance
+    sire_time_at_dist: dict[tuple, float | None] = {}
+    if unique_sires:
+        sire_time_rows = (
+            db.query(
+                Dog.sire,
+                Race.distance_m,
+                func.avg(RaceEntry.finish_time).label("avg_time"),
+            )
+            .join(Dog, RaceEntry.dog_id == Dog.id)
+            .join(Race, RaceEntry.race_id == Race.id)
+            .filter(
+                Dog.sire.in_(unique_sires),
+                Race.status == "resulted",
+                RaceEntry.finish_time.isnot(None),
+            )
+            .group_by(Dog.sire, Race.distance_m)
+            .all()
+        )
+        for row in sire_time_rows:
+            if row.avg_time:
+                sire_time_at_dist[(row.sire, row.distance_m)] = float(row.avg_time)
+
+    # --- 6. Bulk compute track/distance average times (for speed rating) ---
+    logger.info("Batch builtin: computing track speed baselines...")
+    track_avg_rows = (
+        db.query(
+            Race.track_id,
+            Race.distance_m,
+            func.count(RaceEntry.id).label("cnt"),
+            func.avg(RaceEntry.adjusted_time).label("avg_time"),
+        )
+        .join(Race, RaceEntry.race_id == Race.id)
+        .filter(
+            Race.status == "resulted",
+            RaceEntry.adjusted_time.isnot(None),
+        )
+        .group_by(Race.track_id, Race.distance_m)
+        .all()
+    )
+    track_avg_time: dict[tuple, float | None] = {}
+    for row in track_avg_rows:
+        if row.cnt and row.cnt >= 50 and row.avg_time:
+            track_avg_time[(row.track_id, row.distance_m)] = float(row.avg_time)
+
+    # --- 7. Assemble features per entry (pure Python, no DB) ---
+    logger.info("Batch builtin: assembling features for %d entries...", len(ctx_df))
+    rows: dict[int, dict[str, float | None]] = {}
+
+    grade_map = {g: i for i, g in enumerate(GRADE_ORDER)}
+
+    for entry_id, ctx in ctx_df.iterrows():
+        features: dict[str, float | None] = {}
+        dog_id = ctx["dog_id"]
+        race_date = ctx["race_date"]
+        trap = ctx["trap"]
+        track_id = ctx["track_id"]
+        distance_m = ctx["distance_m"]
+        current_grade = ctx["grade"]
+        trainer_name = ctx["trainer_name"]
+        sire = ctx["sire"]
+
+        # Get history for this dog, filtered to before race_date
+        full_hist = dog_histories.get(dog_id, pd.DataFrame())
+        if not full_hist.empty and race_date is not None:
+            hist = full_hist[full_hist["race_date"] < race_date].tail(100)
+        else:
+            hist = pd.DataFrame()
+
+        # 1. Trap win rate
+        features["trap_win_rate_at_track"] = trap_win_rates.get(
+            (track_id, distance_m, trap)
+        )
+
+        # 2. Grade movement
+        if current_grade and not hist.empty and "grade" in hist.columns:
+            last_grade = hist["grade"].dropna()
+            if not last_grade.empty:
+                last_g = str(last_grade.iloc[-1]).upper().strip()
+                curr_g = str(current_grade).upper().strip()
+                if curr_g in grade_map and last_g in grade_map:
+                    features["grade_movement"] = float(grade_map[curr_g] - grade_map[last_g])
+                else:
+                    features["grade_movement"] = None
+            else:
+                features["grade_movement"] = None
+        else:
+            features["grade_movement"] = None
+
+        # 3. Days since last
+        if ctx["days_since_last"] is not None:
+            features["days_since_last"] = float(ctx["days_since_last"])
+        elif not hist.empty:
+            last_date = hist["race_date"].max()
+            if last_date and race_date:
+                features["days_since_last"] = float((race_date - last_date).days)
+            else:
+                features["days_since_last"] = None
+        else:
+            features["days_since_last"] = None
+
+        # 4. Weight change
+        current_weight = ctx["weight_kg"]
+        if current_weight is not None and not hist.empty:
+            weights = hist["weight_kg"].dropna().tail(5)
+            if not weights.empty:
+                features["weight_change"] = float(current_weight - weights.mean())
+            else:
+                features["weight_change"] = None
+        else:
+            features["weight_change"] = None
+
+        # 5. Early speed ratio
+        if not hist.empty:
+            recent = hist.tail(5)
+            valid = recent.dropna(subset=["sectional_time", "finish_time"])
+            valid = valid[valid["finish_time"] > 0]
+            if not valid.empty:
+                ratios = valid["sectional_time"] / valid["finish_time"]
+                features["early_speed_ratio"] = float(ratios.mean())
+            else:
+                features["early_speed_ratio"] = None
+        else:
+            features["early_speed_ratio"] = None
+
+        # 6. Is front runner
+        if not hist.empty:
+            recent = hist.tail(10)
+            led = 0
+            for _, row in recent.iterrows():
+                comment = str(row.get("comment", "")).lower()
+                if any(kw in comment for kw in ["led", "ld", "disp ld", "disp lead", "made all"]):
+                    led += 1
+            features["is_front_runner"] = float(led / max(len(recent), 1))
+        else:
+            features["is_front_runner"] = 0.0
+
+        # 7. Career races
+        features["career_races"] = float(len(hist)) if not hist.empty else 0.0
+
+        # 8. Position consistency
+        if not hist.empty:
+            positions = hist["finish_position"].dropna().tail(10)
+            features["position_consistency"] = float(positions.std()) if len(positions) >= 2 else None
+        else:
+            features["position_consistency"] = None
+
+        # 9. Dog age
+        birth_date = ctx["birth_date"]
+        if birth_date and race_date:
+            age = (race_date - birth_date).days / 365.25
+            features["dog_age_years"] = age
+            features["dog_age_squared"] = age ** 2
+        else:
+            features["dog_age_years"] = None
+            features["dog_age_squared"] = None
+
+        # 10. Pace/trap interaction
+        early_speed = features.get("early_speed_ratio")
+        front_runner = features.get("is_front_runner")
+
+        if trap is not None and early_speed is not None:
+            features["early_speed_x_trap"] = early_speed * trap
+            features["early_speed_x_inside"] = early_speed * (1.0 if trap <= 2 else 0.0)
+            features["early_speed_x_outside"] = early_speed * (1.0 if trap >= 5 else 0.0)
+        else:
+            features["early_speed_x_trap"] = None
+            features["early_speed_x_inside"] = None
+            features["early_speed_x_outside"] = None
+
+        if trap is not None and front_runner is not None:
+            features["front_runner_x_inside"] = front_runner * (1.0 if trap <= 2 else 0.0)
+            features["front_runner_x_outside"] = front_runner * (1.0 if trap >= 5 else 0.0)
+        else:
+            features["front_runner_x_inside"] = None
+            features["front_runner_x_outside"] = None
+
+        # 11. Trainer stats
+        t_stats = trainer_overall.get(trainer_name, {})
+        features["trainer_win_rate"] = t_stats.get("win_rate")
+        features["trainer_place_rate"] = t_stats.get("place_rate")
+        features["trainer_win_rate_at_track"] = trainer_at_track.get(
+            (trainer_name, track_id)
+        )
+
+        # 12. Sire stats
+        features["sire_progeny_win_rate"] = sire_win.get(sire)
+        features["sire_progeny_mean_time_at_dist"] = sire_time_at_dist.get(
+            (sire, distance_m)
+        )
+
+        # 13. Track speed rating
+        if not hist.empty and track_id and distance_m:
+            same_dist = hist[hist["distance_m"] == distance_m]
+            if "adjusted_time" in same_dist.columns:
+                dog_times = same_dist["adjusted_time"].dropna().tail(10)
+                avg = track_avg_time.get((track_id, distance_m))
+                if not dog_times.empty and avg is not None:
+                    features["track_speed_rating"] = float(dog_times.min()) - avg
+                else:
+                    features["track_speed_rating"] = None
+            else:
+                features["track_speed_rating"] = None
+        else:
+            features["track_speed_rating"] = None
+
+        rows[entry_id] = features
+
+    logger.info("Batch builtin: done, computed features for %d entries", len(rows))
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame.from_dict(rows, orient="index")
+    df.index.name = "race_entry_id"
+    return df
 
 
 # Registry of built-in feature names for the UI/API

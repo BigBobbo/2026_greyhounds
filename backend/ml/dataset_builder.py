@@ -33,6 +33,7 @@ def build_dataset(
     only_complete: bool = False,
     version_id: int | None = None,
     include_builtin_features: bool = True,
+    heartbeat_fn: Any | None = None,
 ) -> dict[str, Any]:
     """
     Build a complete dataset for model training.
@@ -107,7 +108,7 @@ def build_dataset(
     # Compute built-in race-context features
     if include_builtin_features:
         logger.info("Computing built-in race-context features...")
-        builtin_X = _compute_builtin_features(db, entry_ids)
+        builtin_X = _compute_builtin_features(db, entry_ids, heartbeat_fn=heartbeat_fn)
         if not builtin_X.empty:
             if X.empty:
                 X = builtin_X
@@ -303,7 +304,8 @@ def _time_based_split(
     return X_train, y_train, X_val, y_val, X_test, y_test
 
 
-def _compute_builtin_features(db: Session, entry_ids: list[int]) -> pd.DataFrame:
+def _compute_builtin_features(db: Session, entry_ids: list[int],
+                               heartbeat_fn=None) -> pd.DataFrame:
     """Compute built-in race-context features for a list of entries.
 
     Uses bulk queries to avoid the N+1 problem — instead of ~8 DB queries per
@@ -311,7 +313,7 @@ def _compute_builtin_features(db: Session, entry_ids: list[int]) -> pd.DataFrame
     """
     from ml.race_features import compute_builtin_features_batch
 
-    return compute_builtin_features_batch(db, entry_ids)
+    return compute_builtin_features_batch(db, entry_ids, heartbeat_fn=heartbeat_fn)
 
 
 def _compute_group_sizes(race_ids: pd.Series) -> list[int]:

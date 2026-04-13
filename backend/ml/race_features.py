@@ -464,12 +464,20 @@ def _chunked_query(db, query_fn, ids, id_column):
 def compute_builtin_features_batch(
     db: Session,
     entry_ids: list[int],
+    heartbeat_fn=None,
 ) -> pd.DataFrame:
     """Compute all built-in race-context features via bulk queries.
 
     This replaces the per-entry approach (which issued ~8 DB queries per entry)
     with a small number of bulk queries followed by in-memory joins.
+
+    Args:
+        heartbeat_fn: Optional callable() to keep training heartbeat alive
+            during long-running computation.
     """
+    def _hb():
+        if heartbeat_fn is not None:
+            heartbeat_fn()
     if not entry_ids:
         return pd.DataFrame()
 
@@ -514,6 +522,7 @@ def compute_builtin_features_batch(
     ]).set_index("entry_id")
 
     logger.info("Batch builtin: fetched context for %d entries", len(ctx_df))
+    _hb()
 
     # --- 2. Bulk fetch all dog histories (last 100 races per dog, before race date) ---
     # We need history per (dog_id, race_date) pair. Fetch all historical entries for
@@ -571,6 +580,7 @@ def compute_builtin_features_batch(
             dog_histories[dog_id] = group.sort_values("race_date").reset_index(drop=True)
 
     logger.info("Batch builtin: loaded %d history rows for %d dogs", len(all_hist_df), len(dog_histories))
+    _hb()
 
     # --- 3. Bulk compute trap win rates (per track/distance/trap combo) ---
     unique_combos = ctx_df[["track_id", "distance_m", "trap"]].drop_duplicates()
@@ -735,14 +745,163 @@ def compute_builtin_features_batch(
         if row.cnt and row.cnt >= 50 and row.avg_time:
             track_avg_time[(row.track_id, row.distance_m)] = float(row.avg_time)
 
-    # --- 7. Assemble features per entry (pure Python, no DB) ---
-    logger.info("Batch builtin: assembling features for %d entries...", len(ctx_df))
-    rows: dict[int, dict[str, float | None]] = {}
+    # --- 7. Precompute per-(dog, race_date) history aggregates ---
+    # Instead of filtering history DataFrames 300k times in a Python loop,
+    # we iterate each dog's sorted history ONCE and emit aggregates keyed
+    # by (dog_id, race_date).  Entries then look these up via dict.
+    logger.info("Batch builtin: precomputing per-entry history aggregates for %d dogs...", len(dog_histories))
 
     grade_map = {g: i for i, g in enumerate(GRADE_ORDER)}
+    _FRONT_RUNNER_KW = {"led", "ld", "disp ld", "disp lead", "made all"}
+
+    # Keyed by (dog_id, race_date) -> dict of history-derived features
+    hist_agg: dict[tuple, dict] = {}
+
+    # Collect all (dog_id, race_date) pairs we need
+    needed_pairs: dict[int, set] = defaultdict(set)
+    for entry_id, ctx in ctx_df.iterrows():
+        needed_pairs[ctx["dog_id"]].add(ctx["race_date"])
+
+    dogs_done = 0
+    for dog_id, race_dates_needed in needed_pairs.items():
+        full_hist = dog_histories.get(dog_id)
+        if full_hist is None or full_hist.empty:
+            # No history: emit defaults for all dates
+            for rd in race_dates_needed:
+                hist_agg[(dog_id, rd)] = {
+                    "grade_movement_last": None,
+                    "days_since_last_hist": None,
+                    "weight_avg_5": None,
+                    "early_speed_ratio": None,
+                    "is_front_runner": 0.0,
+                    "career_races": 0.0,
+                    "position_consistency": None,
+                    "track_speed_best": {},  # (track_id, distance_m) -> best_time
+                }
+            dogs_done += 1
+            continue
+
+        # Sort by race_date ascending (should already be sorted)
+        hist_sorted = full_hist.sort_values("race_date").reset_index(drop=True)
+        race_dates_sorted = hist_sorted["race_date"].values
+        n_hist = len(hist_sorted)
+
+        # Precompute columns as numpy arrays for speed
+        h_grades = hist_sorted["grade"].values
+        h_dates = hist_sorted["race_date"].values
+        h_weights = hist_sorted["weight_kg"].values
+        h_sect = hist_sorted["sectional_time"].values
+        h_finish = hist_sorted["finish_time"].values
+        h_comments = hist_sorted["comment"].values
+        h_positions = hist_sorted["finish_position"].values
+        h_adj_time = hist_sorted["adjusted_time"].values
+        h_distance = hist_sorted["distance_m"].values
+
+        # For each needed race_date, find the cutoff index via binary search
+        sorted_needed = sorted(race_dates_needed)
+        for rd in sorted_needed:
+            # Find index of first row with race_date >= rd (everything before is history)
+            cut = np.searchsorted(race_dates_sorted, rd, side="left")
+            # Take last 100 entries before cut
+            start = max(0, cut - 100)
+            hist_len = cut - start
+
+            if hist_len == 0:
+                hist_agg[(dog_id, rd)] = {
+                    "grade_movement_last": None,
+                    "days_since_last_hist": None,
+                    "weight_avg_5": None,
+                    "early_speed_ratio": None,
+                    "is_front_runner": 0.0,
+                    "career_races": 0.0,
+                    "position_consistency": None,
+                    "track_speed_best": {},
+                }
+                continue
+
+            # Slice arrays (last 100 before cutoff)
+            sl = slice(start, cut)
+
+            # Grade movement: last non-NaN grade
+            grades_sl = h_grades[sl]
+            non_nan_grades = [g for g in grades_sl if g is not None and pd.notna(g)]
+            if non_nan_grades:
+                last_g = str(non_nan_grades[-1]).upper().strip()
+                grade_idx = grade_map.get(last_g)
+            else:
+                grade_idx = None
+
+            # Days since last (from history)
+            days_since = float((rd - h_dates[cut - 1]).days) if cut > 0 else None
+
+            # Weight: avg of last 5 non-NaN
+            weights_sl = h_weights[max(0, cut - 5):cut]
+            valid_weights = [w for w in weights_sl if w is not None and not np.isnan(w)]
+            weight_avg = float(np.mean(valid_weights)) if valid_weights else None
+
+            # Early speed ratio: last 5 with valid sectional/finish
+            recent_sl = slice(max(0, cut - 5), cut)
+            sect_r = h_sect[recent_sl]
+            fin_r = h_finish[recent_sl]
+            valid_speed = [
+                float(s / f) for s, f in zip(sect_r, fin_r)
+                if s is not None and f is not None
+                and not np.isnan(s) and not np.isnan(f) and f > 0
+            ]
+            early_speed = float(np.mean(valid_speed)) if valid_speed else None
+
+            # Front runner: last 10 comments
+            recent_10 = slice(max(0, cut - 10), cut)
+            comments = h_comments[recent_10]
+            n_recent = len(comments)
+            led = 0
+            for c in comments:
+                if c is not None:
+                    c_lower = str(c).lower()
+                    if any(kw in c_lower for kw in _FRONT_RUNNER_KW):
+                        led += 1
+            front_runner = float(led / max(n_recent, 1))
+
+            # Career races
+            career = float(hist_len)
+
+            # Position consistency: std of last 10 finish positions
+            pos_sl = h_positions[slice(max(0, cut - 10), cut)]
+            valid_pos = [p for p in pos_sl if p is not None and not np.isnan(p)]
+            pos_consistency = float(np.std(valid_pos, ddof=1)) if len(valid_pos) >= 2 else None
+
+            # Track speed: best adjusted_time per (track_id, distance_m) from last 10
+            best_times: dict[tuple, float] = {}
+            for i in range(max(0, cut - 10), cut):
+                at = h_adj_time[i]
+                if at is not None and not np.isnan(at):
+                    key = (int(h_distance[i]) if not np.isnan(h_distance[i]) else 0,)
+                    if key[0] not in best_times or at < best_times[key[0]]:
+                        best_times[key[0]] = float(at)
+
+            hist_agg[(dog_id, rd)] = {
+                "grade_movement_last": grade_idx,
+                "days_since_last_hist": days_since,
+                "weight_avg_5": weight_avg,
+                "early_speed_ratio": early_speed,
+                "is_front_runner": front_runner,
+                "career_races": career,
+                "position_consistency": pos_consistency,
+                "track_speed_best": best_times,
+            }
+
+        dogs_done += 1
+        if dogs_done % 5000 == 0:
+            logger.info("Batch builtin: history aggregates %d/%d dogs", dogs_done, len(needed_pairs))
+            _hb()
+
+    logger.info("Batch builtin: history aggregates done, assembling DataFrame...")
+    _hb()
+
+    # --- 8. Assemble features vectorized from precomputed lookups ---
+    result_rows: dict[int, dict[str, float | None]] = {}
 
     for entry_id, ctx in ctx_df.iterrows():
-        features: dict[str, float | None] = {}
         dog_id = ctx["dog_id"]
         race_date = ctx["race_date"]
         trap = ctx["trap"]
@@ -752,158 +911,104 @@ def compute_builtin_features_batch(
         trainer_name = ctx["trainer_name"]
         sire = ctx["sire"]
 
-        # Get history for this dog, filtered to before race_date
-        full_hist = dog_histories.get(dog_id, pd.DataFrame())
-        if not full_hist.empty and race_date is not None:
-            hist = full_hist[full_hist["race_date"] < race_date].tail(100)
-        else:
-            hist = pd.DataFrame()
+        agg = hist_agg.get((dog_id, race_date), {})
 
-        # 1. Trap win rate
-        features["trap_win_rate_at_track"] = trap_win_rates.get(
-            (track_id, distance_m, trap)
-        )
+        f: dict[str, float | None] = {}
+
+        # 1. Trap win rate (lookup)
+        f["trap_win_rate_at_track"] = trap_win_rates.get((track_id, distance_m, trap))
 
         # 2. Grade movement
-        if current_grade and not hist.empty and "grade" in hist.columns:
-            last_grade = hist["grade"].dropna()
-            if not last_grade.empty:
-                last_g = str(last_grade.iloc[-1]).upper().strip()
-                curr_g = str(current_grade).upper().strip()
-                if curr_g in grade_map and last_g in grade_map:
-                    features["grade_movement"] = float(grade_map[curr_g] - grade_map[last_g])
-                else:
-                    features["grade_movement"] = None
-            else:
-                features["grade_movement"] = None
+        last_grade_idx = agg.get("grade_movement_last")
+        if current_grade and last_grade_idx is not None:
+            curr_g = str(current_grade).upper().strip()
+            curr_idx = grade_map.get(curr_g)
+            f["grade_movement"] = float(curr_idx - last_grade_idx) if curr_idx is not None else None
         else:
-            features["grade_movement"] = None
+            f["grade_movement"] = None
 
         # 3. Days since last
         if ctx["days_since_last"] is not None:
-            features["days_since_last"] = float(ctx["days_since_last"])
-        elif not hist.empty:
-            last_date = hist["race_date"].max()
-            if last_date and race_date:
-                features["days_since_last"] = float((race_date - last_date).days)
-            else:
-                features["days_since_last"] = None
+            f["days_since_last"] = float(ctx["days_since_last"])
         else:
-            features["days_since_last"] = None
+            f["days_since_last"] = agg.get("days_since_last_hist")
 
         # 4. Weight change
+        weight_avg = agg.get("weight_avg_5")
         current_weight = ctx["weight_kg"]
-        if current_weight is not None and not hist.empty:
-            weights = hist["weight_kg"].dropna().tail(5)
-            if not weights.empty:
-                features["weight_change"] = float(current_weight - weights.mean())
-            else:
-                features["weight_change"] = None
+        if current_weight is not None and weight_avg is not None:
+            f["weight_change"] = float(current_weight - weight_avg)
         else:
-            features["weight_change"] = None
+            f["weight_change"] = None
 
         # 5. Early speed ratio
-        if not hist.empty:
-            recent = hist.tail(5)
-            valid = recent.dropna(subset=["sectional_time", "finish_time"])
-            valid = valid[valid["finish_time"] > 0]
-            if not valid.empty:
-                ratios = valid["sectional_time"] / valid["finish_time"]
-                features["early_speed_ratio"] = float(ratios.mean())
-            else:
-                features["early_speed_ratio"] = None
-        else:
-            features["early_speed_ratio"] = None
+        early_speed = agg.get("early_speed_ratio")
+        f["early_speed_ratio"] = early_speed
 
-        # 6. Is front runner
-        if not hist.empty:
-            recent = hist.tail(10)
-            led = 0
-            for _, row in recent.iterrows():
-                comment = str(row.get("comment", "")).lower()
-                if any(kw in comment for kw in ["led", "ld", "disp ld", "disp lead", "made all"]):
-                    led += 1
-            features["is_front_runner"] = float(led / max(len(recent), 1))
-        else:
-            features["is_front_runner"] = 0.0
+        # 6. Front runner
+        front_runner = agg.get("is_front_runner", 0.0)
+        f["is_front_runner"] = front_runner
 
         # 7. Career races
-        features["career_races"] = float(len(hist)) if not hist.empty else 0.0
+        f["career_races"] = agg.get("career_races", 0.0)
 
         # 8. Position consistency
-        if not hist.empty:
-            positions = hist["finish_position"].dropna().tail(10)
-            features["position_consistency"] = float(positions.std()) if len(positions) >= 2 else None
-        else:
-            features["position_consistency"] = None
+        f["position_consistency"] = agg.get("position_consistency")
 
         # 9. Dog age
         birth_date = ctx["birth_date"]
         if birth_date and race_date:
             age = (race_date - birth_date).days / 365.25
-            features["dog_age_years"] = age
-            features["dog_age_squared"] = age ** 2
+            f["dog_age_years"] = age
+            f["dog_age_squared"] = age ** 2
         else:
-            features["dog_age_years"] = None
-            features["dog_age_squared"] = None
+            f["dog_age_years"] = None
+            f["dog_age_squared"] = None
 
-        # 10. Pace/trap interaction
-        early_speed = features.get("early_speed_ratio")
-        front_runner = features.get("is_front_runner")
-
+        # 10. Pace/trap interactions
         if trap is not None and early_speed is not None:
-            features["early_speed_x_trap"] = early_speed * trap
-            features["early_speed_x_inside"] = early_speed * (1.0 if trap <= 2 else 0.0)
-            features["early_speed_x_outside"] = early_speed * (1.0 if trap >= 5 else 0.0)
+            f["early_speed_x_trap"] = early_speed * trap
+            f["early_speed_x_inside"] = early_speed * (1.0 if trap <= 2 else 0.0)
+            f["early_speed_x_outside"] = early_speed * (1.0 if trap >= 5 else 0.0)
         else:
-            features["early_speed_x_trap"] = None
-            features["early_speed_x_inside"] = None
-            features["early_speed_x_outside"] = None
+            f["early_speed_x_trap"] = None
+            f["early_speed_x_inside"] = None
+            f["early_speed_x_outside"] = None
 
         if trap is not None and front_runner is not None:
-            features["front_runner_x_inside"] = front_runner * (1.0 if trap <= 2 else 0.0)
-            features["front_runner_x_outside"] = front_runner * (1.0 if trap >= 5 else 0.0)
+            f["front_runner_x_inside"] = front_runner * (1.0 if trap <= 2 else 0.0)
+            f["front_runner_x_outside"] = front_runner * (1.0 if trap >= 5 else 0.0)
         else:
-            features["front_runner_x_inside"] = None
-            features["front_runner_x_outside"] = None
+            f["front_runner_x_inside"] = None
+            f["front_runner_x_outside"] = None
 
-        # 11. Trainer stats
+        # 11. Trainer stats (lookup)
         t_stats = trainer_overall.get(trainer_name, {})
-        features["trainer_win_rate"] = t_stats.get("win_rate")
-        features["trainer_place_rate"] = t_stats.get("place_rate")
-        features["trainer_win_rate_at_track"] = trainer_at_track.get(
-            (trainer_name, track_id)
-        )
+        f["trainer_win_rate"] = t_stats.get("win_rate")
+        f["trainer_place_rate"] = t_stats.get("place_rate")
+        f["trainer_win_rate_at_track"] = trainer_at_track.get((trainer_name, track_id))
 
-        # 12. Sire stats
-        features["sire_progeny_win_rate"] = sire_win.get(sire)
-        features["sire_progeny_mean_time_at_dist"] = sire_time_at_dist.get(
-            (sire, distance_m)
-        )
+        # 12. Sire stats (lookup)
+        f["sire_progeny_win_rate"] = sire_win.get(sire)
+        f["sire_progeny_mean_time_at_dist"] = sire_time_at_dist.get((sire, distance_m))
 
         # 13. Track speed rating
-        if not hist.empty and track_id and distance_m:
-            same_dist = hist[hist["distance_m"] == distance_m]
-            if "adjusted_time" in same_dist.columns:
-                dog_times = same_dist["adjusted_time"].dropna().tail(10)
-                avg = track_avg_time.get((track_id, distance_m))
-                if not dog_times.empty and avg is not None:
-                    features["track_speed_rating"] = float(dog_times.min()) - avg
-                else:
-                    features["track_speed_rating"] = None
-            else:
-                features["track_speed_rating"] = None
+        best_times = agg.get("track_speed_best", {})
+        dog_best = best_times.get(distance_m)
+        track_avg = track_avg_time.get((track_id, distance_m))
+        if dog_best is not None and track_avg is not None:
+            f["track_speed_rating"] = dog_best - track_avg
         else:
-            features["track_speed_rating"] = None
+            f["track_speed_rating"] = None
 
-        rows[entry_id] = features
+        result_rows[entry_id] = f
 
-    logger.info("Batch builtin: done, computed features for %d entries", len(rows))
+    logger.info("Batch builtin: done, computed features for %d entries", len(result_rows))
 
-    if not rows:
+    if not result_rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame.from_dict(rows, orient="index")
+    df = pd.DataFrame.from_dict(result_rows, orient="index")
     df.index.name = "race_entry_id"
     return df
 

@@ -135,6 +135,10 @@ def run_training(db: Session, experiment_id: int) -> None:
         split_cfg = experiment.split_config or {}
         # LambdaRank always uses finish_position internally
         build_target = "finish_position" if experiment.algorithm == "lambdarank" else experiment.target
+
+        def _dataset_heartbeat():
+            _heartbeat(db, experiment, "building_dataset", log_handler)
+
         dataset = build_dataset(
             db,
             feature_ids=experiment.feature_set,
@@ -142,6 +146,7 @@ def run_training(db: Session, experiment_id: int) -> None:
             split_config=split_cfg,
             only_complete=split_cfg.get("only_complete", False),
             version_id=split_cfg.get("version_id"),
+            heartbeat_fn=_dataset_heartbeat,
         )
 
         X_train = dataset["X_train"]
@@ -440,6 +445,10 @@ def run_optuna_optimization(
         _heartbeat(db, experiment, "building_dataset", log_handler)
         split_cfg = experiment.split_config or {}
         build_target = "finish_position" if experiment.algorithm == "lambdarank" else experiment.target
+
+        def _dataset_heartbeat():
+            _heartbeat(db, experiment, "building_dataset", log_handler)
+
         dataset = build_dataset(
             db,
             feature_ids=experiment.feature_set,
@@ -447,6 +456,7 @@ def run_optuna_optimization(
             split_config=split_cfg,
             only_complete=split_cfg.get("only_complete", False),
             version_id=split_cfg.get("version_id"),
+            heartbeat_fn=_dataset_heartbeat,
         )
 
         X_train = dataset["X_train"]

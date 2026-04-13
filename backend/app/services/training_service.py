@@ -359,6 +359,14 @@ def run_training(db: Session, experiment_id: int) -> None:
         db.commit()
 
     except Exception as e:
+        tb = traceback.format_exc()
+        # Append error details directly to the log buffer before any DB
+        # operations so the traceback is preserved even if the DB commit
+        # below fails (which would leave the experiment stuck in "running"
+        # with no error details visible).
+        log_handler.buffer.append(
+            f"--- TRAINING FAILED ---\n{type(e).__name__}: {e}\n{tb}"
+        )
         logger.error("Experiment %d failed: %s", experiment_id, e, exc_info=True)
         try:
             db.rollback()
@@ -366,7 +374,7 @@ def run_training(db: Session, experiment_id: int) -> None:
             pass
         try:
             experiment.status = "failed"
-            experiment.error_message = f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+            experiment.error_message = f"{type(e).__name__}: {e}\n\n{tb}"
             experiment.training_duration_s = time.time() - start_time
             experiment.completed_at = datetime.utcnow()
             experiment.heartbeat_at = None
@@ -375,6 +383,22 @@ def run_training(db: Session, experiment_id: int) -> None:
             db.commit()
         except Exception as commit_err:
             logger.error("Failed to persist error for experiment %d: %s", experiment_id, commit_err)
+            # Last-resort: try with a fresh connection so the error isn't lost
+            try:
+                db.rollback()
+                experiment.status = "failed"
+                experiment.error_message = f"{type(e).__name__}: {e}\n\n{tb}"
+                experiment.training_log = log_handler.get_log_text()
+                experiment.heartbeat_at = None
+                experiment.training_stage = None
+                db.commit()
+            except Exception:
+                import sys
+                print(
+                    f"[TrainingService] CRITICAL: Could not persist error for "
+                    f"experiment {experiment_id}: {e}\n{tb}",
+                    file=sys.stderr,
+                )
     finally:
         root_logger.removeHandler(log_handler)
 
@@ -590,6 +614,10 @@ def run_optuna_optimization(
         db.commit()
 
     except Exception as e:
+        tb = traceback.format_exc()
+        log_handler.buffer.append(
+            f"--- TRAINING FAILED ---\n{type(e).__name__}: {e}\n{tb}"
+        )
         logger.error("Optuna experiment %d failed: %s", experiment_id, e, exc_info=True)
         try:
             db.rollback()
@@ -597,7 +625,7 @@ def run_optuna_optimization(
             pass
         try:
             experiment.status = "failed"
-            experiment.error_message = f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+            experiment.error_message = f"{type(e).__name__}: {e}\n\n{tb}"
             experiment.completed_at = datetime.utcnow()
             experiment.heartbeat_at = None
             experiment.training_stage = None
@@ -605,6 +633,21 @@ def run_optuna_optimization(
             db.commit()
         except Exception as commit_err:
             logger.error("Failed to persist error for Optuna experiment %d: %s", experiment_id, commit_err)
+            try:
+                db.rollback()
+                experiment.status = "failed"
+                experiment.error_message = f"{type(e).__name__}: {e}\n\n{tb}"
+                experiment.training_log = log_handler.get_log_text()
+                experiment.heartbeat_at = None
+                experiment.training_stage = None
+                db.commit()
+            except Exception:
+                import sys
+                print(
+                    f"[TrainingService] CRITICAL: Could not persist error for "
+                    f"Optuna experiment {experiment_id}: {e}\n{tb}",
+                    file=sys.stderr,
+                )
     finally:
         root_logger.removeHandler(log_handler)
 

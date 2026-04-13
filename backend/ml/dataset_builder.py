@@ -305,23 +305,44 @@ def _compute_builtin_features(db: Session, entry_ids: list[int]) -> pd.DataFrame
     from app.services.feature_engine import get_dog_history, get_race_context
 
     rows = {}
+    errors = 0
     batch_size = 500
     for i in range(0, len(entry_ids), batch_size):
         batch = entry_ids[i:i + batch_size]
         for entry_id in batch:
-            ctx = get_race_context(db, entry_id)
-            if not ctx:
-                continue
+            try:
+                ctx = get_race_context(db, entry_id)
+                if not ctx:
+                    continue
 
-            dog_id = ctx["dog_id"]
-            race_date = ctx["race_date"]
-            history = get_dog_history(db, dog_id, race_date)
+                dog_id = ctx["dog_id"]
+                race_date = ctx["race_date"]
+                history = get_dog_history(db, dog_id, race_date)
 
-            features = compute_race_context_features(db, entry_id, history, ctx)
-            rows[entry_id] = features
+                features = compute_race_context_features(db, entry_id, history, ctx)
+                rows[entry_id] = features
+            except Exception as e:
+                errors += 1
+                if errors <= 10:
+                    logger.warning(
+                        "Built-in feature computation failed for entry %d: %s: %s",
+                        entry_id, type(e).__name__, e,
+                    )
+                elif errors == 11:
+                    logger.warning("Suppressing further per-entry errors (11+ so far)")
 
-        if (i + len(batch)) % 5000 == 0 or (i + len(batch)) >= len(entry_ids):
-            logger.info("Built-in features: %d/%d entries computed", min(i + len(batch), len(entry_ids)), len(entry_ids))
+        processed = min(i + len(batch), len(entry_ids))
+        logger.info(
+            "Built-in features: %d/%d entries computed%s",
+            processed, len(entry_ids),
+            f" ({errors} errors)" if errors else "",
+        )
+
+    if errors:
+        logger.warning(
+            "Built-in feature computation completed with %d errors out of %d entries",
+            errors, len(entry_ids),
+        )
 
     if not rows:
         return pd.DataFrame()

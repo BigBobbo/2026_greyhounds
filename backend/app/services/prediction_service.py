@@ -254,7 +254,6 @@ def predict_race(
     trainer = artifact["trainer"]
     feature_medians = artifact.get("feature_medians", {})
     is_ranking = artifact.get("is_ranking", False)
-    calibrator = artifact.get("calibrator")
 
     # Get race entries with SP odds
     entries = (
@@ -328,26 +327,20 @@ def predict_race(
         # LambdaRank: softmax + isotonic calibration (built into scores_to_proba)
         win_probs = trainer.scores_to_proba(raw_scores, group_sizes=[len(X)])
     elif hasattr(trainer, "predict_proba"):
-        # Pointwise classifiers: predict_proba now applies calibration internally
+        # Pointwise classifiers: predict_proba applies Platt calibration internally
         raw_proba = trainer.predict_proba(X)
         if raw_proba is not None:
-            # Normalize within race via softmax for multi-dog comparison
-            win_probs = _softmax(np.log(np.clip(raw_proba, 1e-10, 1.0)))
+            # Normalize within race so probabilities sum to 1
+            total = raw_proba.sum()
+            win_probs = raw_proba / total if total > 0 else raw_proba
         else:
             win_probs = None
     else:
         win_probs = None
 
-    # Apply probability calibration if calibrator is available
-    if calibrator is not None and win_probs is not None:
-        try:
-            calibrated = calibrator.predict(win_probs)
-            # Re-normalize to sum to 1 within the race after calibration
-            total = calibrated.sum()
-            if total > 0:
-                win_probs = calibrated / total
-        except Exception as e:
-            logger.warning("Calibration failed, using raw probabilities: %s", e)
+    # Note: calibration is handled inside each trainer (Platt scaling).
+    # A second Isotonic calibration layer was removed — it was compressing
+    # edge signals and causing the model to underperform the SP baseline.
 
     # Compute race-level confidence metrics
     race_confidence = _compute_confidence(win_probs) if win_probs is not None else None

@@ -217,14 +217,9 @@ class LambdaRankTrainer(BaseTrainer):
             log_odds = np.log(np.clip(proba, 1e-6, 1 - 1e-6) /
                               (1 - np.clip(proba, 1e-6, 1 - 1e-6)))
             proba = self.calibrator.predict_proba(log_odds.reshape(-1, 1))[:, 1]
-            # Re-normalize within each race so they still sum to 1.0
-            idx = 0
-            for g_size in group_sizes:
-                g_proba = proba[idx:idx + g_size]
-                g_sum = g_proba.sum()
-                if g_sum > 0:
-                    proba[idx:idx + g_size] = g_proba / g_sum
-                idx += g_size
+            # Note: we intentionally do NOT re-normalize after Platt scaling.
+            # Re-normalizing can change which dog is the top pick, contradicting
+            # the ranking model's ordering and destroying edge signals.
 
         return proba
 

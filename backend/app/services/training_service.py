@@ -18,7 +18,7 @@ from typing import Any
 
 import joblib
 import numpy as np
-from sklearn.isotonic import IsotonicRegression
+
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -265,44 +265,19 @@ def run_training(db: Session, experiment_id: int) -> None:
             except Exception as e:
                 logger.warning("Betting metrics failed: %s", e)
 
-        # 5. Fit probability calibrator on validation set (isotonic regression)
-        _heartbeat(db, experiment, "calibrating", log_handler)
-        calibrator = None
-        test_proba_calibrated = None
+        # 5. Compute Brier score for calibration quality assessment
+        # Note: Platt scaling calibration is handled inside each trainer.
+        # A second Isotonic calibration layer was removed — it was compressing
+        # edge signals and causing the model to underperform the SP baseline.
+        _heartbeat(db, experiment, "evaluating_calibration", log_handler)
         if (target_type == "classification" or is_ranking) and test_proba is not None:
             try:
-                if is_ranking:
-                    val_scores = trainer.predict(X_val)
-                    val_proba = trainer.scores_to_proba(val_scores, group_val)
-                    y_val_binary = (y_val == 1).astype(float).values
-                else:
-                    val_proba = trainer.predict_proba(X_val)
-                    y_val_binary = y_val.values
-
-                if (val_proba is not None
-                        and len(val_proba) > 10
-                        and len(np.unique(y_val_binary)) >= 2):
-                    calibrator = IsotonicRegression(
-                        y_min=0.01, y_max=0.99, out_of_bounds="clip",
-                    )
-                    calibrator.fit(val_proba, y_val_binary)
-
-                    # Re-calibrate test probabilities for evaluation
-                    test_proba_calibrated = calibrator.predict(test_proba)
-                    logger.info(
-                        "Calibrator fitted. Test proba range: [%.3f, %.3f] -> calibrated: [%.3f, %.3f]",
-                        test_proba.min(), test_proba.max(),
-                        test_proba_calibrated.min(), test_proba_calibrated.max(),
-                    )
-                    # Add calibrated metrics alongside raw metrics
-                    all_metrics["calibrated_brier_score"] = float(
-                        np.mean((test_proba_calibrated - (y_test_binary if is_ranking else y_test.values)) ** 2)
-                    )
-                    all_metrics["raw_brier_score"] = float(
-                        np.mean((test_proba - (y_test_binary if is_ranking else y_test.values)) ** 2)
-                    )
+                y_binary = y_test_binary if is_ranking else y_test.values
+                all_metrics["brier_score"] = float(
+                    np.mean((test_proba - y_binary) ** 2)
+                )
             except Exception as e:
-                logger.warning("Calibration fitting failed: %s", e)
+                logger.warning("Brier score computation failed: %s", e)
 
         # 6. Additional evaluation data
         _heartbeat(db, experiment, "computing_shap", log_handler)
@@ -320,10 +295,8 @@ def run_training(db: Session, experiment_id: int) -> None:
                 confusion = compute_confusion_matrix(y_binary, test_pred)
 
             if test_proba is not None:
-                # Use calibrated probabilities for evaluation if available
-                eval_proba = test_proba_calibrated if calibrator is not None else test_proba
-                roc_data = compute_roc_data(y_binary, eval_proba)
-                calibration = compute_calibration_data(y_binary, eval_proba)
+                roc_data = compute_roc_data(y_binary, test_proba)
+                calibration = compute_calibration_data(y_binary, test_proba)
 
         # SHAP (skip if too slow — limit samples)
         try:
@@ -338,12 +311,11 @@ def run_training(db: Session, experiment_id: int) -> None:
         model_dir = settings.model_artifacts_dir
         os.makedirs(model_dir, exist_ok=True)
         model_path = os.path.join(model_dir, f"experiment_{experiment_id}.joblib")
-        # Save the trainer along with feature medians and calibrator
+        # Save the trainer along with feature medians
         artifact = {
             "trainer": trainer,
             "feature_medians": dataset.get("feature_medians", {}),
             "is_ranking": is_ranking,
-            "calibrator": calibrator,
         }
         joblib.dump(artifact, model_path)
 
@@ -564,27 +536,8 @@ def run_optuna_optimization(
             except Exception as e:
                 logger.warning("Optuna betting metrics failed: %s", e)
 
-        # Fit calibrator on validation set
-        calibrator = None
-        if (target_type == "classification" or is_ranking) and test_proba is not None:
-            try:
-                if is_ranking:
-                    val_scores_cal = trainer.predict(X_val)
-                    val_proba_cal = trainer.scores_to_proba(val_scores_cal, group_val)
-                    y_val_binary = (y_val == 1).astype(float).values
-                else:
-                    val_proba_cal = trainer.predict_proba(X_val)
-                    y_val_binary = y_val.values
-
-                if (val_proba_cal is not None
-                        and len(val_proba_cal) > 10
-                        and len(np.unique(y_val_binary)) >= 2):
-                    calibrator = IsotonicRegression(
-                        y_min=0.01, y_max=0.99, out_of_bounds="clip",
-                    )
-                    calibrator.fit(val_proba_cal, y_val_binary)
-            except Exception as e:
-                logger.warning("Optuna calibration fitting failed: %s", e)
+        # Note: Platt scaling calibration is handled inside each trainer.
+        # Isotonic calibration layer removed — it compressed edge signals.
 
         # SHAP analysis (same as standard training path)
         shap_data = None
@@ -604,7 +557,6 @@ def run_optuna_optimization(
             "trainer": trainer,
             "feature_medians": dataset.get("feature_medians", {}),
             "is_ranking": is_ranking,
-            "calibrator": calibrator,
         }
         joblib.dump(artifact, model_path)
 

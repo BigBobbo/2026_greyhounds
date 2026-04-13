@@ -75,7 +75,7 @@ export default function DogProfile() {
     <div>
       <div className="flex items-center gap-3 mb-2">
         <Link to="/dogs" className="text-gray-400 hover:text-gray-600 text-lg">&larr;</Link>
-        <h1 className="text-2xl font-bold">{dog.name}</h1>
+        <h1 className="text-xl sm:text-2xl font-bold">{dog.name}</h1>
       </div>
 
       <p className="text-gray-500 mb-6">
@@ -85,7 +85,7 @@ export default function DogProfile() {
       </p>
 
       {/* Stats cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-6">
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-6">
         <div className="bg-white rounded-lg shadow p-4">
           <p className="text-xs text-gray-500">Runs</p>
           <p className="text-2xl font-bold">{stats.total_runs}</p>
@@ -149,22 +149,22 @@ export default function DogProfile() {
       </div>
 
       {/* Form table */}
-      <div className="bg-white rounded-lg shadow overflow-hidden">
+      <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
         <h2 className="font-semibold px-5 pt-4 pb-2">Race Form ({form.length} runs)</h2>
-        <table className="w-full text-sm text-left">
+        <table className="w-full text-sm text-left min-w-[800px]">
           <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
             <tr>
-              <th className="px-4 py-3">Date</th>
-              <th className="px-4 py-3">Track</th>
-              <th className="px-4 py-3">Dist</th>
-              <th className="px-4 py-3">Grade</th>
-              <th className="px-4 py-3">Trap</th>
-              <th className="px-4 py-3">Pos</th>
-              <th className="px-4 py-3">Time</th>
-              <th className="px-4 py-3">Btn</th>
-              <th className="px-4 py-3">Wt</th>
-              <th className="px-4 py-3">SP</th>
-              <th className="px-4 py-3">Comment</th>
+              <th className="px-3 sm:px-4 py-3">Date</th>
+              <th className="px-3 sm:px-4 py-3">Track</th>
+              <th className="px-3 sm:px-4 py-3">Dist</th>
+              <th className="px-3 sm:px-4 py-3">Grade</th>
+              <th className="px-3 sm:px-4 py-3">Trap</th>
+              <th className="px-3 sm:px-4 py-3">Pos</th>
+              <th className="px-3 sm:px-4 py-3">Time</th>
+              <th className="px-3 sm:px-4 py-3">Btn</th>
+              <th className="px-3 sm:px-4 py-3">Wt</th>
+              <th className="px-3 sm:px-4 py-3">SP</th>
+              <th className="px-3 sm:px-4 py-3">Comment</th>
             </tr>
           </thead>
           <tbody className="divide-y">

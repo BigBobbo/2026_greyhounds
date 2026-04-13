@@ -80,7 +80,7 @@ export default function ScrapingStatusPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Scraping Status</h1>
+      <h1 className="text-xl sm:text-2xl font-bold mb-4 sm:mb-6">Scraping Status</h1>
 
       {/* Stats cards */}
       {status && (
@@ -147,23 +147,23 @@ export default function ScrapingStatusPage() {
       </div>
 
       {/* Recent scrape logs */}
-      <div className="bg-white rounded-lg shadow overflow-hidden">
+      <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
         <h2 className="font-semibold px-5 pt-4 pb-2">Recent Scrape Logs</h2>
         {loading ? (
           <p className="px-5 py-4 text-gray-500">Loading...</p>
         ) : !status?.recent_logs.length ? (
           <p className="px-5 py-4 text-gray-400">No scrapes have been run yet</p>
         ) : (
-          <table className="w-full text-sm text-left">
+          <table className="w-full text-sm text-left min-w-[640px]">
             <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
               <tr>
-                <th className="px-4 py-3">Spider</th>
-                <th className="px-4 py-3">Source</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Records</th>
-                <th className="px-4 py-3">New</th>
-                <th className="px-4 py-3">Started</th>
-                <th className="px-4 py-3">Duration</th>
+                <th className="px-3 sm:px-4 py-3">Spider</th>
+                <th className="px-3 sm:px-4 py-3">Source</th>
+                <th className="px-3 sm:px-4 py-3">Status</th>
+                <th className="px-3 sm:px-4 py-3">Records</th>
+                <th className="px-3 sm:px-4 py-3">New</th>
+                <th className="px-3 sm:px-4 py-3">Started</th>
+                <th className="px-3 sm:px-4 py-3">Duration</th>
               </tr>
             </thead>
             <tbody className="divide-y">

@@ -46,7 +46,7 @@ export default function RaceDetail() {
     <div>
       <div className="flex items-center gap-3 mb-2">
         <Link to="/races" className="text-gray-400 hover:text-gray-600 text-lg">&larr;</Link>
-        <h1 className="text-2xl font-bold">{race.track_name}</h1>
+        <h1 className="text-xl sm:text-2xl font-bold">{race.track_name}</h1>
         <span className={`px-2 py-0.5 rounded-full text-xs ${statusColor}`}>{race.status}</span>
       </div>
 
@@ -55,18 +55,18 @@ export default function RaceDetail() {
         {race.going && <> &middot; Going: {race.going}</>}
       </p>
 
-      <div className="bg-white rounded-lg shadow overflow-hidden">
-        <table className="w-full text-sm text-left">
+      <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
+        <table className="w-full text-sm text-left min-w-[640px]">
           <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
             <tr>
-              <th className="px-4 py-3 w-16">Pos</th>
-              <th className="px-4 py-3 w-16">Trap</th>
-              <th className="px-4 py-3">Dog</th>
-              <th className="px-4 py-3">Time</th>
-              <th className="px-4 py-3">Beaten</th>
-              <th className="px-4 py-3">Weight</th>
-              <th className="px-4 py-3">SP</th>
-              <th className="px-4 py-3">Comment</th>
+              <th className="px-3 sm:px-4 py-3 w-16">Pos</th>
+              <th className="px-3 sm:px-4 py-3 w-16">Trap</th>
+              <th className="px-3 sm:px-4 py-3">Dog</th>
+              <th className="px-3 sm:px-4 py-3">Time</th>
+              <th className="px-3 sm:px-4 py-3">Beaten</th>
+              <th className="px-3 sm:px-4 py-3">Weight</th>
+              <th className="px-3 sm:px-4 py-3">SP</th>
+              <th className="px-3 sm:px-4 py-3">Comment</th>
             </tr>
           </thead>
           <tbody className="divide-y">

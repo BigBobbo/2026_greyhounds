@@ -9,7 +9,7 @@ class OddsSnapshot(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     race_id = Column(Integer, ForeignKey("races.id"), nullable=False, index=True)
-    dog_id = Column(Integer, ForeignKey("dogs.id"), nullable=False)
+    dog_id = Column(Integer, ForeignKey("dogs.id"), nullable=False, index=True)
     bookmaker = Column(String, nullable=False)
     odds_decimal = Column(Float, nullable=False)
     implied_prob = Column(Float)

@@ -521,6 +521,17 @@ def predict_race_ensemble(
             entry_probs[eid] /= total_prob
 
     # Build final prediction list with ensemble probabilities
+    # Batch-load SP decimals for all entries (avoids N+1 queries)
+    all_entry_ids = list(entry_data.keys())
+    sp_map = {}
+    if all_entry_ids:
+        sp_rows = (
+            db.query(RaceEntry.id, RaceEntry.sp_decimal)
+            .filter(RaceEntry.id.in_(all_entry_ids))
+            .all()
+        )
+        sp_map = {r.id: r.sp_decimal for r in sp_rows}
+
     predictions = []
     for eid, base_pred in entry_data.items():
         win_prob = entry_probs[eid]
@@ -529,10 +540,7 @@ def predict_race_ensemble(
         pred["experiment_id"] = experiment_ids  # list to indicate ensemble
 
         # Recompute Kelly staking with ensemble probability
-        sp_decimal = None
-        entry = db.query(RaceEntry).filter(RaceEntry.id == eid).first()
-        if entry:
-            sp_decimal = entry.sp_decimal
+        sp_decimal = sp_map.get(eid)
 
         if win_prob is not None and win_prob > 0:
             kelly = _compute_kelly_stake(win_prob, sp_decimal, bankroll=bankroll)

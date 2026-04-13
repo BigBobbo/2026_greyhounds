@@ -21,7 +21,7 @@ class Race(Base):
     num_runners = Column(Integer)
     source = Column(String)  # "gri", "greyhound_data", "timeform"
     source_id = Column(String)
-    status = Column(String, default="scheduled")  # scheduled / resulted / void
+    status = Column(String, default="scheduled", index=True)  # scheduled / resulted / void
     created_at = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (

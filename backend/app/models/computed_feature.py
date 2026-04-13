@@ -9,7 +9,7 @@ class ComputedFeature(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     race_entry_id = Column(Integer, ForeignKey("race_entries.id"), nullable=False, index=True)
-    feature_def_id = Column(Integer, ForeignKey("feature_definitions.id"), nullable=False)
+    feature_def_id = Column(Integer, ForeignKey("feature_definitions.id"), nullable=False, index=True)
     value = Column(Float)
     computed_at = Column(DateTime, default=datetime.utcnow)
     # False when the dog's history may be incomplete (e.g. some tracks not

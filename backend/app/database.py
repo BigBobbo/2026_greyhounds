@@ -12,10 +12,15 @@ engine = create_engine(
 
 @event.listens_for(engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
-    """Enable WAL mode and foreign keys for SQLite."""
+    """Enable WAL mode, foreign keys, and performance pragmas for SQLite."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA cache_size=-64000")          # 64 MB page cache
+    cursor.execute("PRAGMA temp_store=MEMORY")
+    cursor.execute("PRAGMA mmap_size=268435456")         # 256 MB memory-mapped I/O
+    cursor.execute("PRAGMA journal_size_limit=67108864")  # 64 MB WAL size limit
     cursor.close()
 
 

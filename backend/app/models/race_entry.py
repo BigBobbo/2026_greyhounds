@@ -9,7 +9,7 @@ class RaceEntry(Base):
     race_id = Column(Integer, ForeignKey("races.id"), nullable=False, index=True)
     dog_id = Column(Integer, ForeignKey("dogs.id"), nullable=False, index=True)
     trap = Column(Integer, nullable=False)
-    finish_position = Column(Integer)
+    finish_position = Column(Integer, index=True)
     finish_time = Column(Float)  # seconds
     sectional_time = Column(Float)  # time to first bend
     adjusted_time = Column(Float)  # after going allowance

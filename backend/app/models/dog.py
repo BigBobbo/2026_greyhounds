@@ -9,7 +9,7 @@ class Dog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False, index=True)
-    sire = Column(String)
+    sire = Column(String, index=True)
     dam = Column(String)
     birth_date = Column(Date)
     sex = Column(String)  # 'D' (dog) / 'B' (bitch)

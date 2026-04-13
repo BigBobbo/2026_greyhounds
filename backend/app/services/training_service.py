@@ -35,16 +35,34 @@ logger = logging.getLogger(__name__)
 
 
 class _TrainingLogHandler(logging.Handler):
-    """Captures log records into a buffer that is flushed to the DB on heartbeat."""
+    """Captures log records and auto-flushes to DB every few seconds."""
 
-    def __init__(self) -> None:
+    FLUSH_INTERVAL = 5  # seconds
+
+    def __init__(self, db: Session, experiment: "Experiment") -> None:
         super().__init__(level=logging.DEBUG)
         self.buffer: list[str] = []
         self.formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        self._db = db
+        self._experiment = experiment
+        self._last_flush = 0.0
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             self.buffer.append(self.format(record))
+            now = time.time()
+            if now - self._last_flush >= self.FLUSH_INTERVAL:
+                self._flush_to_db()
+                self._last_flush = now
+        except Exception:
+            pass
+
+    def _flush_to_db(self) -> None:
+        """Write the current log buffer to the experiment row."""
+        try:
+            self._experiment.training_log = self.get_log_text()
+            self._experiment.heartbeat_at = datetime.utcnow()
+            self._db.commit()
         except Exception:
             pass
 
@@ -95,8 +113,8 @@ def run_training(db: Session, experiment_id: int) -> None:
     experiment.training_log = ""
     db.commit()
 
-    # Attach a log handler to capture training output into the DB
-    log_handler = _TrainingLogHandler()
+    # Attach a log handler that auto-flushes to DB every 5s
+    log_handler = _TrainingLogHandler(db, experiment)
     root_logger = logging.getLogger()
     root_logger.addHandler(log_handler)
 
@@ -104,8 +122,8 @@ def run_training(db: Session, experiment_id: int) -> None:
 
     try:
         # 1. Build dataset
-        _heartbeat(db, experiment, "building_dataset", log_handler)
         logger.info("Building dataset for experiment %d", experiment_id)
+        _heartbeat(db, experiment, "building_dataset", log_handler)
         split_cfg = experiment.split_config or {}
         # LambdaRank always uses finish_position internally
         build_target = "finish_position" if experiment.algorithm == "lambdarank" else experiment.target
@@ -139,7 +157,6 @@ def run_training(db: Session, experiment_id: int) -> None:
         )
 
         # 2. Create trainer
-        _heartbeat(db, experiment, "training_model", log_handler)
         trainer = create_trainer(
             experiment.algorithm,
             experiment.hyperparameters,
@@ -153,6 +170,7 @@ def run_training(db: Session, experiment_id: int) -> None:
 
         # 3. Train
         logger.info("Training %s model...", experiment.algorithm)
+        _heartbeat(db, experiment, "training_model", log_handler)
         if is_ranking:
             result = trainer.train(X_train, y_train, X_val, y_val,
                                    group_train=group_train, group_val=group_val)
@@ -160,8 +178,8 @@ def run_training(db: Session, experiment_id: int) -> None:
             result = trainer.train(X_train, y_train, X_val, y_val)
 
         # 4. Evaluate on test set
-        _heartbeat(db, experiment, "evaluating", log_handler)
         logger.info("Evaluating on test set...")
+        _heartbeat(db, experiment, "evaluating", log_handler)
         from ml.evaluation import compute_metrics, compute_betting_metrics
         target_type = "regression" if experiment.target == "finish_time" else "classification"
 
@@ -364,13 +382,14 @@ def run_optuna_optimization(
     experiment.training_log = ""
     db.commit()
 
-    log_handler = _TrainingLogHandler()
+    log_handler = _TrainingLogHandler(db, experiment)
     root_logger = logging.getLogger()
     root_logger.addHandler(log_handler)
 
     start_time = time.time()
 
     try:
+        logger.info("Building dataset for Optuna experiment %d (%d trials)", experiment_id, n_trials)
         _heartbeat(db, experiment, "building_dataset", log_handler)
         split_cfg = experiment.split_config or {}
         build_target = "finish_position" if experiment.algorithm == "lambdarank" else experiment.target

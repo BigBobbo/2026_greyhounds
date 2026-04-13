@@ -113,6 +113,11 @@ def build_dataset(
             if X.empty:
                 X = builtin_X
             else:
+                # Drop overlapping columns from X so builtin versions take precedence
+                overlap = X.columns.intersection(builtin_X.columns)
+                if len(overlap) > 0:
+                    logger.info("Dropping %d overlapping columns from computed features: %s", len(overlap), list(overlap))
+                    X = X.drop(columns=overlap)
                 X = X.join(builtin_X, how="outer")
             logger.info("Added %d built-in features, matrix now %d columns", builtin_X.shape[1], X.shape[1])
 

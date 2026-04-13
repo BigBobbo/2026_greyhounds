@@ -461,11 +461,7 @@ def build_feature_matrix(
 
     # Use raw SQL with pandas for memory efficiency — avoids building
     # millions of Python objects via SQLAlchemy ORM
-    from sqlalchemy import text
-    import sqlite3
-
-    # Get the raw connection
-    connection = db.get_bind().raw_connection()
+    engine = db.get_bind()
 
     if race_entry_ids:
         # Build the pivot query in batches and concatenate
@@ -484,7 +480,7 @@ def build_feature_matrix(
                 AND race_entry_id IN ({placeholders_entries})
                 {extra_filters}
             """
-            batch_df = pd.read_sql_query(sql, connection)
+            batch_df = pd.read_sql_query(sql, engine)
             if not batch_df.empty:
                 all_dfs.append(batch_df)
 
@@ -500,7 +496,7 @@ def build_feature_matrix(
             WHERE feature_def_id IN ({placeholders_features})
             {extra_filters}
         """
-        long_df = pd.read_sql_query(sql, connection)
+        long_df = pd.read_sql_query(sql, engine)
 
     if long_df.empty:
         return pd.DataFrame()

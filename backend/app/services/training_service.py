@@ -200,10 +200,13 @@ def run_training(db: Session, experiment_id: int) -> None:
             test_metrics = trainer._compute_ranking_metrics(y_test, test_pred, group_test)
             # Also compute classification metrics using win labels
             y_test_binary = (y_test == 1).astype(float)
-            test_pred_binary = np.zeros_like(y_test_binary)
+            test_pred_binary = np.zeros(len(y_test_binary), dtype=np.float64)
             # Mark top pick per race as predicted winner
+            effective_groups = group_test or [len(test_pred)]
             idx = 0
-            for g_size in (group_test or [len(test_pred)]):
+            for g_size in effective_groups:
+                if g_size == 0:
+                    continue
                 g_scores = test_pred[idx:idx + g_size]
                 winner_idx = np.argmax(g_scores)
                 test_pred_binary[idx + winner_idx] = 1
@@ -235,6 +238,9 @@ def run_training(db: Session, experiment_id: int) -> None:
                     meta_test["sp_decimal"].values,
                     meta_test["race_id"].values,
                 )
+                if "error" in betting:
+                    logger.warning("Betting metrics unavailable: %s", betting["error"])
+                    raise KeyError(betting["error"])
                 betting_data = betting
                 # Add headline betting metrics
                 all_metrics["betting_top_pick_pnl"] = betting["top_pick_pnl"]
@@ -268,7 +274,9 @@ def run_training(db: Session, experiment_id: int) -> None:
                     val_proba = trainer.predict_proba(X_val)
                     y_val_binary = y_val.values
 
-                if val_proba is not None and len(val_proba) > 10:
+                if (val_proba is not None
+                        and len(val_proba) > 10
+                        and len(np.unique(y_val_binary)) >= 2):
                     calibrator = IsotonicRegression(
                         y_min=0.01, y_max=0.99, out_of_bounds="clip",
                     )
@@ -530,6 +538,9 @@ def run_optuna_optimization(
                     meta_test["sp_decimal"].values,
                     meta_test["race_id"].values,
                 )
+                if "error" in betting:
+                    logger.warning("Optuna betting metrics unavailable: %s", betting["error"])
+                    raise KeyError(betting["error"])
                 betting_data = betting
                 all_metrics["betting_top_pick_pnl"] = betting["top_pick_pnl"]
                 all_metrics["betting_top_pick_roi"] = betting["top_pick_roi"]
@@ -555,7 +566,9 @@ def run_optuna_optimization(
                     val_proba_cal = trainer.predict_proba(X_val)
                     y_val_binary = y_val.values
 
-                if val_proba_cal is not None and len(val_proba_cal) > 10:
+                if (val_proba_cal is not None
+                        and len(val_proba_cal) > 10
+                        and len(np.unique(y_val_binary)) >= 2):
                     calibrator = IsotonicRegression(
                         y_min=0.01, y_max=0.99, out_of_bounds="clip",
                     )

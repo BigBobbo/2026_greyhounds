@@ -91,11 +91,11 @@ class LambdaRankTrainer(BaseTrainer):
         y_val_binary = (np.asarray(y_val, dtype=float) == 1).astype(float)
 
         # Platt scaling: fit logistic regression on log-odds of raw probabilities
-        self.calibrator = LogisticRegression(C=1.0, max_iter=1000)
-        # Reshape for sklearn
-        log_odds = np.log(np.clip(val_proba_raw, 1e-6, 1 - 1e-6) /
-                          (1 - np.clip(val_proba_raw, 1e-6, 1 - 1e-6)))
-        self.calibrator.fit(log_odds.reshape(-1, 1), y_val_binary)
+        if len(y_val_binary) >= 10 and len(np.unique(y_val_binary)) >= 2:
+            self.calibrator = LogisticRegression(C=1.0, max_iter=1000)
+            log_odds = np.log(np.clip(val_proba_raw, 1e-6, 1 - 1e-6) /
+                              (1 - np.clip(val_proba_raw, 1e-6, 1 - 1e-6)))
+            self.calibrator.fit(log_odds.reshape(-1, 1), y_val_binary)
 
         # Evaluate: compute ranking metrics on validation set
         metrics = self._compute_ranking_metrics(y_val, val_scores, group_val)
@@ -196,13 +196,20 @@ class LambdaRankTrainer(BaseTrainer):
         if group_sizes is None:
             group_sizes = [len(scores)]
 
-        # Step 1: softmax per race
+        # Step 1: softmax per race (clamp to prevent overflow)
         idx = 0
         for g_size in group_sizes:
+            if g_size == 0:
+                continue
             g_scores = scores[idx:idx + g_size]
-            shifted = g_scores - np.max(g_scores)
+            shifted = np.clip(g_scores - np.max(g_scores), -100, 0)
             exp_scores = np.exp(shifted)
-            proba[idx:idx + g_size] = exp_scores / exp_scores.sum()
+            total = exp_scores.sum()
+            if total > 0:
+                proba[idx:idx + g_size] = exp_scores / total
+            else:
+                # Uniform fallback if all scores overflow to zero
+                proba[idx:idx + g_size] = 1.0 / g_size
             idx += g_size
 
         # Step 2: calibrate via Platt scaling (maps softmax probs to true win rates)

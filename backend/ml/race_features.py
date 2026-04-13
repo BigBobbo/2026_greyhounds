@@ -201,9 +201,12 @@ def _grade_movement(
     if current_grade is None or dog_history.empty:
         return None
 
-    last_grade = dog_history["grade"].dropna().iloc[-1] if "grade" in dog_history.columns else None
-    if last_grade is None:
+    if "grade" not in dog_history.columns:
         return None
+    grades = dog_history["grade"].dropna()
+    if grades.empty:
+        return None
+    last_grade = grades.iloc[-1]
 
     current_grade_upper = current_grade.upper().strip()
     last_grade_upper = str(last_grade).upper().strip()

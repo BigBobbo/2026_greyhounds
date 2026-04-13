@@ -154,8 +154,9 @@ def build_dataset(
         logger.info("Dropping %d all-NaN feature columns: %s", len(nan_cols), list(nan_cols))
         X = X.drop(columns=nan_cols)
 
-    # Fill remaining NaN with column median
-    X = X.fillna(X.median())
+    # Fill remaining NaN with column median; columns where ALL values are NaN
+    # get median=NaN, so fill those with 0.0 as a safe default
+    X = X.fillna(X.median()).fillna(0.0)
 
     logger.info("Final dataset: %d entries, %d features", len(X), X.shape[1])
 
@@ -184,13 +185,13 @@ def build_dataset(
         test_cutoff = pd.Timestamp(test_after).date()
     else:
         sorted_dates = race_dates.sort_values()
-        test_idx = int(len(sorted_dates) * (1 - test_pct))
+        test_idx = min(int(len(sorted_dates) * (1 - test_pct)), len(sorted_dates) - 1)
         test_cutoff = sorted_dates.iloc[test_idx]
 
     train_val_dates = race_dates[race_dates < test_cutoff]
     if len(train_val_dates) > 0:
         sorted_tv = train_val_dates.sort_values()
-        val_idx = int(len(sorted_tv) * (1 - val_pct / (1 - test_pct)))
+        val_idx = min(int(len(sorted_tv) * (1 - val_pct / (1 - test_pct))), len(sorted_tv) - 1)
         val_cutoff = sorted_tv.iloc[val_idx]
     else:
         val_cutoff = test_cutoff
@@ -263,14 +264,14 @@ def _time_based_split(
     else:
         # Use percentile of dates
         sorted_dates = race_dates.sort_values()
-        test_idx = int(len(sorted_dates) * (1 - test_pct))
+        test_idx = min(int(len(sorted_dates) * (1 - test_pct)), len(sorted_dates) - 1)
         test_cutoff = sorted_dates.iloc[test_idx]
 
     # Val cutoff
     train_val_dates = race_dates[race_dates < test_cutoff]
     if len(train_val_dates) > 0:
         sorted_tv = train_val_dates.sort_values()
-        val_idx = int(len(sorted_tv) * (1 - val_pct / (1 - test_pct)))
+        val_idx = min(int(len(sorted_tv) * (1 - val_pct / (1 - test_pct))), len(sorted_tv) - 1)
         val_cutoff = sorted_tv.iloc[val_idx]
     else:
         val_cutoff = test_cutoff
@@ -283,6 +284,16 @@ def _time_based_split(
     X_train, y_train = X[train_mask], y[train_mask]
     X_val, y_val = X[val_mask], y[val_mask]
     X_test, y_test = X[test_mask], y[test_mask]
+
+    if len(X_train) == 0:
+        raise ValueError(
+            f"Training split is empty (val_cutoff={val_cutoff}). "
+            "Check split_config — the dataset may be too small or date range too narrow."
+        )
+    if len(X_val) == 0:
+        logger.warning("Validation split is empty — calibration will be skipped")
+    if len(X_test) == 0:
+        logger.warning("Test split is empty — evaluation metrics will be limited")
 
     logger.info(
         "Split: train=%d (<%s), val=%d (<%s), test=%d (>=%s)",

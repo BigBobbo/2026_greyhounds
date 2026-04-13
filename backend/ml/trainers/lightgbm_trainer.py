@@ -39,10 +39,12 @@ class LightGBMTrainer(BaseTrainer):
             val_pred = self.model.predict(X_val)
 
             # Fit Platt scaling calibrator on validation set
-            self.calibrator = _PlattLR(C=1.0, max_iter=1000)
-            log_odds = np.log(np.clip(val_proba, 1e-6, 1 - 1e-6) /
-                              (1 - np.clip(val_proba, 1e-6, 1 - 1e-6)))
-            self.calibrator.fit(log_odds.reshape(-1, 1), np.asarray(y_val, dtype=float))
+            y_val_arr = np.asarray(y_val, dtype=float)
+            if len(y_val_arr) >= 10 and len(np.unique(y_val_arr)) >= 2:
+                self.calibrator = _PlattLR(C=1.0, max_iter=1000)
+                log_odds = np.log(np.clip(val_proba, 1e-6, 1 - 1e-6) /
+                                  (1 - np.clip(val_proba, 1e-6, 1 - 1e-6)))
+                self.calibrator.fit(log_odds.reshape(-1, 1), y_val_arr)
 
             metrics = compute_metrics(y_val, val_pred, val_proba, "classification")
         else:

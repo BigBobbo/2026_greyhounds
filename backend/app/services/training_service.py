@@ -12,6 +12,7 @@ Training service: orchestrates the full ML training pipeline.
 import logging
 import os
 import time
+import traceback
 from datetime import datetime
 from typing import Any
 
@@ -33,10 +34,31 @@ from ml.evaluation import (
 logger = logging.getLogger(__name__)
 
 
-def _heartbeat(db: Session, experiment: "Experiment", stage: str) -> None:
-    """Update the heartbeat timestamp and training stage."""
+class _TrainingLogHandler(logging.Handler):
+    """Captures log records into a buffer that is flushed to the DB on heartbeat."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.buffer: list[str] = []
+        self.formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.buffer.append(self.format(record))
+        except Exception:
+            pass
+
+    def get_log_text(self) -> str:
+        return "\n".join(self.buffer)
+
+
+def _heartbeat(db: Session, experiment: "Experiment", stage: str,
+               log_handler: _TrainingLogHandler | None = None) -> None:
+    """Update the heartbeat timestamp, training stage, and flush log."""
     experiment.heartbeat_at = datetime.utcnow()
     experiment.training_stage = stage
+    if log_handler is not None:
+        experiment.training_log = log_handler.get_log_text()
     db.commit()
 
 
@@ -70,13 +92,19 @@ def run_training(db: Session, experiment_id: int) -> None:
     experiment.status = "running"
     experiment.heartbeat_at = datetime.utcnow()
     experiment.training_stage = "starting"
+    experiment.training_log = ""
     db.commit()
+
+    # Attach a log handler to capture training output into the DB
+    log_handler = _TrainingLogHandler()
+    root_logger = logging.getLogger()
+    root_logger.addHandler(log_handler)
 
     start_time = time.time()
 
     try:
         # 1. Build dataset
-        _heartbeat(db, experiment, "building_dataset")
+        _heartbeat(db, experiment, "building_dataset", log_handler)
         logger.info("Building dataset for experiment %d", experiment_id)
         split_cfg = experiment.split_config or {}
         # LambdaRank always uses finish_position internally
@@ -111,7 +139,7 @@ def run_training(db: Session, experiment_id: int) -> None:
         )
 
         # 2. Create trainer
-        _heartbeat(db, experiment, "training_model")
+        _heartbeat(db, experiment, "training_model", log_handler)
         trainer = create_trainer(
             experiment.algorithm,
             experiment.hyperparameters,
@@ -132,7 +160,7 @@ def run_training(db: Session, experiment_id: int) -> None:
             result = trainer.train(X_train, y_train, X_val, y_val)
 
         # 4. Evaluate on test set
-        _heartbeat(db, experiment, "evaluating")
+        _heartbeat(db, experiment, "evaluating", log_handler)
         logger.info("Evaluating on test set...")
         from ml.evaluation import compute_metrics, compute_betting_metrics
         target_type = "regression" if experiment.target == "finish_time" else "classification"
@@ -201,7 +229,7 @@ def run_training(db: Session, experiment_id: int) -> None:
                 logger.warning("Betting metrics failed: %s", e)
 
         # 5. Fit probability calibrator on validation set (isotonic regression)
-        _heartbeat(db, experiment, "calibrating")
+        _heartbeat(db, experiment, "calibrating", log_handler)
         calibrator = None
         test_proba_calibrated = None
         if (target_type == "classification" or is_ranking) and test_proba is not None:
@@ -238,7 +266,7 @@ def run_training(db: Session, experiment_id: int) -> None:
                 logger.warning("Calibration fitting failed: %s", e)
 
         # 6. Additional evaluation data
-        _heartbeat(db, experiment, "computing_shap")
+        _heartbeat(db, experiment, "computing_shap", log_handler)
         confusion = None
         roc_data = None
         calibration = None
@@ -267,7 +295,7 @@ def run_training(db: Session, experiment_id: int) -> None:
             logger.warning("SHAP failed: %s", e)
 
         # 7. Save model + preprocessing artifacts
-        _heartbeat(db, experiment, "saving_model")
+        _heartbeat(db, experiment, "saving_model", log_handler)
         model_dir = settings.model_artifacts_dir
         os.makedirs(model_dir, exist_ok=True)
         model_path = os.path.join(model_dir, f"experiment_{experiment_id}.joblib")
@@ -282,6 +310,10 @@ def run_training(db: Session, experiment_id: int) -> None:
 
         # 8. Update experiment record
         duration = time.time() - start_time
+        logger.info(
+            "Experiment %d completed in %.1fs. Test metrics: %s",
+            experiment_id, duration, test_metrics,
+        )
         experiment.status = "completed"
         experiment.heartbeat_at = None
         experiment.training_stage = None
@@ -297,22 +329,21 @@ def run_training(db: Session, experiment_id: int) -> None:
         experiment.training_duration_s = duration
         experiment.model_path = model_path
         experiment.completed_at = datetime.utcnow()
+        experiment.training_log = log_handler.get_log_text()
         db.commit()
-
-        logger.info(
-            "Experiment %d completed in %.1fs. Test metrics: %s",
-            experiment_id, duration, test_metrics,
-        )
 
     except Exception as e:
         logger.error("Experiment %d failed: %s", experiment_id, e, exc_info=True)
         experiment.status = "failed"
-        experiment.error_message = f"{type(e).__name__}: {e}"
+        experiment.error_message = f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
         experiment.training_duration_s = time.time() - start_time
         experiment.completed_at = datetime.utcnow()
         experiment.heartbeat_at = None
         experiment.training_stage = None
+        experiment.training_log = log_handler.get_log_text()
         db.commit()
+    finally:
+        root_logger.removeHandler(log_handler)
 
 
 def run_optuna_optimization(
@@ -330,12 +361,17 @@ def run_optuna_optimization(
     experiment.status = "running"
     experiment.heartbeat_at = datetime.utcnow()
     experiment.training_stage = "starting"
+    experiment.training_log = ""
     db.commit()
+
+    log_handler = _TrainingLogHandler()
+    root_logger = logging.getLogger()
+    root_logger.addHandler(log_handler)
 
     start_time = time.time()
 
     try:
-        _heartbeat(db, experiment, "building_dataset")
+        _heartbeat(db, experiment, "building_dataset", log_handler)
         split_cfg = experiment.split_config or {}
         build_target = "finish_position" if experiment.algorithm == "lambdarank" else experiment.target
         dataset = build_dataset(
@@ -366,7 +402,7 @@ def run_optuna_optimization(
         group_val = dataset.get("group_val")
 
         def objective(trial):
-            _heartbeat(db, experiment, f"optuna_trial_{trial.number + 1}_of_{n_trials}")
+            _heartbeat(db, experiment, f"optuna_trial_{trial.number + 1}_of_{n_trials}", log_handler)
             params = _suggest_params(trial, experiment.algorithm)
             trainer = create_trainer(experiment.algorithm, params, experiment.target)
             if is_ranking:
@@ -385,7 +421,7 @@ def run_optuna_optimization(
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
         # Retrain with best params
-        _heartbeat(db, experiment, "retraining_best")
+        _heartbeat(db, experiment, "retraining_best", log_handler)
         best_params = study.best_params
         experiment.hyperparameters = best_params
 
@@ -397,7 +433,7 @@ def run_optuna_optimization(
             result = trainer.train(X_train, y_train, X_val, y_val)
 
         # Evaluate on test
-        _heartbeat(db, experiment, "evaluating")
+        _heartbeat(db, experiment, "evaluating", log_handler)
         X_test, y_test = dataset["X_test"], dataset["y_test"]
         group_test = dataset.get("group_test")
         from ml.evaluation import compute_metrics
@@ -479,7 +515,7 @@ def run_optuna_optimization(
             logger.warning("SHAP failed: %s", e)
 
         # Save model + preprocessing artifacts
-        _heartbeat(db, experiment, "saving_model")
+        _heartbeat(db, experiment, "saving_model", log_handler)
         model_dir = settings.model_artifacts_dir
         os.makedirs(model_dir, exist_ok=True)
         model_path = os.path.join(model_dir, f"experiment_{experiment_id}.joblib")
@@ -490,6 +526,8 @@ def run_optuna_optimization(
             "calibrator": calibrator,
         }
         joblib.dump(artifact, model_path)
+
+        logger.info("Optuna experiment %d completed. Best: %s", experiment_id, best_params)
 
         experiment.status = "completed"
         experiment.heartbeat_at = None
@@ -514,17 +552,20 @@ def run_optuna_optimization(
                 "betting": betting_data,
             } if calibration or betting_data else None
 
+        experiment.training_log = log_handler.get_log_text()
         db.commit()
-        logger.info("Optuna experiment %d completed. Best: %s", experiment_id, best_params)
 
     except Exception as e:
         logger.error("Optuna experiment %d failed: %s", experiment_id, e, exc_info=True)
         experiment.status = "failed"
-        experiment.error_message = str(e)
+        experiment.error_message = f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
         experiment.completed_at = datetime.utcnow()
         experiment.heartbeat_at = None
         experiment.training_stage = None
+        experiment.training_log = log_handler.get_log_text()
         db.commit()
+    finally:
+        root_logger.removeHandler(log_handler)
 
 
 def _suggest_params(trial, algorithm: str) -> dict:

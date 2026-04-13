@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LineChart, Line, ScatterChart, Scatter } from 'recharts';
 import api from '../api/client';
@@ -8,6 +8,8 @@ export default function ExperimentDetail() {
   const { id } = useParams();
   const [exp, setExp] = useState<Experiment | null>(null);
   const [loading, setLoading] = useState(true);
+  const [logExpanded, setLogExpanded] = useState<boolean | null>(null);
+  const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const fetch = () => {
@@ -20,6 +22,17 @@ export default function ExperimentDetail() {
     const interval = setInterval(fetch, 5000);
     return () => clearInterval(interval);
   }, [id]);
+
+  // Auto-expand log for failed/running experiments; user can override
+  const isLogExpanded = logExpanded !== null
+    ? logExpanded
+    : (exp?.status === 'failed' || exp?.status === 'running');
+
+  useEffect(() => {
+    if (isLogExpanded && logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [exp?.training_log, isLogExpanded]);
 
   if (loading) return <p className="text-gray-500">Loading...</p>;
   if (!exp) return <p className="text-red-500">Experiment not found</p>;
@@ -117,7 +130,36 @@ export default function ExperimentDetail() {
 
       {exp.error_message && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
-          <p className="text-red-700 text-sm font-mono">{exp.error_message}</p>
+          <h3 className="text-red-800 font-semibold text-sm mb-2">Error</h3>
+          <pre className="text-red-700 text-xs font-mono whitespace-pre-wrap break-words">{exp.error_message}</pre>
+        </div>
+      )}
+
+      {/* Training Log */}
+      {exp.training_log && (
+        <div className="bg-gray-900 rounded-lg shadow mb-6 overflow-hidden">
+          <button
+            onClick={() => setLogExpanded(!isLogExpanded)}
+            className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-800 transition-colors"
+          >
+            <span className="text-gray-300 text-sm font-medium">
+              Training Log
+              {exp.status === 'running' && (
+                <span className="ml-2 inline-block w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+              )}
+            </span>
+            <span className="text-gray-500 text-xs">
+              {exp.training_log.split('\n').length} lines {isLogExpanded ? '(click to collapse)' : '(click to expand)'}
+            </span>
+          </button>
+          {isLogExpanded && (
+            <div className="max-h-96 overflow-y-auto px-4 pb-4">
+              <pre className="text-gray-300 text-xs font-mono whitespace-pre-wrap break-words leading-relaxed">
+                {exp.training_log}
+              </pre>
+              <div ref={logEndRef} />
+            </div>
+          )}
         </div>
       )}
 

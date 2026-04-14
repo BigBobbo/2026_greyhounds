@@ -576,10 +576,8 @@ def run_optuna_optimization(
             y_binary = (y_test == 1).astype(float).values if is_ranking else y_test.values
             pred_binary = (test_proba > 0.5).astype(float) if is_ranking else test_pred
             experiment.confusion_matrix = compute_confusion_matrix(y_binary, pred_binary)
-            # Use calibrated probabilities if available
-            eval_proba = calibrator.predict(test_proba) if calibrator is not None else test_proba
-            experiment.roc_data = compute_roc_data(y_binary, eval_proba)
-            calibration = compute_calibration_data(y_binary, eval_proba)
+            experiment.roc_data = compute_roc_data(y_binary, test_proba)
+            calibration = compute_calibration_data(y_binary, test_proba)
             experiment.calibration_data = {
                 "calibration": calibration,
                 "betting": betting_data,

@@ -13,7 +13,7 @@ The dog_history DataFrame has columns:
     race_type, going, num_runners, track_name, track_code
 
 The race_context dict has keys:
-    trap, dog_id, track_id, distance_m, grade, race_date, race_type, track_code
+    trap, dog_id, sp_decimal, track_id, distance_m, grade, race_date, race_type, track_code
 """
 
 import logging

@@ -185,6 +185,19 @@ PRESET_FEATURES = [
         "config_json": {"metric": "sp_decimal", "aggregation": "mean", "window": {"type": "last_n", "n": 5}, "filters": {}},
         "input_columns": ["sp_decimal"],
     },
+    {
+        "name": "current_race_sp",
+        "display_name": "Current Race Starting Price",
+        "description": "The starting price (decimal odds) for this specific race. The single strongest predictor of race outcomes — represents the market's collective assessment of each dog's chances.",
+        "feature_type": "code",
+        "code": """def compute(dog_history, race_context):
+    sp = race_context.get('sp_decimal')
+    if sp is None or sp <= 0:
+        return None
+    return float(sp)
+""",
+        "input_columns": ["sp_decimal"],
+    },
     # === Experience ===
     {
         "name": "career_runs",

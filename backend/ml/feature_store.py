@@ -74,6 +74,7 @@ def _batch_load_contexts(db: Session, entry_ids: list[int]) -> dict[int, dict]:
             RaceEntry.id,
             RaceEntry.trap,
             RaceEntry.dog_id,
+            RaceEntry.sp_decimal,
             Race.track_id,
             Race.distance_m,
             Race.grade,
@@ -90,6 +91,7 @@ def _batch_load_contexts(db: Session, entry_ids: list[int]) -> dict[int, dict]:
         row.id: {
             "trap": row.trap,
             "dog_id": row.dog_id,
+            "sp_decimal": row.sp_decimal,
             "track_id": row.track_id,
             "distance_m": row.distance_m,
             "grade": row.grade,

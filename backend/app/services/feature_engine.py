@@ -212,6 +212,7 @@ def get_race_context(db: Session, race_entry_id: int) -> dict[str, Any] | None:
         db.query(
             RaceEntry.trap,
             RaceEntry.dog_id,
+            RaceEntry.sp_decimal,
             Race.track_id,
             Race.distance_m,
             Race.grade,
@@ -231,6 +232,7 @@ def get_race_context(db: Session, race_entry_id: int) -> dict[str, Any] | None:
     return {
         "trap": row.trap,
         "dog_id": row.dog_id,
+        "sp_decimal": row.sp_decimal,
         "track_id": row.track_id,
         "distance_m": row.distance_m,
         "grade": row.grade,

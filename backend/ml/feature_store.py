@@ -11,6 +11,7 @@ date window), the flag is set to False so downstream consumers can filter
 these out during training.
 """
 
+import gc
 import logging
 from datetime import datetime
 from typing import Any
@@ -263,7 +264,7 @@ def materialize_feature(
         gap_track_ids = {code_to_id[g["track_code"]] for g in gaps if g["track_code"] in code_to_id}
 
     # --- Process in large batches to amortize DB round-trips ---
-    batch_size = 2000
+    batch_size = 500
     for i in range(0, len(entry_ids), batch_size):
         batch = entry_ids[i:i + batch_size]
 
@@ -364,6 +365,10 @@ def materialize_feature(
             # Reclaim WAL disk space between batches to prevent the WAL
             # file from growing unbounded during large materializations.
             _wal_checkpoint(db)
+
+        # Free batch objects and reclaim memory between batches
+        del contexts, histories, completeness, new_features
+        gc.collect()
 
         logger.info(
             "Feature '%s': %d/%d entries computed (%d incomplete)",
@@ -505,9 +510,13 @@ def build_feature_matrix(
 
     # Map feature IDs to names
     long_df["feature_name"] = long_df["feature_def_id"].map(feature_map)
+    # Drop the raw ID column to free memory before pivot
+    long_df.drop(columns=["feature_def_id"], inplace=True)
 
     # Pivot from long to wide format
     df = long_df.pivot(index="race_entry_id", columns="feature_name", values="value")
+    del long_df
+    gc.collect()
     df.index.name = "race_entry_id"
 
     return df

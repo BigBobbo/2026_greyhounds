@@ -9,6 +9,7 @@ Training service: orchestrates the full ML training pipeline.
 6. Save model + metrics to DB
 """
 
+import gc
 import logging
 import os
 import time
@@ -319,6 +320,11 @@ def run_training(db: Session, experiment_id: int) -> None:
         }
         joblib.dump(artifact, model_path)
 
+        # Free large objects before updating DB
+        del dataset, X_train, y_train, X_val, y_val, X_test, y_test
+        del artifact, trainer
+        gc.collect()
+
         # 8. Update experiment record
         duration = time.time() - start_time
         logger.info(
@@ -559,6 +565,11 @@ def run_optuna_optimization(
             "is_ranking": is_ranking,
         }
         joblib.dump(artifact, model_path)
+
+        # Free large objects
+        del dataset, X_train, y_train, X_val, y_val, X_test, y_test
+        del artifact, trainer, study
+        gc.collect()
 
         logger.info("Optuna experiment %d completed. Best: %s", experiment_id, best_params)
 

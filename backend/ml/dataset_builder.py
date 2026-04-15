@@ -62,7 +62,7 @@ def build_dataset(
     if split_config is None:
         split_config = {}
 
-    max_entries = split_config.get("max_entries", 300000)
+    max_entries = split_config.get("max_entries", 50000)
 
     # Get all resulted race entries with their race dates
     query = (

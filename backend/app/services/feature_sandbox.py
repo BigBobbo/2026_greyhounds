@@ -16,8 +16,10 @@ The race_context dict has keys:
     trap, dog_id, sp_decimal, track_id, distance_m, grade, race_date, race_type, track_code
 """
 
+import datetime
 import logging
 import math
+import re
 import signal
 from typing import Any
 
@@ -31,6 +33,20 @@ logger = logging.getLogger(__name__)
 
 EXECUTION_TIMEOUT = 5  # seconds
 
+# Modules that user-defined feature code is allowed to import.
+_SAFE_IMPORT_MODULES = frozenset({
+    "math", "re", "datetime", "statistics", "collections", "itertools", "functools",
+})
+
+_real_import = __import__
+
+
+def _safe_import(name, *args, **kwargs):
+    """Restricted __import__ that only allows whitelisted safe modules."""
+    if name not in _SAFE_IMPORT_MODULES:
+        raise ImportError(f"Import of '{name}' is not allowed in feature sandbox")
+    return _real_import(name, *args, **kwargs)
+
 
 def _build_safe_globals() -> dict:
     """Build restricted globals with allowed builtins."""
@@ -38,6 +54,7 @@ def _build_safe_globals() -> dict:
 
     # Allow safe builtins
     allowed_builtins = {
+        "__import__": _safe_import,
         "abs": abs,
         "bool": bool,
         "dict": dict,
@@ -67,6 +84,8 @@ def _build_safe_globals() -> dict:
     _globals["pd"] = pd
     _globals["np"] = np
     _globals["math"] = math
+    _globals["re"] = re
+    _globals["datetime"] = datetime
 
     # Required guards for RestrictedPython
     _globals["_getiter_"] = default_guarded_getiter

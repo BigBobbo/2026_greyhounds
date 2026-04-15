@@ -371,9 +371,10 @@ def materialize_feature(
         gc.collect()
 
         logger.info(
-            "Feature '%s': %d/%d entries computed (%d incomplete)",
+            "Feature '%s': %d/%d entries processed (%d computed, %d errors, %d incomplete)",
             feature_name, min(i + len(batch), len(entry_ids)),
-            len(entry_ids), stats["incomplete"],
+            len(entry_ids), stats["computed"], stats["errors"],
+            stats["incomplete"],
         )
 
     if stats["incomplete"]:

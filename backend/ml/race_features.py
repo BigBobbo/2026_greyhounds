@@ -11,6 +11,7 @@ These features capture information that the visual feature builder cannot:
 These are computed on-the-fly alongside user-defined features.
 """
 
+import gc
 import logging
 from collections import defaultdict
 from datetime import timedelta
@@ -572,14 +573,19 @@ def compute_builtin_features_batch(
         "prize_money",
     ]
     all_hist_df = pd.DataFrame(hist_rows, columns=hist_columns) if hist_rows else pd.DataFrame(columns=hist_columns)
+    del hist_rows  # free raw tuples — now redundant
 
     # Index by dog for fast lookup
     dog_histories: dict[int, pd.DataFrame] = {}
+    n_hist_rows = len(all_hist_df)
     if not all_hist_df.empty:
         for dog_id, group in all_hist_df.groupby("dog_id"):
             dog_histories[dog_id] = group.sort_values("race_date").reset_index(drop=True)
 
-    logger.info("Batch builtin: loaded %d history rows for %d dogs", len(all_hist_df), len(dog_histories))
+    del all_hist_df  # free full DataFrame — now split into per-dog dicts
+    gc.collect()
+
+    logger.info("Batch builtin: loaded %d history rows for %d dogs", n_hist_rows, len(dog_histories))
     _hb()
 
     # --- 3. Bulk compute trap win rates (per track/distance/trap combo) ---
@@ -894,6 +900,9 @@ def compute_builtin_features_batch(
         if dogs_done % 5000 == 0:
             logger.info("Batch builtin: history aggregates %d/%d dogs", dogs_done, len(needed_pairs))
             _hb()
+
+    del dog_histories, needed_pairs  # free per-dog DataFrames
+    gc.collect()
 
     logger.info("Batch builtin: history aggregates done, assembling DataFrame...")
     _hb()

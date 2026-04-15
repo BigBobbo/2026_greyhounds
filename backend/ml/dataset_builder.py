@@ -9,6 +9,7 @@ Handles:
 - Race-level grouping (all dogs in same race stay in same split)
 """
 
+import gc
 import logging
 from datetime import date
 from typing import Any
@@ -315,10 +316,29 @@ def _compute_builtin_features(db: Session, entry_ids: list[int],
 
     Uses bulk queries to avoid the N+1 problem — instead of ~8 DB queries per
     entry, this runs ~10 aggregate queries total then assembles features in memory.
+
+    Processes in batches to limit peak memory — each batch loads dog histories
+    only for its subset of entries.
     """
     from ml.race_features import compute_builtin_features_batch
 
-    return compute_builtin_features_batch(db, entry_ids, heartbeat_fn=heartbeat_fn)
+    BATCH_SIZE = 5000
+    if len(entry_ids) <= BATCH_SIZE:
+        return compute_builtin_features_batch(db, entry_ids, heartbeat_fn=heartbeat_fn)
+
+    all_dfs = []
+    for i in range(0, len(entry_ids), BATCH_SIZE):
+        batch = entry_ids[i:i + BATCH_SIZE]
+        logger.info("Computing builtin features batch %d-%d of %d",
+                     i, min(i + BATCH_SIZE, len(entry_ids)), len(entry_ids))
+        batch_df = compute_builtin_features_batch(db, batch, heartbeat_fn=heartbeat_fn)
+        if not batch_df.empty:
+            all_dfs.append(batch_df)
+        gc.collect()
+
+    if not all_dfs:
+        return pd.DataFrame()
+    return pd.concat(all_dfs)
 
 
 def _compute_group_sizes(race_ids: pd.Series) -> list[int]:

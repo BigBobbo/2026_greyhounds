@@ -28,7 +28,7 @@ class SklearnTrainer(BaseTrainer):
             self.model = LogisticRegression(**model_params)
         elif algorithm == "random_forest":
             model_params.setdefault("random_state", 42)
-            model_params.setdefault("n_jobs", -1)
+            model_params.setdefault("n_jobs", 1)
             if target_type == "classification":
                 self.model = RandomForestClassifier(**model_params)
             else:

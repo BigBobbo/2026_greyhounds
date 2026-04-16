@@ -115,6 +115,7 @@ def create_experiment(experiment: ExperimentCreate, db: Session = Depends(get_db
                     db2.commit()
             except Exception:
                 # If even this fails, try a completely fresh session
+                db3 = None
                 try:
                     db3 = SessionLocal()
                     import traceback as tb
@@ -127,9 +128,11 @@ def create_experiment(experiment: ExperimentCreate, db: Session = Depends(get_db
                         exp.training_stage = None
                         exp.completed_at = datetime.utcnow()
                         db3.commit()
-                    db3.close()
                 except Exception as final_err:
                     logger.error("Could not persist failure for experiment %d: %s", exp_id, final_err)
+                finally:
+                    if db3:
+                        db3.close()
         finally:
             db2.close()
 

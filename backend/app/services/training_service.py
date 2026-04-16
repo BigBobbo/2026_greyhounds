@@ -566,6 +566,22 @@ def run_optuna_optimization(
         }
         joblib.dump(artifact, model_path)
 
+        # Compute classification/ranking diagnostics before freeing memory
+        confusion_matrix_data = None
+        roc_data = None
+        calibration_payload = None
+        if (target_type == "classification" or is_ranking) and test_proba is not None:
+            y_binary = (y_test == 1).astype(float).values if is_ranking else y_test.values
+            pred_binary = (test_proba > 0.5).astype(float) if is_ranking else test_pred
+            confusion_matrix_data = compute_confusion_matrix(y_binary, pred_binary)
+            roc_data = compute_roc_data(y_binary, test_proba)
+            calibration = compute_calibration_data(y_binary, test_proba)
+            if calibration or betting_data:
+                calibration_payload = {
+                    "calibration": calibration,
+                    "betting": betting_data,
+                }
+
         # Free large objects
         del dataset, X_train, y_train, X_val, y_val, X_test, y_test
         del artifact, trainer, study
@@ -584,15 +600,9 @@ def run_optuna_optimization(
         experiment.completed_at = datetime.utcnow()
 
         if (target_type == "classification" or is_ranking) and test_proba is not None:
-            y_binary = (y_test == 1).astype(float).values if is_ranking else y_test.values
-            pred_binary = (test_proba > 0.5).astype(float) if is_ranking else test_pred
-            experiment.confusion_matrix = compute_confusion_matrix(y_binary, pred_binary)
-            experiment.roc_data = compute_roc_data(y_binary, test_proba)
-            calibration = compute_calibration_data(y_binary, test_proba)
-            experiment.calibration_data = {
-                "calibration": calibration,
-                "betting": betting_data,
-            } if calibration or betting_data else None
+            experiment.confusion_matrix = confusion_matrix_data
+            experiment.roc_data = roc_data
+            experiment.calibration_data = calibration_payload
 
         experiment.training_log = log_handler.get_log_text()
         db.commit()

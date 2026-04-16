@@ -7,6 +7,11 @@ engine = create_engine(
     settings.database_url,
     connect_args={"check_same_thread": False},  # SQLite-specific
     echo=False,
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=60,
+    pool_pre_ping=True,
+    pool_recycle=3600,
 )
 
 

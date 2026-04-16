@@ -307,31 +307,33 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
 
         # Final update
         db_final = SessionLocal()
-        log_final = db_final.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
-        if log_final:
-            log_final.status = "success" if not failed_tracks else "partial"
-            log_final.records_scraped = total_races
-            log_final.records_new = total_new
-            log_final.completed_at = datetime.utcnow()
-            if failed_tracks:
-                log_final.error_message = f"Failed tracks: {', '.join(failed_tracks)}"
-            db_final.commit()
-        db_final.close()
+        try:
+            log_final = db_final.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
+            if log_final:
+                log_final.status = "success" if not failed_tracks else "partial"
+                log_final.records_scraped = total_races
+                log_final.records_new = total_new
+                log_final.completed_at = datetime.utcnow()
+                if failed_tracks:
+                    log_final.error_message = f"Failed tracks: {', '.join(failed_tracks)}"
+                db_final.commit()
+        finally:
+            db_final.close()
         logger.info("Backfill complete: %d races, %d new. Failed: %s", total_races, total_new, failed_tracks or "none")
 
     def _update_log(scraped: int, new: int):
         """Update the scrape log with current progress."""
+        db_log = SessionLocal()
         try:
-            db_log = SessionLocal()
             log_entry = db_log.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
             if log_entry:
                 log_entry.records_scraped = scraped
                 log_entry.records_new = new
                 db_log.commit()
-            db_log.close()
         except Exception:
             pass
-            db2.close()
+        finally:
+            db_log.close()
 
     Thread(target=_run_backfill, daemon=True).start()
 

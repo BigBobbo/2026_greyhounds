@@ -284,6 +284,12 @@ def predict_race(
 
     entry_ids = [e.RaceEntry.id for e in entries]
 
+    # Honour the same feature-group toggles that were used at training time,
+    # so predict-time feature columns align with what the model saw.
+    split_cfg = experiment.split_config or {}
+    include_builtin = split_cfg.get("include_builtin_features", True)
+    include_relative = split_cfg.get("include_race_relative_features", True)
+
     # Get feature definitions
     feature_defs = (
         db.query(FeatureDefinition)
@@ -292,7 +298,9 @@ def predict_race(
     )
 
     # Compute features
-    X = compute_features_for_entries(db, entry_ids, feature_defs)
+    X = compute_features_for_entries(
+        db, entry_ids, feature_defs, include_builtin=include_builtin,
+    )
 
     if X.empty:
         return []
@@ -312,9 +320,10 @@ def predict_race(
 
     # Add race-relative features (same as training)
     # All entries belong to one race, so create a constant race_id series
-    from ml.dataset_builder import add_race_relative_features
-    race_id_series = pd.Series(race_id, index=X.index, name="race_id")
-    X = add_race_relative_features(X, race_id_series)
+    if include_relative:
+        from ml.dataset_builder import add_race_relative_features
+        race_id_series = pd.Series(race_id, index=X.index, name="race_id")
+        X = add_race_relative_features(X, race_id_series)
 
     # Fill any NaN in new relative features
     X = X.fillna(0)

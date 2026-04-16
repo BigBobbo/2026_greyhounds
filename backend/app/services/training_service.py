@@ -147,6 +147,10 @@ def run_training(db: Session, experiment_id: int) -> None:
             split_config=split_cfg,
             only_complete=split_cfg.get("only_complete", False),
             version_id=split_cfg.get("version_id"),
+            include_builtin_features=split_cfg.get("include_builtin_features", True),
+            include_sp_features=split_cfg.get("include_sp_features", True),
+            include_pace_shape_features=split_cfg.get("include_pace_shape_features", True),
+            include_race_relative_features=split_cfg.get("include_race_relative_features", True),
             heartbeat_fn=_dataset_heartbeat,
         )
 
@@ -434,6 +438,10 @@ def run_optuna_optimization(
             split_config=split_cfg,
             only_complete=split_cfg.get("only_complete", False),
             version_id=split_cfg.get("version_id"),
+            include_builtin_features=split_cfg.get("include_builtin_features", True),
+            include_sp_features=split_cfg.get("include_sp_features", True),
+            include_pace_shape_features=split_cfg.get("include_pace_shape_features", True),
+            include_race_relative_features=split_cfg.get("include_race_relative_features", True),
             heartbeat_fn=_dataset_heartbeat,
         )
 

@@ -45,6 +45,12 @@ export default function TrainingLab() {
   // Date range for train/test split
   const [testAfter, setTestAfter] = useState('2026-01-01');
 
+  // Auto-added feature-group toggles (see dataset_builder.build_dataset)
+  const [includeBuiltin, setIncludeBuiltin] = useState(true);
+  const [includeSpFeatures, setIncludeSpFeatures] = useState(true);
+  const [includePaceShape, setIncludePaceShape] = useState(true);
+  const [includeRaceRelative, setIncludeRaceRelative] = useState(true);
+
   const fetchData = () => {
     Promise.all([
       api.get<Experiment[]>('/training/experiments'),
@@ -76,6 +82,10 @@ export default function TrainingLab() {
       const splitConfig: Record<string, any> = {
         test_after: testAfter,
         val_pct: 0.15,
+        include_builtin_features: includeBuiltin,
+        include_sp_features: includeSpFeatures,
+        include_pace_shape_features: includePaceShape,
+        include_race_relative_features: includeRaceRelative,
       };
       if (selectedVersionId !== null) {
         splitConfig.version_id = selectedVersionId;
@@ -318,6 +328,79 @@ export default function TrainingLab() {
                   {f.display_name || f.name}
                 </label>
               ))}
+            </div>
+          </div>
+
+          {/* Auto-added feature groups */}
+          <div className="mb-4 border rounded-md p-3 bg-gray-50">
+            <label className="block text-xs font-medium text-gray-600 mb-2">
+              Auto-added feature groups
+            </label>
+            <p className="text-xs text-gray-500 mb-2">
+              In addition to the features you selected above, the training pipeline
+              normally injects several race-context feature groups. Disable any you
+              want excluded from this experiment. All are on by default.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={includeBuiltin}
+                  onChange={(e) => setIncludeBuiltin(e.target.checked)}
+                  className="mt-0.5 rounded"
+                />
+                <span>
+                  <span className="font-medium">Built-in race-context features</span>
+                  <span className="block text-xs text-gray-500">
+                    Trap win-rate, grade movement, days since last, weight change,
+                    early-speed ratio, is-front-runner, career races, age, etc.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={includeSpFeatures}
+                  onChange={(e) => setIncludeSpFeatures(e.target.checked)}
+                  className="mt-0.5 rounded"
+                />
+                <span>
+                  <span className="font-medium">SP-derived features</span>
+                  <span className="block text-xs text-gray-500">
+                    current_sp_decimal, current_sp_implied_prob, sp_rank_in_field,
+                    market_overround.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={includePaceShape}
+                  onChange={(e) => setIncludePaceShape(e.target.checked)}
+                  className="mt-0.5 rounded"
+                />
+                <span>
+                  <span className="font-medium">Pace-shape features</span>
+                  <span className="block text-xs text-gray-500">
+                    num_front_runners_in_race, is_sole_front_runner, pace_pressure,
+                    early_speed_rank, is_predicted_leader.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={includeRaceRelative}
+                  onChange={(e) => setIncludeRaceRelative(e.target.checked)}
+                  className="mt-0.5 rounded"
+                />
+                <span>
+                  <span className="font-medium">Race-relative features</span>
+                  <span className="block text-xs text-gray-500">
+                    Per-feature vs-field and rank-in-field columns, plus num_runners.
+                  </span>
+                </span>
+              </label>
             </div>
           </div>
 

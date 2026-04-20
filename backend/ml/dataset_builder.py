@@ -34,6 +34,9 @@ def build_dataset(
     only_complete: bool = False,
     version_id: int | None = None,
     include_builtin_features: bool = True,
+    include_sp_features: bool = True,
+    include_pace_shape_features: bool = True,
+    include_race_relative_features: bool = True,
     heartbeat_fn: Any | None = None,
 ) -> dict[str, Any]:
     """
@@ -50,6 +53,13 @@ def build_dataset(
             If None, uses unversioned features.
         include_builtin_features: If True, add built-in race-context features
             (trap bias, grade movement, days since last, weight change, etc.)
+        include_sp_features: If True, add SP-derived features (current_sp_decimal,
+            current_sp_implied_prob, sp_rank_in_field, market_overround).
+        include_pace_shape_features: If True, add pace-shape features derived from
+            is_front_runner / early_speed_ratio (num_front_runners_in_race,
+            is_sole_front_runner, pace_pressure, early_speed_rank, is_predicted_leader).
+        include_race_relative_features: If True, add race-relative features
+            (per-feature vs_field and rank-in-field columns, plus num_runners).
 
     Returns:
         {
@@ -138,13 +148,16 @@ def build_dataset(
     logger.info("After alignment: %d entries with %d features", len(X), X.shape[1])
 
     # Add SP-derived features from the current race
-    X = _add_sp_features(X, entries_df)
+    if include_sp_features:
+        X = _add_sp_features(X, entries_df)
 
     # Add race-relative features (compare each dog to its race field)
-    X = add_race_relative_features(X, entries_df["race_id"])
+    if include_race_relative_features:
+        X = add_race_relative_features(X, entries_df["race_id"])
 
     # Add pace shape features (front-runner count, early speed rank, etc.)
-    X = _add_pace_shape_features(X, entries_df["race_id"])
+    if include_pace_shape_features:
+        X = _add_pace_shape_features(X, entries_df["race_id"])
 
     # Build target variable
     y = _build_target(entries_df, target)

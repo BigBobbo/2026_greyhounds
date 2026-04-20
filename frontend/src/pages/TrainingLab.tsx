@@ -51,6 +51,23 @@ export default function TrainingLab() {
   const [includePaceShape, setIncludePaceShape] = useState(true);
   const [includeRaceRelative, setIncludeRaceRelative] = useState(true);
 
+  // Individual SP-derived feature picks (active when includeSpFeatures is on)
+  const SP_FEATURE_NAMES = [
+    'current_sp_decimal',
+    'current_sp_implied_prob',
+    'sp_rank_in_field',
+    'market_overround',
+  ] as const;
+  type SpFeatureName = typeof SP_FEATURE_NAMES[number];
+  const [spFeatureNames, setSpFeatureNames] = useState<SpFeatureName[]>([
+    ...SP_FEATURE_NAMES,
+  ]);
+  const toggleSpFeature = (name: SpFeatureName) => {
+    setSpFeatureNames((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]
+    );
+  };
+
   const fetchData = () => {
     Promise.all([
       api.get<Experiment[]>('/training/experiments'),
@@ -75,7 +92,19 @@ export default function TrainingLab() {
 
   const handleCreate = async () => {
     if (!name.trim()) return alert('Please enter a name');
-    if (selectedFeatures.length === 0) return alert('Please select at least one feature');
+
+    // With zero user-selected features, at least one auto-added group must
+    // produce columns; otherwise training has literally nothing to fit on.
+    const hasAutoColumns =
+      includeBuiltin ||
+      (includeSpFeatures && spFeatureNames.length > 0) ||
+      includePaceShape ||
+      includeRaceRelative;
+    if (selectedFeatures.length === 0 && !hasAutoColumns) {
+      return alert(
+        'Select at least one feature, or enable an auto-added feature group that produces columns.',
+      );
+    }
 
     setCreating(true);
     try {
@@ -86,6 +115,7 @@ export default function TrainingLab() {
         include_sp_features: includeSpFeatures,
         include_pace_shape_features: includePaceShape,
         include_race_relative_features: includeRaceRelative,
+        sp_feature_names: spFeatureNames,
       };
       if (selectedVersionId !== null) {
         splitConfig.version_id = selectedVersionId;
@@ -364,12 +394,31 @@ export default function TrainingLab() {
                   onChange={(e) => setIncludeSpFeatures(e.target.checked)}
                   className="mt-0.5 rounded"
                 />
-                <span>
+                <span className="flex-1">
                   <span className="font-medium">SP-derived features</span>
-                  <span className="block text-xs text-gray-500">
-                    current_sp_decimal, current_sp_implied_prob, sp_rank_in_field,
-                    market_overround.
+                  <span className="block text-xs text-gray-500 mb-1">
+                    Pick any subset. Note: sp_rank_in_field alone mirrors the
+                    SP-favourite baseline most cleanly.
                   </span>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 pl-0.5">
+                    {SP_FEATURE_NAMES.map((name) => (
+                      <label
+                        key={name}
+                        className={`flex items-center gap-1 text-xs ${
+                          includeSpFeatures ? 'text-gray-700' : 'text-gray-400'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          disabled={!includeSpFeatures}
+                          checked={spFeatureNames.includes(name)}
+                          onChange={() => toggleSpFeature(name)}
+                          className="rounded"
+                        />
+                        <code>{name}</code>
+                      </label>
+                    ))}
+                  </div>
                 </span>
               </label>
               <label className="flex items-start gap-2 text-sm">

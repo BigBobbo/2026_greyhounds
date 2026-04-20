@@ -37,6 +37,7 @@ def build_dataset(
     include_sp_features: bool = True,
     include_pace_shape_features: bool = True,
     include_race_relative_features: bool = True,
+    sp_feature_names: list[str] | None = None,
     heartbeat_fn: Any | None = None,
 ) -> dict[str, Any]:
     """
@@ -53,13 +54,17 @@ def build_dataset(
             If None, uses unversioned features.
         include_builtin_features: If True, add built-in race-context features
             (trap bias, grade movement, days since last, weight change, etc.)
-        include_sp_features: If True, add SP-derived features (current_sp_decimal,
-            current_sp_implied_prob, sp_rank_in_field, market_overround).
+        include_sp_features: If True, add SP-derived features (see sp_feature_names
+            to pick a subset).
         include_pace_shape_features: If True, add pace-shape features derived from
             is_front_runner / early_speed_ratio (num_front_runners_in_race,
             is_sole_front_runner, pace_pressure, early_speed_rank, is_predicted_leader).
         include_race_relative_features: If True, add race-relative features
             (per-feature vs_field and rank-in-field columns, plus num_runners).
+        sp_feature_names: Optional list picking which SP-derived columns to add
+            when include_sp_features is True. Any subset of
+            {"current_sp_decimal", "current_sp_implied_prob",
+             "sp_rank_in_field", "market_overround"}. None = all four.
 
     Returns:
         {
@@ -113,8 +118,16 @@ def build_dataset(
         only_complete=only_complete, version_id=version_id,
     )
 
-    if X.empty and not include_builtin_features:
-        raise ValueError("Feature matrix is empty — have features been materialized?")
+    any_auto_group = (
+        include_builtin_features
+        or include_sp_features
+        or include_pace_shape_features
+        or include_race_relative_features
+    )
+    if X.empty and not any_auto_group:
+        raise ValueError(
+            "No features selected and no auto-added feature groups are enabled."
+        )
 
     # Compute built-in race-context features
     if include_builtin_features:
@@ -132,8 +145,15 @@ def build_dataset(
                 X = X.join(builtin_X, how="outer")
             logger.info("Added %d built-in features, matrix now %d columns", builtin_X.shape[1], X.shape[1])
 
+    # If X is still empty but auto-added groups remain to run, seed an empty
+    # matrix indexed by entry_id so SP / pace-shape / race-relative features
+    # can populate it.
     if X.empty:
-        raise ValueError("Feature matrix is empty — have features been materialized?")
+        if not (include_sp_features or include_pace_shape_features or include_race_relative_features):
+            raise ValueError(
+                "Feature matrix is empty — have features been materialized?"
+            )
+        X = pd.DataFrame(index=pd.Index(entry_ids, name="race_entry_id"))
 
     # Align entries with feature matrix (only keep entries that have features)
     entries_df = entries_df.set_index("entry_id")
@@ -149,7 +169,7 @@ def build_dataset(
 
     # Add SP-derived features from the current race
     if include_sp_features:
-        X = _add_sp_features(X, entries_df)
+        X = _add_sp_features(X, entries_df, feature_names=sp_feature_names)
 
     # Add race-relative features (compare each dog to its race field)
     if include_race_relative_features:
@@ -158,6 +178,12 @@ def build_dataset(
     # Add pace shape features (front-runner count, early speed rank, etc.)
     if include_pace_shape_features:
         X = _add_pace_shape_features(X, entries_df["race_id"])
+
+    if X.shape[1] == 0:
+        raise ValueError(
+            "Final feature matrix has no columns. Select at least one feature "
+            "definition or enable an auto-added feature group that produces columns."
+        )
 
     # Build target variable
     y = _build_target(entries_df, target)
@@ -379,11 +405,26 @@ def _compute_group_sizes(race_ids: pd.Series) -> list[int]:
     return groups
 
 
-def _add_sp_features(X: pd.DataFrame, entries_df: pd.DataFrame) -> pd.DataFrame:
+SP_FEATURE_NAMES = (
+    "current_sp_decimal",
+    "current_sp_implied_prob",
+    "sp_rank_in_field",
+    "market_overround",
+)
+
+
+def _add_sp_features(
+    X: pd.DataFrame,
+    entries_df: pd.DataFrame,
+    feature_names: list[str] | None = None,
+) -> pd.DataFrame:
     """Add starting-price-derived features from the current race.
 
     SP is the single strongest predictor of race outcomes (Benter 1994).
     These features use information known before the race starts.
+
+    Args:
+        feature_names: Optional subset of SP_FEATURE_NAMES to include. None = all.
     """
     sp = entries_df["sp_decimal"]
     race_ids = entries_df["race_id"]
@@ -392,21 +433,28 @@ def _add_sp_features(X: pd.DataFrame, entries_df: pd.DataFrame) -> pd.DataFrame:
     if valid_sp.sum() == 0:
         return X
 
+    wanted = set(feature_names) if feature_names else set(SP_FEATURE_NAMES)
+    wanted &= set(SP_FEATURE_NAMES)
+    if not wanted:
+        return X
+
     X = X.copy()
-    X["current_sp_decimal"] = sp
-    X.loc[valid_sp, "current_sp_implied_prob"] = 1.0 / sp[valid_sp]
+    if "current_sp_decimal" in wanted:
+        X["current_sp_decimal"] = sp
+    if "current_sp_implied_prob" in wanted:
+        X.loc[valid_sp, "current_sp_implied_prob"] = 1.0 / sp[valid_sp]
+    if "sp_rank_in_field" in wanted:
+        # SP rank within the race (1 = favourite / shortest price)
+        X["sp_rank_in_field"] = sp.groupby(race_ids).rank(method="min")
+    if "market_overround" in wanted:
+        # Sum of implied probs per race
+        X["market_overround"] = (
+            (1.0 / sp[valid_sp])
+            .groupby(race_ids[valid_sp])
+            .transform("sum")
+        )
 
-    # SP rank within the race (1 = favourite / shortest price)
-    X["sp_rank_in_field"] = sp.groupby(race_ids).rank(method="min")
-
-    # Market overround per race (sum of implied probs)
-    X["market_overround"] = (
-        (1.0 / sp[valid_sp])
-        .groupby(race_ids[valid_sp])
-        .transform("sum")
-    )
-
-    logger.info("Added 4 SP-derived features")
+    logger.info("Added %d SP-derived features: %s", len(wanted), sorted(wanted))
     return X
 
 
@@ -459,7 +507,9 @@ def add_race_relative_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataF
     Also adds:
       - num_runners: how many dogs in this race
     """
-    if X.empty or race_ids.empty:
+    # Note: X.empty is True when either dim is zero. We want to keep adding
+    # num_runners even when X has rows but no columns.
+    if len(X.index) == 0 or race_ids.empty:
         return X
 
     X = X.copy()

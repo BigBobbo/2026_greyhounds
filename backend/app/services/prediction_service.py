@@ -63,12 +63,16 @@ def compute_features_for_entries(
     entry_ids: list[int],
     feature_defs: list[FeatureDefinition],
     include_builtin: bool = True,
+    include_elo: bool = True,
 ) -> pd.DataFrame:
     """Compute features for specific race entries on-the-fly (no caching).
 
     Args:
         include_builtin: If True, also compute built-in race-context features
-            (trap bias, grade movement, days since last, etc.)
+            (trap bias, grade movement, days since last, speed figures, etc.)
+        include_elo: If True, also compute ELO rating features in a single
+            chronological pass.  Required to keep prediction parity with
+            training when ELO features are part of the model.
     """
     rows = {}
 
@@ -92,11 +96,6 @@ def compute_features_for_entries(
 
             feature_values[feat.name] = value
 
-        # Add built-in race-context features
-        if include_builtin:
-            builtin = compute_race_context_features(db, entry_id, history, ctx)
-            feature_values.update(builtin)
-
         rows[entry_id] = feature_values
 
     if not rows:
@@ -104,6 +103,30 @@ def compute_features_for_entries(
 
     df = pd.DataFrame.from_dict(rows, orient="index")
     df.index.name = "race_entry_id"
+
+    # Add built-in race-context features in one batched pass.  This shares
+    # the exact code path used at training time so prediction sees the same
+    # speed-figure, trap-bias and trainer/sire features the model was trained on.
+    if include_builtin:
+        from ml.race_features import compute_builtin_features_batch
+        builtin_df = compute_builtin_features_batch(db, list(rows.keys()))
+        if not builtin_df.empty:
+            overlap = df.columns.intersection(builtin_df.columns)
+            if len(overlap) > 0:
+                df = df.drop(columns=overlap)
+            df = df.join(builtin_df, how="left")
+
+    # Add ELO features (single chronological pass — slightly heavier but
+    # also shared with the training pipeline).
+    if include_elo:
+        from ml.race_features import compute_elo_features_batch
+        elo_df = compute_elo_features_batch(db, list(rows.keys()))
+        if not elo_df.empty:
+            overlap = df.columns.intersection(elo_df.columns)
+            if len(overlap) > 0:
+                df = df.drop(columns=overlap)
+            df = df.join(elo_df, how="left")
+
     return df
 
 

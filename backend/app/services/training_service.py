@@ -151,6 +151,7 @@ def run_training(db: Session, experiment_id: int) -> None:
             include_sp_features=split_cfg.get("include_sp_features", True),
             include_pace_shape_features=split_cfg.get("include_pace_shape_features", True),
             include_race_relative_features=split_cfg.get("include_race_relative_features", True),
+            include_elo_features=split_cfg.get("include_elo_features", True),
             heartbeat_fn=_dataset_heartbeat,
         )
 
@@ -442,6 +443,7 @@ def run_optuna_optimization(
             include_sp_features=split_cfg.get("include_sp_features", True),
             include_pace_shape_features=split_cfg.get("include_pace_shape_features", True),
             include_race_relative_features=split_cfg.get("include_race_relative_features", True),
+            include_elo_features=split_cfg.get("include_elo_features", True),
             heartbeat_fn=_dataset_heartbeat,
         )
 

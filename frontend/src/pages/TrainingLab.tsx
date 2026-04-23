@@ -50,6 +50,9 @@ export default function TrainingLab() {
   const [includeSpFeatures, setIncludeSpFeatures] = useState(true);
   const [includePaceShape, setIncludePaceShape] = useState(true);
   const [includeRaceRelative, setIncludeRaceRelative] = useState(true);
+  const [includeElo, setIncludeElo] = useState(true);
+  const [includeOddsSnapshot, setIncludeOddsSnapshot] = useState(true);
+  const [includeH2H, setIncludeH2H] = useState(true);
 
   const fetchData = () => {
     Promise.all([
@@ -86,6 +89,9 @@ export default function TrainingLab() {
         include_sp_features: includeSpFeatures,
         include_pace_shape_features: includePaceShape,
         include_race_relative_features: includeRaceRelative,
+        include_elo_features: includeElo,
+        include_odds_snapshot_features: includeOddsSnapshot,
+        include_h2h_features: includeH2H,
       };
       if (selectedVersionId !== null) {
         splitConfig.version_id = selectedVersionId;
@@ -352,8 +358,27 @@ export default function TrainingLab() {
                 <span>
                   <span className="font-medium">Built-in race-context features</span>
                   <span className="block text-xs text-gray-500">
-                    Trap win-rate, grade movement, days since last, weight change,
-                    early-speed ratio, is-front-runner, career races, age, etc.
+                    ~60 features: trap bias (incl. going-conditional), grade
+                    movement, days since last, weight change, early-speed ratio,
+                    front-runner, trainer/sire stats, speed figures (Beyer-style),
+                    class dynamics, stamina profile, first-time flags,
+                    workload/fitness cycle, trouble-adjusted runs, etc.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={includeElo}
+                  onChange={(e) => setIncludeElo(e.target.checked)}
+                  className="mt-0.5 rounded"
+                />
+                <span>
+                  <span className="font-medium">ELO skill ratings</span>
+                  <span className="block text-xs text-gray-500">
+                    dog_elo (overall, per-distance, per-track), dog_elo_races,
+                    field_avg_elo, field_max_elo, elo_rank_in_field,
+                    elo_gap_to_best, elo_gap_to_avg.
                   </span>
                 </span>
               </label>
@@ -365,10 +390,28 @@ export default function TrainingLab() {
                   className="mt-0.5 rounded"
                 />
                 <span>
-                  <span className="font-medium">SP-derived features</span>
+                  <span className="font-medium">SP / market features</span>
                   <span className="block text-xs text-gray-500">
-                    current_sp_decimal, current_sp_implied_prob, sp_rank_in_field,
-                    market_overround.
+                    current_sp_decimal, implied_prob, log-odds, sp_rank,
+                    market_overround, de-vigged prob, is_favorite,
+                    is_second_favorite, fav_gap, second_fav_gap,
+                    sp_vs_field_mean.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={includeOddsSnapshot}
+                  onChange={(e) => setIncludeOddsSnapshot(e.target.checked)}
+                  className="mt-0.5 rounded"
+                />
+                <span>
+                  <span className="font-medium">Odds-snapshot drift features</span>
+                  <span className="block text-xs text-gray-500">
+                    opening_to_sp_drift, odds_steam_rate,
+                    cross_book_disagreement. No-op until the scraper starts
+                    populating the odds_snapshots table.
                   </span>
                 </span>
               </label>
@@ -382,8 +425,28 @@ export default function TrainingLab() {
                 <span>
                   <span className="font-medium">Pace-shape features</span>
                   <span className="block text-xs text-gray-500">
-                    num_front_runners_in_race, is_sole_front_runner, pace_pressure,
-                    early_speed_rank, is_predicted_leader.
+                    pace_scenario one-hot (lone_speed/duel/contested/no_speed),
+                    expected_lead_probability, avg_opponent_early_speed,
+                    early_speed_vs_field, running_style_mismatch,
+                    num_front_runners_in_race, is_sole_front_runner,
+                    pace_pressure.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={includeH2H}
+                  onChange={(e) => setIncludeH2H(e.target.checked)}
+                  className="mt-0.5 rounded"
+                />
+                <span>
+                  <span className="font-medium">Head-to-head features</span>
+                  <span className="block text-xs text-gray-500">
+                    h2h_meetings_vs_field, h2h_wins/losses_vs_field,
+                    h2h_win_rate_vs_field (Beta-shrunk),
+                    h2h_avg_beaten_length_vs_field,
+                    best_opponent_beaten_count.
                   </span>
                 </span>
               </label>
@@ -397,7 +460,8 @@ export default function TrainingLab() {
                 <span>
                   <span className="font-medium">Race-relative features</span>
                   <span className="block text-xs text-gray-500">
-                    Per-feature vs-field and rank-in-field columns, plus num_runners.
+                    For each tracked feature: vs_field, rank, z_in_field
+                    (signed), gap_to_best, is_field_best. Plus num_runners.
                   </span>
                 </span>
               </label>

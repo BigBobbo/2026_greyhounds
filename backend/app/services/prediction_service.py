@@ -127,6 +127,15 @@ def compute_features_for_entries(
                 df = df.drop(columns=overlap)
             df = df.join(elo_df, how="left")
 
+    # Head-to-head features against today's opponents
+    from ml.race_features import compute_h2h_features_batch
+    h2h_df = compute_h2h_features_batch(db, list(rows.keys()))
+    if not h2h_df.empty:
+        overlap = df.columns.intersection(h2h_df.columns)
+        if len(overlap) > 0:
+            df = df.drop(columns=overlap)
+        df = df.join(h2h_df, how="left")
+
     return df
 
 

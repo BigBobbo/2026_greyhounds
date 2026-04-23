@@ -503,11 +503,15 @@ def compute_builtin_features_batch(
                 RaceEntry.dog_id,
                 RaceEntry.days_since_last,
                 RaceEntry.weight_kg,
+                RaceEntry.wide_runner,
                 RaceEntry.race_id,
                 Race.track_id,
                 Race.distance_m,
                 Race.grade,
+                Race.going,
+                Race.num_runners,
                 Race.race_date,
+                Race.race_time,
                 Race.race_type,
                 Dog.birth_date,
                 Dog.trainer_name,
@@ -525,8 +529,10 @@ def compute_builtin_features_batch(
         return pd.DataFrame()
 
     ctx_df = pd.DataFrame(ctx_rows, columns=[
-        "entry_id", "trap", "dog_id", "days_since_last", "weight_kg", "race_id",
-        "track_id", "distance_m", "grade", "race_date", "race_type",
+        "entry_id", "trap", "dog_id", "days_since_last", "weight_kg",
+        "wide_runner", "race_id",
+        "track_id", "distance_m", "grade", "going", "num_runners",
+        "race_date", "race_time", "race_type",
         "birth_date", "trainer_name", "sire",
     ]).set_index("entry_id")
 
@@ -618,9 +624,42 @@ def compute_builtin_features_batch(
     )
     # Key: (track_id, distance_m, trap) -> win_rate
     trap_win_rates: dict[tuple, float | None] = {}
+    # Key: (track_id, distance_m, trap) -> total runs (for shrinkage)
+    trap_sample_sizes: dict[tuple, int] = {}
     for row in trap_stats:
         if row.total and row.total >= 30:
-            trap_win_rates[(row.track_id, row.distance_m, row.trap)] = float(row.wins) / float(row.total)
+            key = (row.track_id, row.distance_m, row.trap)
+            trap_win_rates[key] = float(row.wins) / float(row.total)
+            trap_sample_sizes[key] = int(row.total)
+
+    # --- 3b. Going-conditional trap win rates ---
+    # Going materially affects trap bias: heavy going churns the inside rail,
+    # fast going amplifies rail shortcuts.  Compute per (track, distance,
+    # going, trap) with a higher min-sample bar since buckets are sparser.
+    trap_going_stats = (
+        db.query(
+            Race.track_id,
+            Race.distance_m,
+            Race.going,
+            RaceEntry.trap,
+            func.count(RaceEntry.id).label("total"),
+            func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
+        )
+        .join(Race, RaceEntry.race_id == Race.id)
+        .filter(
+            Race.status == "resulted",
+            RaceEntry.finish_position.isnot(None),
+            Race.going.isnot(None),
+        )
+        .group_by(Race.track_id, Race.distance_m, Race.going, RaceEntry.trap)
+        .all()
+    )
+    trap_going_win_rates: dict[tuple, float] = {}
+    for row in trap_going_stats:
+        if row.total and row.total >= 20:
+            trap_going_win_rates[
+                (row.track_id, row.distance_m, row.going, row.trap)
+            ] = float(row.wins) / float(row.total)
 
     # --- 4. Bulk compute trainer stats (win/place rate in last 90 days) ---
     unique_trainers = ctx_df["trainer_name"].dropna().unique().tolist()
@@ -839,6 +878,10 @@ def compute_builtin_features_batch(
 
     grade_map = {g: i for i, g in enumerate(GRADE_ORDER)}
     _FRONT_RUNNER_KW = {"led", "ld", "disp ld", "disp lead", "made all"}
+    _TROUBLE_KW = {
+        "ck", "bmp", "crd", "fell", "hampered", "baulked", "stumbled",
+        "crowded", "checked", "bumped",
+    }
 
     # Keyed by (dog_id, race_date) -> dict of history-derived features
     hist_agg: dict[tuple, dict] = {}
@@ -868,6 +911,29 @@ def compute_builtin_features_batch(
                     "speed_figure_ewm_last10": None,
                     "speed_figure_trend_last5": None,
                     "career_peak_speed_figure": None,
+                    "last_trap": None,
+                    "win_rate_last5": None,
+                    "last_position": None,
+                    "median_career_grade_idx": None,
+                    "finishing_speed_ratio": None,
+                    "finishing_speed_trend": None,
+                    "finishing_speed_ewm10": None,
+                    "last_distance": None,
+                    "prior_tracks": set(),
+                    "prior_distances": set(),
+                    "prior_grades": set(),
+                    "second_after_layoff": 0.0,
+                    "races_last_14_days": 0.0,
+                    "races_last_60_days": 0.0,
+                    "workload_trend": 0.0,
+                    "weight_3race_stdev": None,
+                    "career_avg_weight": None,
+                    "clean_run_win_rate_last10": None,
+                    "clean_run_mean_position_last10": None,
+                    "trouble_run_mean_position_last10": None,
+                    "trouble_recovery_ratio_last10": None,
+                    "clean_run_count_last10": 0.0,
+                    "trouble_run_count_last10": 0.0,
                 }
             dogs_done += 1
             continue
@@ -888,6 +954,7 @@ def compute_builtin_features_batch(
         h_adj_time = hist_sorted["adjusted_time"].values
         h_distance = hist_sorted["distance_m"].values
         h_track = hist_sorted["track_id"].values
+        h_trap = hist_sorted["trap"].values
 
         # Precompute speed figures for the whole sorted history once.
         # NaN where the bucket has no baseline or adjusted_time is missing.
@@ -933,6 +1000,29 @@ def compute_builtin_features_batch(
                     "speed_figure_ewm_last10": None,
                     "speed_figure_trend_last5": None,
                     "career_peak_speed_figure": None,
+                    "last_trap": None,
+                    "win_rate_last5": None,
+                    "last_position": None,
+                    "median_career_grade_idx": None,
+                    "finishing_speed_ratio": None,
+                    "finishing_speed_trend": None,
+                    "finishing_speed_ewm10": None,
+                    "last_distance": None,
+                    "prior_tracks": set(),
+                    "prior_distances": set(),
+                    "prior_grades": set(),
+                    "second_after_layoff": 0.0,
+                    "races_last_14_days": 0.0,
+                    "races_last_60_days": 0.0,
+                    "workload_trend": 0.0,
+                    "weight_3race_stdev": None,
+                    "career_avg_weight": None,
+                    "clean_run_win_rate_last10": None,
+                    "clean_run_mean_position_last10": None,
+                    "trouble_run_mean_position_last10": None,
+                    "trouble_recovery_ratio_last10": None,
+                    "clean_run_count_last10": 0.0,
+                    "trouble_run_count_last10": 0.0,
                 }
                 continue
 
@@ -951,6 +1041,11 @@ def compute_builtin_features_batch(
             # Days since last (from history)
             days_since = float((rd - h_dates[cut - 1]).days) if cut > 0 else None
 
+            # Last trap (used for trap_switch below)
+            last_trap = h_trap[cut - 1] if cut > 0 else None
+            if last_trap is not None and isinstance(last_trap, float) and np.isnan(last_trap):
+                last_trap = None
+
             # Weight: avg of last 5 non-NaN
             weights_sl = h_weights[max(0, cut - 5):cut]
             valid_weights = [w for w in weights_sl if w is not None and not np.isnan(w)]
@@ -966,6 +1061,166 @@ def compute_builtin_features_batch(
                 and not np.isnan(s) and not np.isnan(f) and f > 0
             ]
             early_speed = float(np.mean(valid_speed)) if valid_speed else None
+
+            # Tier 8: finish-stretch / stamina profile from the same last-5 slice.
+            # finishing_speed_ratio = (finish_time - sectional_time) / finish_time
+            # Low = front-loaded (early burst, faded late), high = strong finish.
+            finishing_ratios = [
+                float((f - s) / f) for s, f in zip(sect_r, fin_r)
+                if s is not None and f is not None
+                and not np.isnan(s) and not np.isnan(f) and f > 0
+            ]
+            finishing_speed_ratio = (
+                float(np.mean(finishing_ratios)) if finishing_ratios else None
+            )
+            # Trend: slope of the last-5 ratios (positive = becoming stronger at finish)
+            finishing_trend = None
+            if len(finishing_ratios) >= 3:
+                xs = np.arange(len(finishing_ratios), dtype=float)
+                finishing_trend = float(
+                    np.polyfit(xs, np.asarray(finishing_ratios, dtype=float), 1)[0]
+                )
+
+            # EWM over last 10 for a smoothed view
+            recent10_sect = h_sect[slice(max(0, cut - 10), cut)]
+            recent10_fin = h_finish[slice(max(0, cut - 10), cut)]
+            finishing_ratios_10 = [
+                float((f - s) / f) for s, f in zip(recent10_sect, recent10_fin)
+                if s is not None and f is not None
+                and not np.isnan(s) and not np.isnan(f) and f > 0
+            ]
+            finishing_ewm = None
+            if finishing_ratios_10:
+                weight = 0.0
+                acc = 0.0
+                w = 1.0
+                for v in finishing_ratios_10:
+                    acc += w * v
+                    weight += w
+                    w *= 0.5
+                finishing_ewm = float(acc / weight) if weight > 0 else None
+
+            # Last race distance — used downstream for distance_change_from_last
+            last_distance = (
+                int(h_distance[cut - 1])
+                if cut > 0 and h_distance[cut - 1] is not None
+                and not np.isnan(h_distance[cut - 1])
+                else None
+            )
+
+            # Tier 9: sets of tracks / distances / grades raced prior to this date
+            # (used to detect "first time at X" signals at the assembly step)
+            prior_tracks = set()
+            for v in h_track[:cut]:
+                if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                    prior_tracks.add(int(v))
+            prior_distances = set()
+            for v in h_distance[:cut]:
+                if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                    prior_distances.add(int(v))
+            prior_grades = set()
+            for v in h_grades[:cut]:
+                if v is not None and pd.notna(v):
+                    prior_grades.add(str(v).upper().strip())
+
+            # Was the previous race itself preceded by a long layoff? If so, the
+            # current race is the "second after layoff" — often a meaningful
+            # form indicator.  We check gap between race (cut-2) and (cut-1).
+            second_after_layoff = 0.0
+            if cut >= 2:
+                prev_gap = (h_dates[cut - 1] - h_dates[cut - 2]).days
+                if prev_gap >= 29:
+                    second_after_layoff = 1.0
+
+            # Tier 10: workload / fitness-cycle counts over 14 and 60 days
+            cutoff_14 = rd - timedelta(days=14)
+            cutoff_60 = rd - timedelta(days=60)
+            cutoff_90 = rd - timedelta(days=90)
+            races_14 = 0
+            races_60 = 0
+            races_90 = 0
+            for i in range(cut - 1, -1, -1):
+                d = h_dates[i]
+                if d is None:
+                    continue
+                if d >= cutoff_14:
+                    races_14 += 1
+                if d >= cutoff_60:
+                    races_60 += 1
+                if d >= cutoff_90:
+                    races_90 += 1
+                else:
+                    break
+
+            # Workload trend: number of races in the first 45 days vs the last
+            # 45 days of the 90-day window — positive = workload increasing.
+            mid_90 = rd - timedelta(days=45)
+            races_first_45 = 0
+            races_last_45 = 0
+            for i in range(cut - 1, -1, -1):
+                d = h_dates[i]
+                if d is None:
+                    break
+                if d < cutoff_90:
+                    break
+                if d >= mid_90:
+                    races_last_45 += 1
+                else:
+                    races_first_45 += 1
+            workload_trend = float(races_last_45 - races_first_45)
+
+            # Weight dynamics: stdev of last-3 weight differences, and
+            # current weight as pct of career average.
+            weights_arr = h_weights[:cut]
+            valid_weights_career = [
+                float(w) for w in weights_arr
+                if w is not None and not (isinstance(w, float) and np.isnan(w))
+            ]
+            career_avg_weight = (
+                float(np.mean(valid_weights_career)) if valid_weights_career else None
+            )
+            recent_w3 = [
+                float(w) for w in weights_arr[-3:]
+                if w is not None and not (isinstance(w, float) and np.isnan(w))
+            ]
+            weight_3race_stdev = (
+                float(np.std(recent_w3, ddof=1)) if len(recent_w3) >= 2 else None
+            )
+
+            # Tier 11: trouble-adjusted performance.  Separate the last 10
+            # races into "clean" vs "trouble" runs and compute rates on each.
+            last10_slice = slice(max(0, cut - 10), cut)
+            last10_comments = h_comments[last10_slice]
+            last10_positions = h_positions[last10_slice]
+            clean_positions: list[float] = []
+            trouble_positions: list[float] = []
+            for c, p in zip(last10_comments, last10_positions):
+                if p is None or (isinstance(p, float) and np.isnan(p)):
+                    continue
+                c_lower = "" if c is None else str(c).lower()
+                has_trouble = any(kw in c_lower for kw in _TROUBLE_KW)
+                if has_trouble:
+                    trouble_positions.append(float(p))
+                else:
+                    clean_positions.append(float(p))
+
+            clean_win_rate = (
+                float(sum(1 for p in clean_positions if p == 1) / len(clean_positions))
+                if clean_positions else None
+            )
+            clean_mean_position = (
+                float(np.mean(clean_positions)) if clean_positions else None
+            )
+            trouble_mean_position = (
+                float(np.mean(trouble_positions)) if trouble_positions else None
+            )
+            # Recovery ratio: out of trouble runs, how close to the podium did
+            # the dog finish on average?  Lower = better recovery.
+            # Clamp at 1 (fell / disqualified etc. often get high positions).
+            trouble_recovery = (
+                float(np.mean([p - 1 for p in trouble_positions]))
+                if trouble_positions else None
+            )
 
             # Front runner: last 10 comments
             recent_10 = slice(max(0, cut - 10), cut)
@@ -986,6 +1241,27 @@ def compute_builtin_features_batch(
             pos_sl = h_positions[slice(max(0, cut - 10), cut)]
             valid_pos = [p for p in pos_sl if p is not None and not np.isnan(p)]
             pos_consistency = float(np.std(valid_pos, ddof=1)) if len(valid_pos) >= 2 else None
+
+            # Tier 7: class / grade dynamics
+            # Win rate over the last 5 finish positions and last finish
+            pos_last5 = h_positions[slice(max(0, cut - 5), cut)]
+            valid_pos5 = [p for p in pos_last5 if p is not None and not np.isnan(p)]
+            win_rate_last5 = (
+                float(sum(1 for p in valid_pos5 if p == 1) / len(valid_pos5))
+                if valid_pos5 else None
+            )
+            last_position = int(valid_pos[-1]) if valid_pos else None
+
+            # Career grade indices (converted via grade_map) — lower = higher class
+            grade_idx_career = [
+                grade_map[str(g).upper().strip()]
+                for g in h_grades[:cut]
+                if g is not None and pd.notna(g)
+                and str(g).upper().strip() in grade_map
+            ]
+            median_career_grade_idx = (
+                float(np.median(grade_idx_career)) if grade_idx_career else None
+            )
 
             # Track speed: best adjusted_time per (track_id, distance_m) from last 10
             best_times: dict[tuple, float] = {}
@@ -1043,6 +1319,29 @@ def compute_builtin_features_batch(
                 "speed_figure_ewm_last10": sf_ewm10,
                 "speed_figure_trend_last5": sf_trend,
                 "career_peak_speed_figure": sf_peak,
+                "last_trap": last_trap,
+                "win_rate_last5": win_rate_last5,
+                "last_position": last_position,
+                "median_career_grade_idx": median_career_grade_idx,
+                "finishing_speed_ratio": finishing_speed_ratio,
+                "finishing_speed_trend": finishing_trend,
+                "finishing_speed_ewm10": finishing_ewm,
+                "last_distance": last_distance,
+                "prior_tracks": prior_tracks,
+                "prior_distances": prior_distances,
+                "prior_grades": prior_grades,
+                "second_after_layoff": second_after_layoff,
+                "races_last_14_days": float(races_14),
+                "races_last_60_days": float(races_60),
+                "workload_trend": workload_trend,
+                "weight_3race_stdev": weight_3race_stdev,
+                "career_avg_weight": career_avg_weight,
+                "clean_run_win_rate_last10": clean_win_rate,
+                "clean_run_mean_position_last10": clean_mean_position,
+                "trouble_run_mean_position_last10": trouble_mean_position,
+                "trouble_recovery_ratio_last10": trouble_recovery,
+                "clean_run_count_last10": float(len(clean_positions)),
+                "trouble_run_count_last10": float(len(trouble_positions)),
             }
 
         dogs_done += 1
@@ -1066,6 +1365,9 @@ def compute_builtin_features_batch(
         track_id = ctx["track_id"]
         distance_m = ctx["distance_m"]
         current_grade = ctx["grade"]
+        current_going = ctx["going"]
+        num_runners = ctx["num_runners"]
+        wide_runner = ctx["wide_runner"]
         trainer_name = ctx["trainer_name"]
         sire = ctx["sire"]
 
@@ -1172,6 +1474,181 @@ def compute_builtin_features_batch(
         else:
             f["recent_vs_peak_speed_figure"] = None
 
+        # 15. Tier 6 — draw x bias x running-style interactions
+        # Expected trap win rate for a neutral dog (= 1 / field size).  Any
+        # deviation from this is a track bias signal that can be exploited.
+        expected_rate = None
+        if num_runners and num_runners > 0:
+            expected_rate = 1.0 / float(num_runners)
+
+        trap_rate = f["trap_win_rate_at_track"]
+        if trap_rate is not None and expected_rate is not None:
+            f["trap_bias_deviation"] = trap_rate - expected_rate
+        else:
+            f["trap_bias_deviation"] = None
+
+        # Going-conditional trap bias (may be None if the bucket is too small)
+        if current_going is not None:
+            going_rate = trap_going_win_rates.get(
+                (track_id, distance_m, current_going, trap)
+            )
+            if going_rate is not None and expected_rate is not None:
+                f["trap_bias_deviation_going"] = going_rate - expected_rate
+            else:
+                f["trap_bias_deviation_going"] = None
+        else:
+            f["trap_bias_deviation_going"] = None
+
+        # Running-style × trap-bias interaction
+        front_runner = f.get("is_front_runner", 0.0) or 0.0
+        bias_dev = f["trap_bias_deviation"]
+        if bias_dev is not None:
+            f["trap_bias_x_front_runner"] = bias_dev * float(front_runner)
+        else:
+            f["trap_bias_x_front_runner"] = None
+
+        # Wide runner flag × outside trap indicator
+        if trap is not None:
+            is_outside = 1.0 if trap >= 5 else 0.0
+            is_inside = 1.0 if trap <= 2 else 0.0
+            wr_flag = 1.0 if bool(wide_runner) else 0.0
+            f["wide_runner_x_outside"] = wr_flag * is_outside
+            f["wide_runner_x_inside"] = wr_flag * is_inside
+        else:
+            f["wide_runner_x_outside"] = None
+            f["wide_runner_x_inside"] = None
+
+        # Trap switch — absolute change from last race's trap
+        last_trap = agg.get("last_trap")
+        if trap is not None and last_trap is not None:
+            try:
+                f["trap_switch"] = float(abs(int(trap) - int(last_trap)))
+            except (TypeError, ValueError):
+                f["trap_switch"] = None
+        else:
+            f["trap_switch"] = None
+
+        # 16. Tier 7 — class/grade dynamics
+        # grade_movement is set earlier (index delta vs last grade).  Combine
+        # with recent form to flag "class drop in form" (drop + recent wins
+        # = classic overlay) and "class rise on win" (rise + just won = often
+        # overbet by the market).
+        grade_mv = f.get("grade_movement")
+        win_rate_5 = agg.get("win_rate_last5")
+        last_pos = agg.get("last_position")
+        if grade_mv is not None and win_rate_5 is not None:
+            f["class_drop_in_form"] = (
+                1.0 if (grade_mv > 0 and win_rate_5 >= 0.3) else 0.0
+            )
+        else:
+            f["class_drop_in_form"] = None
+        if grade_mv is not None and last_pos is not None:
+            f["class_rise_on_win"] = (
+                1.0 if (grade_mv < 0 and last_pos == 1) else 0.0
+            )
+        else:
+            f["class_rise_on_win"] = None
+
+        # Median career grade index (exposed so the relative-features pass
+        # can compute gap-to-field — raw value is lower-is-better since low
+        # grade index = higher class)
+        f["dog_median_career_grade_index"] = agg.get("median_career_grade_idx")
+
+        # Typical grade gap: current grade index minus median career index.
+        # Positive = dog is dropping to an easier grade than usual.
+        curr_g = None
+        if current_grade is not None:
+            curr_g = grade_map.get(str(current_grade).upper().strip())
+        median_idx = agg.get("median_career_grade_idx")
+        if curr_g is not None and median_idx is not None:
+            f["dog_typical_grade_gap"] = float(curr_g - median_idx)
+        else:
+            f["dog_typical_grade_gap"] = None
+
+        # Race-type flags (open race, stakes race)
+        if current_grade is not None:
+            g_up = str(current_grade).upper().strip()
+            f["is_open_race"] = 1.0 if g_up == "OR" else 0.0
+            f["is_stakes_race"] = 1.0 if g_up in {"S1", "S2", "S3", "S4", "S5"} else 0.0
+        else:
+            f["is_open_race"] = None
+            f["is_stakes_race"] = None
+
+        # 17. Tier 8 — stamina & finishing-profile
+        f["finishing_speed_ratio_last5"] = agg.get("finishing_speed_ratio")
+        f["finishing_speed_ewm_last10"] = agg.get("finishing_speed_ewm10")
+        f["finishing_speed_trend_last5"] = agg.get("finishing_speed_trend")
+
+        last_distance = agg.get("last_distance")
+        if last_distance is not None and distance_m is not None:
+            dist_change = float(distance_m) - float(last_distance)
+            f["distance_change_from_last"] = dist_change
+            f["is_distance_step_up"] = 1.0 if dist_change > 0 else 0.0
+            f["is_distance_step_down"] = 1.0 if dist_change < 0 else 0.0
+        else:
+            f["distance_change_from_last"] = None
+            f["is_distance_step_up"] = None
+            f["is_distance_step_down"] = None
+
+        # 18. Tier 9 — first-time / change flags
+        prior_tracks = agg.get("prior_tracks") or set()
+        prior_distances = agg.get("prior_distances") or set()
+        prior_grades = agg.get("prior_grades") or set()
+        career = agg.get("career_races", 0.0) or 0.0
+
+        # "First time at X" only makes sense after the dog has some career
+        # form; otherwise every feature degenerates to 1.0 for debut runners.
+        if career > 0:
+            f["first_time_at_track"] = (
+                1.0 if track_id is not None and int(track_id) not in prior_tracks else 0.0
+            )
+            f["first_time_at_distance"] = (
+                1.0 if distance_m is not None and int(distance_m) not in prior_distances else 0.0
+            )
+            if current_grade is not None:
+                f["first_time_at_grade"] = (
+                    1.0 if str(current_grade).upper().strip() not in prior_grades else 0.0
+                )
+            else:
+                f["first_time_at_grade"] = None
+        else:
+            # Debut: flag separately via career_races (already exposed)
+            f["first_time_at_track"] = None
+            f["first_time_at_distance"] = None
+            f["first_time_at_grade"] = None
+
+        # Layoff flags derived from the days_since_last we computed upstream
+        days_since = f.get("days_since_last")
+        if days_since is not None:
+            f["first_race_after_layoff"] = 1.0 if days_since >= 29 else 0.0
+        else:
+            f["first_race_after_layoff"] = None
+        f["second_race_after_layoff"] = agg.get("second_after_layoff", 0.0)
+
+        # 19. Tier 10 — workload / fitness-cycle
+        f["races_last_14_days"] = agg.get("races_last_14_days")
+        f["races_last_60_days"] = agg.get("races_last_60_days")
+        f["workload_trend"] = agg.get("workload_trend")
+        f["weight_3race_stdev"] = agg.get("weight_3race_stdev")
+
+        career_avg_w = agg.get("career_avg_weight")
+        current_w = ctx["weight_kg"]
+        if (
+            current_w is not None and career_avg_w is not None
+            and career_avg_w > 0
+        ):
+            f["weight_pct_of_career_avg"] = float(current_w) / float(career_avg_w)
+        else:
+            f["weight_pct_of_career_avg"] = None
+
+        # 20. Tier 11 — trouble-adjusted performance
+        f["clean_run_win_rate_last10"] = agg.get("clean_run_win_rate_last10")
+        f["clean_run_mean_position_last10"] = agg.get("clean_run_mean_position_last10")
+        f["trouble_run_mean_position_last10"] = agg.get("trouble_run_mean_position_last10")
+        f["trouble_recovery_ratio_last10"] = agg.get("trouble_recovery_ratio_last10")
+        f["clean_run_count_last10"] = agg.get("clean_run_count_last10")
+        f["trouble_run_count_last10"] = agg.get("trouble_run_count_last10")
+
         result_rows[entry_id] = f
 
     logger.info("Batch builtin: done, computed features for %d entries", len(result_rows))
@@ -1214,6 +1691,46 @@ BUILTIN_FEATURE_NAMES = [
     "speed_figure_trend_last5",
     "career_peak_speed_figure",
     "recent_vs_peak_speed_figure",
+    # Tier 6 — draw x bias x running-style interactions
+    "trap_bias_deviation",
+    "trap_bias_deviation_going",
+    "trap_bias_x_front_runner",
+    "wide_runner_x_outside",
+    "wide_runner_x_inside",
+    "trap_switch",
+    # Tier 7 — class/grade dynamics
+    "class_drop_in_form",
+    "class_rise_on_win",
+    "dog_median_career_grade_index",
+    "dog_typical_grade_gap",
+    "is_open_race",
+    "is_stakes_race",
+    # Tier 8 — stamina & finishing profile
+    "finishing_speed_ratio_last5",
+    "finishing_speed_ewm_last10",
+    "finishing_speed_trend_last5",
+    "distance_change_from_last",
+    "is_distance_step_up",
+    "is_distance_step_down",
+    # Tier 9 — first-time / change flags
+    "first_time_at_track",
+    "first_time_at_distance",
+    "first_time_at_grade",
+    "first_race_after_layoff",
+    "second_race_after_layoff",
+    # Tier 10 — workload / fitness-cycle
+    "races_last_14_days",
+    "races_last_60_days",
+    "workload_trend",
+    "weight_3race_stdev",
+    "weight_pct_of_career_avg",
+    # Tier 11 — trouble-adjusted performance
+    "clean_run_win_rate_last10",
+    "clean_run_mean_position_last10",
+    "trouble_run_mean_position_last10",
+    "trouble_recovery_ratio_last10",
+    "clean_run_count_last10",
+    "trouble_run_count_last10",
 ]
 
 
@@ -1229,6 +1746,210 @@ ELO_FEATURE_NAMES = [
     "elo_gap_to_best",
     "elo_gap_to_avg",
 ]
+
+
+# Registry of head-to-head feature names emitted by compute_h2h_features_batch
+H2H_FEATURE_NAMES = [
+    "h2h_meetings_vs_field",
+    "h2h_wins_vs_field",
+    "h2h_losses_vs_field",
+    "h2h_win_rate_vs_field",
+    "h2h_avg_beaten_length_vs_field",
+    "best_opponent_beaten_count",
+]
+
+
+def compute_h2h_features_batch(
+    db: Session,
+    entry_ids: list[int],
+    heartbeat_fn=None,
+) -> pd.DataFrame:
+    """Compute head-to-head features measuring each dog's prior record
+    against the specific opponents it faces in today's race.
+
+    For each target entry:
+      * h2h_meetings_vs_field           — count of prior races where the dog
+                                            faced at least one opponent who is
+                                            also in today's race.
+      * h2h_wins_vs_field               — count of prior pairwise wins against
+                                            those same opponents.
+      * h2h_losses_vs_field             — count of prior pairwise losses.
+      * h2h_win_rate_vs_field           — Beta(1,3)-smoothed rate.
+      * h2h_avg_beaten_length_vs_field  — average beaten-distance margin in
+                                            losses to today's opponents.
+      * best_opponent_beaten_count      — number of distinct current-field
+                                            opponents the dog has beaten at
+                                            least once.
+    """
+    def _hb():
+        if heartbeat_fn is not None:
+            heartbeat_fn()
+
+    if not entry_ids:
+        return pd.DataFrame()
+
+    requested = list(set(entry_ids))
+
+    # Step 1: load target entry context (race_id, dog_id, race_date)
+    ctx_rows = (
+        db.query(
+            RaceEntry.id.label("entry_id"),
+            RaceEntry.race_id,
+            RaceEntry.dog_id,
+            Race.race_date,
+        )
+        .join(Race, RaceEntry.race_id == Race.id)
+        .filter(RaceEntry.id.in_(requested))
+        .all()
+    )
+    if not ctx_rows:
+        return pd.DataFrame()
+
+    target_df = pd.DataFrame(ctx_rows, columns=[
+        "entry_id", "race_id", "dog_id", "race_date",
+    ]).set_index("entry_id")
+
+    # Step 2: collect the full field for each target race, including
+    # unresulted races (prediction-time).
+    # Cast to plain ints — SQLite's in_() binding rejects numpy.int64 values
+    # silently (returns no rows) when they arrive from a pandas unique().
+    target_race_ids = [int(r) for r in target_df["race_id"].unique()]
+    field_rows = (
+        db.query(RaceEntry.race_id, RaceEntry.dog_id)
+        .filter(RaceEntry.race_id.in_(target_race_ids))
+        .all()
+    )
+    field_by_race: dict[int, set[int]] = defaultdict(set)
+    for rid, did in field_rows:
+        field_by_race[int(rid)].add(int(did))
+
+    dogs_of_interest: set[int] = set()
+    for dogs in field_by_race.values():
+        dogs_of_interest.update(dogs)
+
+    if not dogs_of_interest:
+        return pd.DataFrame()
+
+    _hb()
+
+    # Step 3: fetch resulted race entries for all dogs-of-interest with their
+    # finish_position and beaten_distance.  We fetch only what we need and
+    # group per race.
+    def _entries_query(chunk):
+        return (
+            db.query(
+                RaceEntry.race_id,
+                RaceEntry.dog_id,
+                RaceEntry.finish_position,
+                RaceEntry.beaten_distance,
+                Race.race_date,
+            )
+            .join(Race, RaceEntry.race_id == Race.id)
+            .filter(
+                RaceEntry.dog_id.in_(chunk),
+                Race.status == "resulted",
+                RaceEntry.finish_position.isnot(None),
+            )
+            .all()
+        )
+
+    history_rows = _chunked_query(
+        db, _entries_query, list(dogs_of_interest), RaceEntry.dog_id,
+    )
+
+    if not history_rows:
+        return pd.DataFrame()
+
+    # race_id -> list of (dog_id, finish_position, beaten_distance, race_date)
+    race_to_entries: dict[int, list[tuple]] = defaultdict(list)
+    for r in history_rows:
+        race_to_entries[r.race_id].append(
+            (r.dog_id, r.finish_position, r.beaten_distance, r.race_date)
+        )
+
+    _hb()
+
+    # Step 4: build dog -> races timeline (race_id, race_date, fin_pos, bd)
+    dog_to_races: dict[int, list[tuple]] = defaultdict(list)
+    for race_id, entries in race_to_entries.items():
+        for dog_id, fp, bd, rd in entries:
+            dog_to_races[dog_id].append((race_id, rd, fp, bd))
+    # Sort each dog's timeline by race_date for efficient filtering
+    for d in dog_to_races:
+        dog_to_races[d].sort(key=lambda t: t[1])
+
+    _hb()
+
+    # Step 5: compute per-entry H2H stats
+    rows: dict[int, dict[str, float | None]] = {}
+    for entry_id, ctx in target_df.iterrows():
+        dog_id = int(ctx["dog_id"])
+        race_id = int(ctx["race_id"])
+        race_date = ctx["race_date"]
+
+        opponents = field_by_race.get(race_id, set()) - {dog_id}
+        if not opponents:
+            # Solo race or no field data — leave NaN
+            rows[entry_id] = {
+                "h2h_meetings_vs_field": None,
+                "h2h_wins_vs_field": None,
+                "h2h_losses_vs_field": None,
+                "h2h_win_rate_vs_field": None,
+                "h2h_avg_beaten_length_vs_field": None,
+                "best_opponent_beaten_count": None,
+            }
+            continue
+
+        wins = 0
+        losses = 0
+        meetings = 0
+        beaten_lengths: list[float] = []
+        opponents_beaten: set[int] = set()
+
+        for (past_race_id, past_date, fp, bd) in dog_to_races.get(dog_id, []):
+            if past_date >= race_date:
+                break  # history is sorted; all remaining are on/after target
+            entries_in_past = race_to_entries.get(past_race_id, [])
+            # Look up this dog's and each opponent's finish in that past race
+            for other_dog_id, other_fp, other_bd, _ in entries_in_past:
+                if other_dog_id == dog_id or other_dog_id not in opponents:
+                    continue
+                if fp is None or other_fp is None:
+                    continue
+                meetings += 1
+                if fp < other_fp:
+                    wins += 1
+                    opponents_beaten.add(other_dog_id)
+                elif fp > other_fp:
+                    losses += 1
+                    if bd is not None:
+                        beaten_lengths.append(float(bd))
+
+        # Beta(1,3) shrinkage keeps the feature well-behaved for small samples.
+        # Prior favours "not particularly good vs this field" so the raw rate
+        # only starts to influence the estimate once meetings accumulate.
+        win_rate = (wins + 1.0) / (meetings + 4.0) if meetings >= 0 else None
+        avg_beaten = float(np.mean(beaten_lengths)) if beaten_lengths else None
+
+        rows[entry_id] = {
+            "h2h_meetings_vs_field": float(meetings),
+            "h2h_wins_vs_field": float(wins),
+            "h2h_losses_vs_field": float(losses),
+            "h2h_win_rate_vs_field": win_rate,
+            "h2h_avg_beaten_length_vs_field": avg_beaten,
+            "best_opponent_beaten_count": float(len(opponents_beaten)),
+        }
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame.from_dict(rows, orient="index")
+    df.index.name = "race_entry_id"
+    logger.info(
+        "H2H: computed head-to-head features for %d/%d requested entries",
+        len(df), len(requested),
+    )
+    return df
 
 
 def compute_elo_features_batch(

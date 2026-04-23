@@ -25,6 +25,7 @@ from app.models.track import Track
 from ml.race_features import (
     compute_builtin_features_batch,
     compute_elo_features_batch,
+    compute_h2h_features_batch,
 )
 
 
@@ -259,6 +260,54 @@ def test_elo_handles_unresulted_prediction_race(db):
     # Simplest check: ratings strictly between min and max baseline ratings
     for col in ("dog_elo", "field_avg_elo", "field_max_elo"):
         assert df[col].notna().all()
+
+
+def test_h2h_tracks_wins_and_losses_within_field(db):
+    _track, dogs, races = _seed_simple(db)
+    # The last race has all 4 dogs with a stable skill ordering — by then
+    # Alpha has beaten every other dog many times.
+    last_race = max(races, key=lambda r: r.race_date)
+    last_entries = (
+        db.query(RaceEntry)
+        .filter(RaceEntry.race_id == last_race.id)
+        .all()
+    )
+    entry_ids = [e.id for e in last_entries]
+
+    df = compute_h2h_features_batch(db, entry_ids)
+    assert not df.empty
+    assert set(df.columns) >= {
+        "h2h_meetings_vs_field",
+        "h2h_wins_vs_field",
+        "h2h_losses_vs_field",
+        "h2h_win_rate_vs_field",
+        "h2h_avg_beaten_length_vs_field",
+        "best_opponent_beaten_count",
+    }
+
+    name_to_entry = {}
+    for e in last_entries:
+        dog = db.query(Dog).filter(Dog.id == e.dog_id).first()
+        name_to_entry[dog.name] = e.id
+
+    # Every dog has raced with the other three in every prior race, so
+    # meetings should be: 11 prior races * 3 opponents = 33
+    for dog_name in ("Alpha", "Bravo", "Charlie", "Delta"):
+        meetings = df.loc[name_to_entry[dog_name], "h2h_meetings_vs_field"]
+        assert meetings == 33
+
+    # Alpha (fastest) should have the highest win rate vs field
+    win_rate_alpha = df.loc[name_to_entry["Alpha"], "h2h_win_rate_vs_field"]
+    win_rate_delta = df.loc[name_to_entry["Delta"], "h2h_win_rate_vs_field"]
+    assert win_rate_alpha > win_rate_delta
+
+    # Alpha should have beaten all 3 opponents at least once
+    assert df.loc[name_to_entry["Alpha"], "best_opponent_beaten_count"] == 3
+
+
+def test_h2h_returns_empty_on_empty_input(db):
+    df = compute_h2h_features_batch(db, [])
+    assert df.empty
 
 
 def test_speed_figure_orders_with_skill(db):

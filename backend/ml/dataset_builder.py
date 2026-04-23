@@ -770,6 +770,11 @@ _HIGHER_IS_BETTER = {
     "dog_elo",
     "dog_elo_at_distance",
     "dog_elo_at_track",
+    # Comment-derived rates where higher = better
+    "quick_away_rate_last10",
+    "led_at_bend1_rate_last10",
+    "finish_well_rate_last10",
+    "clear_win_rate_last10",
     # "mean_sp_last5" stays in the lower-is-better camp: shorter price = better
     # market assessment, even though numerically smaller.
 }
@@ -845,6 +850,11 @@ def add_race_relative_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataF
         "dog_elo_at_track",
         # Tier 7 — class gap vs field median (lower index = higher class = better)
         "dog_median_career_grade_index",
+        # Comment-derived — strong signals benefit from within-race comparison
+        "quick_away_rate_last10",
+        "led_at_bend1_rate_last10",
+        "finish_well_rate_last10",
+        "clear_win_rate_last10",
     ]
 
     cols_to_process = [c for c in KEY_FEATURES if c in X.columns]

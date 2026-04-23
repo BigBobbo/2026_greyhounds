@@ -310,6 +310,106 @@ def test_h2h_returns_empty_on_empty_input(db):
     assert df.empty
 
 
+def test_comment_derived_features_surface_through_batch(db):
+    """Verify the structured comment parser propagates through the batch
+    pipeline: when we seed every race with specific comments, the per-dog
+    rate features should reflect what was actually parsed."""
+    track = Track(name="CmtTrack", code="CMT", active=True)
+    db.add(track)
+    db.commit()
+
+    dog = Dog(name="Runner", trainer_name="Anon", birth_date=date(2023, 1, 1))
+    db.add(dog)
+    db.commit()
+
+    # Need a 2-dog field so the race is valid in our schema
+    dog2 = Dog(name="Filler", trainer_name="Anon", birth_date=date(2023, 1, 1))
+    db.add(dog2)
+    db.commit()
+
+    # Seed 10 resulted races; in 7 of them Runner is "EP Ld 1", in 3 "SAw Fd".
+    comments = ["EP Ld 1"] * 7 + ["SAw Fd Ck 2"] * 3
+    target_race = None
+    for i, comment in enumerate(comments):
+        race = Race(
+            track_id=track.id,
+            race_date=date(2025, 2, 1) + timedelta(days=i),
+            race_time=time(19, 30),
+            race_number=i + 1,
+            distance_m=525,
+            grade="A3",
+            race_type="flat",
+            going="standard",
+            num_runners=2,
+            status="resulted",
+        )
+        db.add(race)
+        db.commit()
+        # Runner wins 7, loses 3 — matches the EP/SAw pattern
+        runner_pos = 1 if comment.startswith("EP") else 2
+        filler_pos = 2 if runner_pos == 1 else 1
+        db.add(RaceEntry(
+            race_id=race.id, dog_id=dog.id, trap=1,
+            finish_position=runner_pos, finish_time=29.0 + 0.1 * runner_pos,
+            adjusted_time=29.0 + 0.1 * runner_pos,
+            sectional_time=5.0,
+            weight_kg=32.0, sp_decimal=2.0, comment=comment,
+        ))
+        db.add(RaceEntry(
+            race_id=race.id, dog_id=dog2.id, trap=2,
+            finish_position=filler_pos, finish_time=29.0 + 0.1 * filler_pos,
+            adjusted_time=29.0 + 0.1 * filler_pos,
+            sectional_time=5.0,
+            weight_kg=32.0, sp_decimal=2.0, comment="",
+        ))
+        db.commit()
+        target_race = race
+
+    # Now add an 11th (target) race — features for this entry should reflect
+    # the previous 10 history rows of Runner.
+    target_race = Race(
+        track_id=track.id,
+        race_date=date(2025, 2, 20),
+        race_time=time(19, 30),
+        race_number=99,
+        distance_m=525,
+        grade="A3",
+        race_type="flat",
+        going="standard",
+        num_runners=2,
+        status="resulted",
+    )
+    db.add(target_race)
+    db.commit()
+    target_entry = RaceEntry(
+        race_id=target_race.id, dog_id=dog.id, trap=1,
+        finish_position=1, finish_time=29.1, adjusted_time=29.1,
+        sectional_time=5.0, weight_kg=32.0, sp_decimal=2.0,
+    )
+    db.add(target_entry)
+    db.add(RaceEntry(
+        race_id=target_race.id, dog_id=dog2.id, trap=2,
+        finish_position=2, finish_time=29.2, adjusted_time=29.2,
+        sectional_time=5.0, weight_kg=32.0, sp_decimal=2.0,
+    ))
+    db.commit()
+
+    df = compute_builtin_features_batch(db, [target_entry.id])
+    row = df.loc[target_entry.id]
+
+    # 7 of 10 prior comments were "EP Ld 1"
+    assert abs(row["running_style_ep_rate_last10"] - 0.7) < 1e-6
+    assert abs(row["led_at_bend1_rate_last10"] - 0.7) < 1e-6
+    # 3 of 10 were "SAw Fd Ck 2"
+    assert abs(row["slow_away_rate_last10"] - 0.3) < 1e-6
+    assert abs(row["faded_rate_last10"] - 0.3) < 1e-6
+    assert abs(row["trouble_bend2_rate_last10"] - 0.3) < 1e-6
+    # No "MP" / "LP" / wide / railed tokens in the seed comments
+    assert row["running_style_mp_rate_last10"] == 0.0
+    assert row["running_style_lp_rate_last10"] == 0.0
+    assert row["ran_wide_rate_last10"] == 0.0
+
+
 def test_speed_figure_orders_with_skill(db):
     _track, dogs, races = _seed_simple(db)
     last_race = max(races, key=lambda r: r.race_date)

@@ -27,6 +27,7 @@ from app.models.race import Race
 from app.models.race_entry import RaceEntry
 from app.models.track import Track
 from ml.elo import EloRatings
+from ml.race_comments import COMMENT_FEATURE_NAMES, parse_race_comment
 
 logger = logging.getLogger(__name__)
 
@@ -934,6 +935,7 @@ def compute_builtin_features_batch(
                     "trouble_recovery_ratio_last10": None,
                     "clean_run_count_last10": 0.0,
                     "trouble_run_count_last10": 0.0,
+                    "comment_rates": {name: None for name in COMMENT_FEATURE_NAMES},
                 }
             dogs_done += 1
             continue
@@ -975,6 +977,11 @@ def compute_builtin_features_batch(
             sf = _speed_figure(float(at), tid, dst)
             if sf is not None:
                 h_sf[i] = sf
+
+        # Precompute parsed race comments once per history row.  Each parsed
+        # result is a dict of flags; we aggregate into rates over last-10
+        # windows during the per-date loop below.
+        h_parsed = [parse_race_comment(c) for c in h_comments]
 
         # For each needed race_date, find the cutoff index via binary search
         sorted_needed = sorted(race_dates_needed)
@@ -1023,6 +1030,7 @@ def compute_builtin_features_batch(
                     "trouble_recovery_ratio_last10": None,
                     "clean_run_count_last10": 0.0,
                     "trouble_run_count_last10": 0.0,
+                    "comment_rates": {name: None for name in COMMENT_FEATURE_NAMES},
                 }
                 continue
 
@@ -1305,6 +1313,53 @@ def compute_builtin_features_batch(
                 slope = float(np.polyfit(xs, sf5_valid.astype(float), 1)[0])
                 sf_trend = slope
 
+            # Comment-derived rates over the last 10 history rows.
+            # h_parsed was precomputed once per history; slice here.
+            parsed_last10 = h_parsed[slice(max(0, cut - 10), cut)]
+            pos_last10_for_cmt = h_positions[slice(max(0, cut - 10), cut)]
+            cmt_n = len(parsed_last10)
+            if cmt_n > 0:
+                def _rate(key: str) -> float:
+                    return float(sum(1 for p in parsed_last10 if p.get(key))) / cmt_n
+
+                def _bend_rate(field: str, bend: int) -> float:
+                    return float(
+                        sum(1 for p in parsed_last10 if bend in p.get(field, set()))
+                    ) / cmt_n
+
+                clear_win_hits = 0
+                for p, pos in zip(parsed_last10, pos_last10_for_cmt):
+                    if pos is None or (isinstance(pos, float) and np.isnan(pos)):
+                        continue
+                    if p.get("cleared_field") and int(pos) == 1:
+                        clear_win_hits += 1
+                clear_win_rate = float(clear_win_hits) / cmt_n
+
+                comment_rates = {
+                    "running_style_ep_rate_last10": _rate("is_early_pace"),
+                    "running_style_mp_rate_last10": _rate("is_mid_pace"),
+                    "running_style_lp_rate_last10": _rate("is_late_pace"),
+                    "quick_away_rate_last10": _rate("quick_away"),
+                    "slow_away_rate_last10": _rate("slow_away"),
+                    "awkward_start_rate_last10": _rate("awkward_start"),
+                    "led_at_bend1_rate_last10": _bend_rate("led_bends", 1),
+                    "led_at_bend2_rate_last10": _bend_rate("led_bends", 2),
+                    "led_at_bend3_rate_last10": _bend_rate("led_bends", 3),
+                    "led_at_bend4_rate_last10": _bend_rate("led_bends", 4),
+                    "disputed_lead_rate_last10": _rate("disputed_lead"),
+                    "finish_well_rate_last10": _rate("finished_well"),
+                    "faded_rate_last10": _rate("faded"),
+                    "trouble_bend1_rate_last10": _bend_rate("trouble_bends", 1),
+                    "trouble_bend2_rate_last10": _bend_rate("trouble_bends", 2),
+                    "trouble_bend3_rate_last10": _bend_rate("trouble_bends", 3),
+                    "trouble_bend4_rate_last10": _bend_rate("trouble_bends", 4),
+                    "railed_rate_last10": _rate("railed"),
+                    "ran_wide_rate_last10": _rate("ran_wide"),
+                    "clear_win_rate_last10": clear_win_rate,
+                }
+            else:
+                comment_rates = {name: None for name in COMMENT_FEATURE_NAMES}
+
             hist_agg[(dog_id, rd)] = {
                 "grade_movement_last": grade_idx,
                 "days_since_last_hist": days_since,
@@ -1342,6 +1397,7 @@ def compute_builtin_features_batch(
                 "trouble_recovery_ratio_last10": trouble_recovery,
                 "clean_run_count_last10": float(len(clean_positions)),
                 "trouble_run_count_last10": float(len(trouble_positions)),
+                "comment_rates": comment_rates,
             }
 
         dogs_done += 1
@@ -1649,6 +1705,12 @@ def compute_builtin_features_batch(
         f["clean_run_count_last10"] = agg.get("clean_run_count_last10")
         f["trouble_run_count_last10"] = agg.get("trouble_run_count_last10")
 
+        # 21. Comment-derived features (running style, trip shape, stamina,
+        # bend-by-bend trouble, rail/wide preference, clear wins).
+        comment_rates = agg.get("comment_rates") or {}
+        for name in COMMENT_FEATURE_NAMES:
+            f[name] = comment_rates.get(name)
+
         result_rows[entry_id] = f
 
     logger.info("Batch builtin: done, computed features for %d entries", len(result_rows))
@@ -1731,6 +1793,8 @@ BUILTIN_FEATURE_NAMES = [
     "trouble_recovery_ratio_last10",
     "clean_run_count_last10",
     "trouble_run_count_last10",
+    # Comment-derived structured features (parsed from free-text comments)
+    *COMMENT_FEATURE_NAMES,
 ]
 
 

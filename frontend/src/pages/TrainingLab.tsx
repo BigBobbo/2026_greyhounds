@@ -358,11 +358,15 @@ export default function TrainingLab() {
                 <span>
                   <span className="font-medium">Built-in race-context features</span>
                   <span className="block text-xs text-gray-500">
-                    ~60 features: trap bias (incl. going-conditional), grade
+                    ~80 features: trap bias (incl. going-conditional), grade
                     movement, days since last, weight change, early-speed ratio,
                     front-runner, trainer/sire stats, speed figures (Beyer-style),
                     class dynamics, stamina profile, first-time flags,
-                    workload/fitness cycle, trouble-adjusted runs, etc.
+                    workload/fitness cycle, trouble-adjusted runs, plus
+                    comment-derived running style (EP/MP/LP), break quality
+                    (QAw/SAw/Awk), led-at-bend rates, finish-well / faded
+                    markers, bend-by-bend trouble, rail vs wide preference,
+                    and clear-win rate.
                   </span>
                 </span>
               </label>

@@ -285,7 +285,7 @@ export default function TrainingLab() {
                     value={optunTrials}
                     onChange={(e) => setOptunTrials(parseInt(e.target.value) || 50)}
                     min={10}
-                    max={1000}
+                    max={10000}
                     className="border rounded px-2 py-1 w-20 text-xs ml-2"
                   />
                   <span className="text-xs text-gray-400">trials</span>

@@ -37,6 +37,7 @@ def build_dataset(
     include_sp_features: bool = True,
     include_pace_shape_features: bool = True,
     include_race_relative_features: bool = True,
+    include_elo_features: bool = True,
     heartbeat_fn: Any | None = None,
 ) -> dict[str, Any]:
     """
@@ -131,6 +132,23 @@ def build_dataset(
                     X = X.drop(columns=overlap)
                 X = X.join(builtin_X, how="outer")
             logger.info("Added %d built-in features, matrix now %d columns", builtin_X.shape[1], X.shape[1])
+
+    # Compute ELO ratings (overall, per-distance, per-track) and field-relative
+    # ELO features in one chronological pass over all resulted races.
+    if include_elo_features:
+        logger.info("Computing ELO rating features...")
+        from ml.race_features import compute_elo_features_batch
+        elo_X = compute_elo_features_batch(db, entry_ids, heartbeat_fn=heartbeat_fn)
+        if not elo_X.empty:
+            if X.empty:
+                X = elo_X
+            else:
+                overlap = X.columns.intersection(elo_X.columns)
+                if len(overlap) > 0:
+                    X = X.drop(columns=overlap)
+                X = X.join(elo_X, how="outer")
+            logger.info("Added %d ELO features, matrix now %d columns",
+                        elo_X.shape[1], X.shape[1])
 
     if X.empty:
         raise ValueError("Feature matrix is empty — have features been materialized?")
@@ -444,6 +462,31 @@ def _add_pace_shape_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataFra
     return X
 
 
+# Features for which a higher value indicates a better dog.  Used to flip
+# the sign of gap-to-best / rank semantics so positive deltas always mean
+# "this dog is closer to the best in the field".
+_HIGHER_IS_BETTER = {
+    "win_rate_last10",
+    "place_rate_last10",
+    "career_runs",
+    "bayesian_win_rate",
+    "bayesian_place_rate",
+    "trainer_win_rate",
+    "trainer_place_rate",
+    "trainer_win_rate_at_track",
+    "sire_progeny_win_rate",
+    "speed_figure_best_last10",
+    "speed_figure_mean_last5",
+    "speed_figure_ewm_last10",
+    "career_peak_speed_figure",
+    "dog_elo",
+    "dog_elo_at_distance",
+    "dog_elo_at_track",
+    # "mean_sp_last5" stays in the lower-is-better camp: shorter price = better
+    # market assessment, even though numerically smaller.
+}
+
+
 def add_race_relative_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataFrame:
     """Add race-relative features that compare each dog to the race field.
 
@@ -451,10 +494,17 @@ def add_race_relative_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataF
     they need to see all dogs in the same race.  They are derived from the
     existing per-dog features by computing within-race statistics.
 
-    For each numeric feature column, adds:
-      - {col}__vs_field_mean: dog's value minus race average
-      - {col}__rank_in_field: 1-based rank within race (1 = best for time-like
-        features, 1 = highest for rate-like features)
+    For each tracked feature column, adds:
+      - {col}__vs_field        — dog's value minus race mean
+      - {col}__rank            — 1-based rank within race (1 = best, with the
+                                  direction flipped per `_HIGHER_IS_BETTER`)
+      - {col}__z_in_field      — within-race z-score (signed so positive =
+                                  better than the field on this metric)
+      - {col}__gap_to_best     — distance from the best dog in the field
+                                  (always >= 0 — large positive = far from
+                                  best, 0 = is the best)
+      - {col}__is_field_best   — 1.0 if dog has the best value in the field,
+                                  else 0.0
 
     Also adds:
       - num_runners: how many dogs in this race
@@ -465,46 +515,95 @@ def add_race_relative_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataF
     X = X.copy()
     race_ids_aligned = race_ids.loc[X.index]
 
-    # Pick key features to create relative versions of (avoid creating
-    # relative features of relative features or niche columns)
+    # Broader set: include adjusted-time, Bayesian rates, trainer/sire,
+    # speed-figure and ELO so the rank model sees relative versions of the
+    # features that actually carry the most information.
     KEY_FEATURES = [
+        # Time / pace
         "mean_finish_time_last5",
         "min_finish_time_last10",
+        "mean_adjusted_time_last5",
+        "best_adjusted_time_last10",
+        "ewm_adjusted_time_last10",
+        "mean_sectional_last5",
+        "stdev_finish_time_last5",
+        "mean_beaten_dist_last5",
+        # Position-based
         "mean_position_last5",
+        "ewm_position_last10",
         "win_rate_last10",
         "place_rate_last10",
-        "mean_sectional_last5",
-        "mean_beaten_dist_last5",
+        "bayesian_win_rate",
+        "bayesian_place_rate",
+        # Market
         "mean_sp_last5",
+        # Experience / freshness
         "career_runs",
         "days_since_last_race",
-        "stdev_finish_time_last5",
+        # Trainer / sire / track
+        "trainer_win_rate",
+        "trainer_place_rate",
+        "trainer_win_rate_at_track",
+        "sire_progeny_win_rate",
+        "track_speed_rating",
+        # Tier 3 — speed figure
+        "speed_figure_best_last10",
+        "speed_figure_mean_last5",
+        "speed_figure_ewm_last10",
+        "career_peak_speed_figure",
+        # Tier 1 — ELO
+        "dog_elo",
+        "dog_elo_at_distance",
+        "dog_elo_at_track",
     ]
 
     cols_to_process = [c for c in KEY_FEATURES if c in X.columns]
 
-    for col in cols_to_process:
-        # vs field mean: how does this dog compare to the average of the field
-        race_mean = X[col].groupby(race_ids_aligned).transform("mean")
-        X[f"{col}__vs_field"] = X[col] - race_mean
+    new_cols: dict[str, pd.Series] = {}
 
-        # Rank within race (ascending = lower values get rank 1)
-        # For time/position/beaten_dist: lower is better, so ascending rank
-        # For win_rate/place_rate/career_runs: higher is better, so descending rank
-        higher_is_better = col in (
-            "win_rate_last10", "place_rate_last10", "career_runs",
-            "mean_sp_last5",  # higher SP = longer shot, but here we want market rank
-        )
-        X[f"{col}__rank"] = X[col].groupby(race_ids_aligned).rank(
+    for col in cols_to_process:
+        col_vals = X[col]
+        higher_is_better = col in _HIGHER_IS_BETTER
+        sign = 1.0 if higher_is_better else -1.0
+
+        race_mean = col_vals.groupby(race_ids_aligned).transform("mean")
+        race_std = col_vals.groupby(race_ids_aligned).transform("std")
+
+        # vs field mean — kept in raw direction for backwards compatibility
+        new_cols[f"{col}__vs_field"] = col_vals - race_mean
+
+        # Rank within race (1 = best dog in the field on this metric)
+        new_cols[f"{col}__rank"] = col_vals.groupby(race_ids_aligned).rank(
             ascending=not higher_is_better, method="min",
         )
+
+        # z-score, signed so positive = better than the field
+        z_raw = (col_vals - race_mean) / race_std.replace(0, np.nan)
+        z_signed = sign * z_raw
+        new_cols[f"{col}__z_in_field"] = z_signed.replace([np.inf, -np.inf], np.nan)
+
+        # Gap to best in the field — always >= 0
+        if higher_is_better:
+            best = col_vals.groupby(race_ids_aligned).transform("max")
+            new_cols[f"{col}__gap_to_best"] = best - col_vals
+        else:
+            best = col_vals.groupby(race_ids_aligned).transform("min")
+            new_cols[f"{col}__gap_to_best"] = col_vals - best
+
+        # Is field best — flag the (tied) leader on this metric
+        new_cols[f"{col}__is_field_best"] = (
+            new_cols[f"{col}__gap_to_best"] == 0
+        ).astype(float)
+
+    if new_cols:
+        X = pd.concat([X, pd.DataFrame(new_cols, index=X.index)], axis=1)
 
     # Number of runners in the race
     X["num_runners"] = race_ids_aligned.groupby(race_ids_aligned).transform("count").astype(float)
 
     logger.info(
-        "Added %d race-relative features (%d base columns x 2 + num_runners)",
-        len(cols_to_process) * 2 + 1, len(cols_to_process),
+        "Added %d race-relative features (%d base columns x 5 + num_runners)",
+        len(cols_to_process) * 5 + 1, len(cols_to_process),
     )
 
     return X

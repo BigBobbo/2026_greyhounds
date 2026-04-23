@@ -26,8 +26,16 @@ from app.models.dog import Dog
 from app.models.race import Race
 from app.models.race_entry import RaceEntry
 from app.models.track import Track
+from ml.elo import EloRatings
 
 logger = logging.getLogger(__name__)
+
+# Speed figure: scale to centre around 100 with ~20 points per stdev so values
+# are roughly comparable in feel to industry "speed ratings" (Beyer/Timeform).
+_SPEED_FIGURE_CENTER = 100.0
+_SPEED_FIGURE_STDEV_SCALE = 20.0
+_SPEED_FIGURE_MIN_BUCKET = 30  # require this many runs in a (track, distance)
+                               # bucket before trusting its baseline
 
 # Ordered grade list for computing grade movement (lower index = higher class)
 GRADE_ORDER = [
@@ -751,6 +759,78 @@ def compute_builtin_features_batch(
         if row.cnt and row.cnt >= 50 and row.avg_time:
             track_avg_time[(row.track_id, row.distance_m)] = float(row.avg_time)
 
+    # --- 6b. Speed-figure baselines: mean & stdev of adjusted_time per
+    # (track, distance) bucket.  Used to normalise every historical run into
+    # a Beyer-style speed figure that's comparable across tracks/distances.
+    logger.info("Batch builtin: computing speed-figure baselines...")
+    speed_baseline_rows = (
+        db.query(
+            Race.track_id,
+            Race.distance_m,
+            func.count(RaceEntry.id).label("cnt"),
+            func.avg(RaceEntry.adjusted_time).label("mean_time"),
+            # SQLite/SQLAlchemy stddev portability: use a generic AVG of
+            # squared deviation via a subquery would be heavy.  We compute
+            # stdev in Python below from a second pass instead.
+        )
+        .join(Race, RaceEntry.race_id == Race.id)
+        .filter(
+            Race.status == "resulted",
+            RaceEntry.adjusted_time.isnot(None),
+        )
+        .group_by(Race.track_id, Race.distance_m)
+        .all()
+    )
+    sf_means: dict[tuple, float] = {}
+    sf_counts: dict[tuple, int] = {}
+    for row in speed_baseline_rows:
+        if row.cnt and row.cnt >= _SPEED_FIGURE_MIN_BUCKET and row.mean_time:
+            key = (row.track_id, row.distance_m)
+            sf_means[key] = float(row.mean_time)
+            sf_counts[key] = int(row.cnt)
+
+    # Second pass to compute population stdev per bucket (one query, then
+    # aggregate in Python — keeps us off DB-specific stddev functions).
+    sf_stdevs: dict[tuple, float] = {}
+    if sf_means:
+        ssd_rows = (
+            db.query(
+                Race.track_id,
+                Race.distance_m,
+                RaceEntry.adjusted_time,
+            )
+            .join(Race, RaceEntry.race_id == Race.id)
+            .filter(
+                Race.status == "resulted",
+                RaceEntry.adjusted_time.isnot(None),
+            )
+            .all()
+        )
+        ssd_accum: dict[tuple, list[float]] = defaultdict(list)
+        for r in ssd_rows:
+            key = (r.track_id, r.distance_m)
+            if key in sf_means:
+                ssd_accum[key].append(float(r.adjusted_time) - sf_means[key])
+        for key, devs in ssd_accum.items():
+            if len(devs) >= _SPEED_FIGURE_MIN_BUCKET:
+                ssq = sum(d * d for d in devs)
+                std = (ssq / len(devs)) ** 0.5
+                if std > 1e-6:
+                    sf_stdevs[key] = std
+        del ssd_rows, ssd_accum
+        gc.collect()
+
+    def _speed_figure(adj_time: float, track_id: int, distance_m: int) -> float | None:
+        key = (track_id, distance_m)
+        mean = sf_means.get(key)
+        std = sf_stdevs.get(key)
+        if mean is None or std is None:
+            return None
+        return (
+            _SPEED_FIGURE_CENTER
+            + _SPEED_FIGURE_STDEV_SCALE * (mean - adj_time) / std
+        )
+
     # --- 7. Precompute per-(dog, race_date) history aggregates ---
     # Instead of filtering history DataFrames 300k times in a Python loop,
     # we iterate each dog's sorted history ONCE and emit aggregates keyed
@@ -783,6 +863,11 @@ def compute_builtin_features_batch(
                     "career_races": 0.0,
                     "position_consistency": None,
                     "track_speed_best": {},  # (track_id, distance_m) -> best_time
+                    "speed_figure_best_last10": None,
+                    "speed_figure_mean_last5": None,
+                    "speed_figure_ewm_last10": None,
+                    "speed_figure_trend_last5": None,
+                    "career_peak_speed_figure": None,
                 }
             dogs_done += 1
             continue
@@ -802,6 +887,27 @@ def compute_builtin_features_batch(
         h_positions = hist_sorted["finish_position"].values
         h_adj_time = hist_sorted["adjusted_time"].values
         h_distance = hist_sorted["distance_m"].values
+        h_track = hist_sorted["track_id"].values
+
+        # Precompute speed figures for the whole sorted history once.
+        # NaN where the bucket has no baseline or adjusted_time is missing.
+        h_sf = np.full(n_hist, np.nan, dtype=float)
+        for i in range(n_hist):
+            at = h_adj_time[i]
+            if at is None or (isinstance(at, float) and np.isnan(at)):
+                continue
+            tid_raw = h_track[i]
+            dst_raw = h_distance[i]
+            if tid_raw is None or dst_raw is None:
+                continue
+            try:
+                tid = int(tid_raw)
+                dst = int(dst_raw)
+            except (TypeError, ValueError):
+                continue
+            sf = _speed_figure(float(at), tid, dst)
+            if sf is not None:
+                h_sf[i] = sf
 
         # For each needed race_date, find the cutoff index via binary search
         sorted_needed = sorted(race_dates_needed)
@@ -822,6 +928,11 @@ def compute_builtin_features_batch(
                     "career_races": 0.0,
                     "position_consistency": None,
                     "track_speed_best": {},
+                    "speed_figure_best_last10": None,
+                    "speed_figure_mean_last5": None,
+                    "speed_figure_ewm_last10": None,
+                    "speed_figure_trend_last5": None,
+                    "career_peak_speed_figure": None,
                 }
                 continue
 
@@ -885,6 +996,39 @@ def compute_builtin_features_batch(
                     if key[0] not in best_times or at < best_times[key[0]]:
                         best_times[key[0]] = float(at)
 
+            # Speed-figure aggregates from precomputed h_sf series
+            sf_window10 = h_sf[slice(max(0, cut - 10), cut)]
+            sf_window5 = h_sf[slice(max(0, cut - 5), cut)]
+            sf_career = h_sf[:cut]
+
+            sf10_valid = sf_window10[~np.isnan(sf_window10)]
+            sf5_valid = sf_window5[~np.isnan(sf_window5)]
+            sf_career_valid = sf_career[~np.isnan(sf_career)]
+
+            sf_best10 = float(sf10_valid.max()) if sf10_valid.size else None
+            sf_mean5 = float(sf5_valid.mean()) if sf5_valid.size else None
+            sf_peak = float(sf_career_valid.max()) if sf_career_valid.size else None
+
+            # EWM (alpha=0.5) over last 10, walking forward through valid points
+            sf_ewm10: float | None = None
+            if sf10_valid.size:
+                weight = 0.0
+                acc = 0.0
+                w = 1.0
+                for v in sf10_valid:
+                    acc += w * v
+                    weight += w
+                    w *= 0.5
+                sf_ewm10 = float(acc / weight) if weight > 0 else None
+
+            # Trend (slope of speed figure over last 5)
+            sf_trend: float | None = None
+            if sf5_valid.size >= 3:
+                xs = np.arange(sf5_valid.size, dtype=float)
+                # Higher SF is better, so a positive slope = improving
+                slope = float(np.polyfit(xs, sf5_valid.astype(float), 1)[0])
+                sf_trend = slope
+
             hist_agg[(dog_id, rd)] = {
                 "grade_movement_last": grade_idx,
                 "days_since_last_hist": days_since,
@@ -894,6 +1038,11 @@ def compute_builtin_features_batch(
                 "career_races": career,
                 "position_consistency": pos_consistency,
                 "track_speed_best": best_times,
+                "speed_figure_best_last10": sf_best10,
+                "speed_figure_mean_last5": sf_mean5,
+                "speed_figure_ewm_last10": sf_ewm10,
+                "speed_figure_trend_last5": sf_trend,
+                "career_peak_speed_figure": sf_peak,
             }
 
         dogs_done += 1
@@ -1010,6 +1159,19 @@ def compute_builtin_features_batch(
         else:
             f["track_speed_rating"] = None
 
+        # 14. Speed figure aggregates (Beyer-style normalisation)
+        f["speed_figure_best_last10"] = agg.get("speed_figure_best_last10")
+        f["speed_figure_mean_last5"] = agg.get("speed_figure_mean_last5")
+        f["speed_figure_ewm_last10"] = agg.get("speed_figure_ewm_last10")
+        f["speed_figure_trend_last5"] = agg.get("speed_figure_trend_last5")
+        career_peak = agg.get("career_peak_speed_figure")
+        f["career_peak_speed_figure"] = career_peak
+        recent = agg.get("speed_figure_ewm_last10")
+        if recent is not None and career_peak is not None and career_peak != 0:
+            f["recent_vs_peak_speed_figure"] = recent - career_peak
+        else:
+            f["recent_vs_peak_speed_figure"] = None
+
         result_rows[entry_id] = f
 
     logger.info("Batch builtin: done, computed features for %d entries", len(result_rows))
@@ -1045,4 +1207,193 @@ BUILTIN_FEATURE_NAMES = [
     "sire_progeny_win_rate",
     "sire_progeny_mean_time_at_dist",
     "track_speed_rating",
+    # Tier 3 — speed figure (Beyer-style normalised time ratings)
+    "speed_figure_best_last10",
+    "speed_figure_mean_last5",
+    "speed_figure_ewm_last10",
+    "speed_figure_trend_last5",
+    "career_peak_speed_figure",
+    "recent_vs_peak_speed_figure",
 ]
+
+
+# Registry of ELO feature names emitted by compute_elo_features_batch
+ELO_FEATURE_NAMES = [
+    "dog_elo",
+    "dog_elo_at_distance",
+    "dog_elo_at_track",
+    "dog_elo_races",
+    "field_avg_elo",
+    "field_max_elo",
+    "elo_rank_in_field",
+    "elo_gap_to_best",
+    "elo_gap_to_avg",
+]
+
+
+def compute_elo_features_batch(
+    db: Session,
+    entry_ids: list[int],
+    heartbeat_fn=None,
+    k: float = 24.0,
+    initial: float = 1500.0,
+) -> pd.DataFrame:
+    """Compute pre-race ELO ratings (overall, per-track, per-distance) for a
+    set of entries.
+
+    Walks every resulted race in chronological order, maintaining three
+    independent ELO tables (overall, per-distance, per-track).  For each
+    requested entry, snapshots the dog's pre-race rating *before* applying
+    that race's update — ensuring no leakage from the entry's own outcome.
+
+    Field-relative features (rank, gap-to-best, gap-to-avg, average) are
+    computed within each requested race using the snapshotted pre-race
+    overall ELO.
+
+    Returns a DataFrame indexed by race_entry_id.  Returns an empty
+    DataFrame when entry_ids is empty.
+    """
+    def _hb():
+        if heartbeat_fn is not None:
+            heartbeat_fn()
+
+    if not entry_ids:
+        return pd.DataFrame()
+
+    requested_set = set(entry_ids)
+
+    logger.info(
+        "ELO: loading all resulted entries up to max race date for %d targets...",
+        len(entry_ids),
+    )
+
+    # Find the latest race date among the requested entries; we only need to
+    # walk history up through that date.  Includes unresulted races so that
+    # prediction-time requests for future races are also bounded correctly.
+    target_max_date = (
+        db.query(func.max(Race.race_date))
+        .join(RaceEntry, RaceEntry.race_id == Race.id)
+        .filter(RaceEntry.id.in_(list(requested_set)))
+        .scalar()
+    )
+    if target_max_date is None:
+        return pd.DataFrame()
+
+    # Pull every resulted race entry up to (and including) target_max_date,
+    # ordered chronologically.  This is the same pass used by Glicko-style
+    # rating systems — we must process races in the order they happened.
+    # Also include requested entries whose race is NOT yet resulted (e.g.
+    # live prediction time) so we can still snapshot pre-race ELO for them.
+    requested_ids_list = list(requested_set)
+    rows = (
+        db.query(
+            RaceEntry.id.label("entry_id"),
+            RaceEntry.race_id,
+            RaceEntry.dog_id,
+            RaceEntry.finish_position,
+            Race.status.label("race_status"),
+            Race.race_date,
+            Race.race_time,
+            Race.track_id,
+            Race.distance_m,
+        )
+        .join(Race, RaceEntry.race_id == Race.id)
+        .filter(
+            (
+                (Race.status == "resulted") & (Race.race_date <= target_max_date)
+            ) | (
+                RaceEntry.id.in_(requested_ids_list)
+            ),
+        )
+        .order_by(Race.race_date.asc(), Race.race_time.asc().nullsfirst(),
+                  Race.id.asc())
+        .all()
+    )
+    _hb()
+
+    if not rows:
+        return pd.DataFrame()
+
+    elo_overall = EloRatings(k=k, initial=initial)
+    elo_distance: dict[int, EloRatings] = {}
+    elo_track: dict[int, EloRatings] = {}
+
+    # Group rows by race_id while preserving order
+    current_race_id = None
+    current_group: list = []
+    snapshots: dict[int, dict[str, float | int | None]] = {}
+
+    def _flush(group):
+        if not group:
+            return
+        race_track_id = group[0].track_id
+        race_distance = group[0].distance_m
+        dog_ids = [r.dog_id for r in group]
+
+        track_book = elo_track.setdefault(
+            race_track_id, EloRatings(k=k, initial=initial),
+        )
+        dist_book = elo_distance.setdefault(
+            race_distance, EloRatings(k=k, initial=initial),
+        )
+
+        # Snapshot pre-race ELO (overall + context) for any requested entries
+        pre_overall = {d: elo_overall.get(d) for d in dog_ids}
+        avg_elo = sum(pre_overall.values()) / len(pre_overall)
+        max_elo = max(pre_overall.values())
+        # rank_in_field: 1 = highest ELO
+        sorted_dogs = sorted(pre_overall.items(), key=lambda x: -x[1])
+        rank_map = {d: i + 1 for i, (d, _) in enumerate(sorted_dogs)}
+
+        for entry in group:
+            if entry.entry_id not in requested_set:
+                continue
+            d = entry.dog_id
+            dog_elo = pre_overall[d]
+            snapshots[entry.entry_id] = {
+                "dog_elo": dog_elo,
+                "dog_elo_at_distance": dist_book.get(d),
+                "dog_elo_at_track": track_book.get(d),
+                "dog_elo_races": float(elo_overall.count(d)),
+                "field_avg_elo": avg_elo,
+                "field_max_elo": max_elo,
+                "elo_rank_in_field": float(rank_map[d]),
+                "elo_gap_to_best": max_elo - dog_elo,
+                "elo_gap_to_avg": dog_elo - avg_elo,
+            }
+
+        # Apply updates only if the race itself is resulted.  Unresulted
+        # target races (prediction-time) must not feed back into ELO state.
+        is_resulted = group[0].race_status == "resulted"
+        if is_resulted:
+            results = [(r.dog_id, r.finish_position) for r in group
+                       if r.finish_position is not None]
+            if results:
+                elo_overall.update_race(results)
+                dist_book.update_race(results)
+                track_book.update_race(results)
+
+    races_seen = 0
+    for r in rows:
+        if r.race_id != current_race_id:
+            _flush(current_group)
+            current_group = []
+            current_race_id = r.race_id
+            races_seen += 1
+            if races_seen % 5000 == 0:
+                logger.info("ELO: processed %d races...", races_seen)
+                _hb()
+        current_group.append(r)
+    _flush(current_group)
+
+    logger.info(
+        "ELO: snapshotted ratings for %d/%d requested entries across %d races",
+        len(snapshots), len(requested_set), races_seen,
+    )
+
+    if not snapshots:
+        return pd.DataFrame()
+
+    df = pd.DataFrame.from_dict(snapshots, orient="index")
+    df.index.name = "race_entry_id"
+    return df

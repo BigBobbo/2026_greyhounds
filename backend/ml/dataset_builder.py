@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.models.race import Race
@@ -38,6 +38,8 @@ def build_dataset(
     include_pace_shape_features: bool = True,
     include_race_relative_features: bool = True,
     include_elo_features: bool = True,
+    include_odds_snapshot_features: bool = True,
+    include_h2h_features: bool = True,
     heartbeat_fn: Any | None = None,
 ) -> dict[str, Any]:
     """
@@ -150,6 +152,22 @@ def build_dataset(
             logger.info("Added %d ELO features, matrix now %d columns",
                         elo_X.shape[1], X.shape[1])
 
+    # Head-to-head features against the specific opponents in today's race
+    if include_h2h_features:
+        logger.info("Computing head-to-head features...")
+        from ml.race_features import compute_h2h_features_batch
+        h2h_X = compute_h2h_features_batch(db, entry_ids, heartbeat_fn=heartbeat_fn)
+        if not h2h_X.empty:
+            if X.empty:
+                X = h2h_X
+            else:
+                overlap = X.columns.intersection(h2h_X.columns)
+                if len(overlap) > 0:
+                    X = X.drop(columns=overlap)
+                X = X.join(h2h_X, how="outer")
+            logger.info("Added %d H2H features, matrix now %d columns",
+                        h2h_X.shape[1], X.shape[1])
+
     if X.empty:
         raise ValueError("Feature matrix is empty — have features been materialized?")
 
@@ -168,6 +186,10 @@ def build_dataset(
     # Add SP-derived features from the current race
     if include_sp_features:
         X = _add_sp_features(X, entries_df)
+
+    # Market-drift features from odds_snapshots (no-op if table is empty)
+    if include_odds_snapshot_features:
+        X = _add_odds_snapshot_features(db, X, entries_df)
 
     # Add race-relative features (compare each dog to its race field)
     if include_race_relative_features:
@@ -402,6 +424,20 @@ def _add_sp_features(X: pd.DataFrame, entries_df: pd.DataFrame) -> pd.DataFrame:
 
     SP is the single strongest predictor of race outcomes (Benter 1994).
     These features use information known before the race starts.
+
+    In addition to raw SP and the naive 1/odds implied probability, this
+    function emits:
+
+      * current_sp_log_odds           — log(sp_decimal), more linear for GBMs
+      * current_sp_devigged_prob      — 1/sp divided by the race's overround,
+                                        removing the bookmaker margin
+      * sp_rank_in_field              — 1 = favourite
+      * market_overround              — sum of 1/sp across the field
+      * is_favorite / is_second_fav   — flags for market top picks
+      * fav_gap                       — log-odds gap to the favourite; positive
+                                        = this dog is longer than the favourite
+      * second_fav_gap                — log-odds gap to the second favourite
+      * sp_vs_field_mean              — log-odds minus race log-odds mean
     """
     sp = entries_df["sp_decimal"]
     race_ids = entries_df["race_id"]
@@ -414,29 +450,220 @@ def _add_sp_features(X: pd.DataFrame, entries_df: pd.DataFrame) -> pd.DataFrame:
     X["current_sp_decimal"] = sp
     X.loc[valid_sp, "current_sp_implied_prob"] = 1.0 / sp[valid_sp]
 
+    # Log odds: more linear in skill space than raw decimal odds
+    X.loc[valid_sp, "current_sp_log_odds"] = np.log(sp[valid_sp])
+
     # SP rank within the race (1 = favourite / shortest price)
     X["sp_rank_in_field"] = sp.groupby(race_ids).rank(method="min")
 
     # Market overround per race (sum of implied probs)
-    X["market_overround"] = (
-        (1.0 / sp[valid_sp])
-        .groupby(race_ids[valid_sp])
-        .transform("sum")
-    )
+    implied = 1.0 / sp.where(valid_sp)
+    overround = implied.groupby(race_ids).transform("sum")
+    X["market_overround"] = overround
 
-    logger.info("Added 4 SP-derived features")
+    # De-vigged implied probability: rescale by overround so each race sums to 1.
+    # This removes the bookmaker margin and is a sharper estimator than the raw 1/odds.
+    devigged = implied / overround.replace(0, np.nan)
+    X["current_sp_devigged_prob"] = devigged
+
+    # Favourite / second-favourite flags
+    X["is_favorite"] = (X["sp_rank_in_field"] == 1).astype(float)
+    X["is_second_favorite"] = (X["sp_rank_in_field"] == 2).astype(float)
+
+    # Favourite gap: log-odds gap to the shortest-priced dog in the race.
+    # Clipping negatives to 0 — a dog tied with the favourite has gap 0.
+    log_odds = X["current_sp_log_odds"]
+    min_log_odds = log_odds.groupby(race_ids).transform("min")
+    X["fav_gap"] = (log_odds - min_log_odds).clip(lower=0.0)
+
+    # Second-favourite gap: distance in log-odds to the second-shortest price.
+    # Uses groupby.transform with a nsmallest-style rank.
+    second_smallest = (
+        log_odds
+        .groupby(race_ids)
+        .transform(lambda s: s.nsmallest(2).iloc[-1] if s.notna().sum() >= 2 else np.nan)
+    )
+    X["second_fav_gap"] = log_odds - second_smallest
+
+    # Field-relative log-odds (deviation from race mean log-odds)
+    race_log_odds_mean = log_odds.groupby(race_ids).transform("mean")
+    X["sp_vs_field_mean"] = log_odds - race_log_odds_mean
+
+    logger.info("Added 10 SP-derived features")
+    return X
+
+
+def _add_odds_snapshot_features(
+    db: Session,
+    X: pd.DataFrame,
+    entries_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Add pre-race market-drift features from the `odds_snapshots` table.
+
+    When the table is empty (i.e. the scraper is not yet collecting live
+    odds snapshots) every snapshot-derived feature is left as NaN and the
+    function is effectively a no-op — the median imputation downstream
+    fills them with 0 without harming the model.
+
+    Emits per-entry:
+      * opening_to_sp_drift  — log(sp) − log(earliest snapshot odds).
+                                Positive = drift out (less confidence),
+                                negative = steamed in (sharp money).
+      * odds_steam_rate      — slope of log(odds) over the last hour of
+                                snapshots before the race.
+      * cross_book_disagreement — stdev of implied prob at latest scrape,
+                                across bookmakers.
+    """
+    from app.models.odds import OddsSnapshot
+
+    if X.empty:
+        return X
+
+    entry_index = entries_df.index
+    # No dog_id available on the input frames — fetch from DB once
+    lookup = (
+        db.query(
+            RaceEntry.id.label("entry_id"),
+            RaceEntry.dog_id,
+            RaceEntry.race_id,
+            RaceEntry.sp_decimal,
+        )
+        .filter(RaceEntry.id.in_(list(entry_index)))
+        .all()
+    )
+    if not lookup:
+        return X
+
+    meta = pd.DataFrame(lookup, columns=["entry_id", "dog_id", "race_id", "sp_decimal"]).set_index("entry_id")
+    race_ids = meta["race_id"].dropna().unique().tolist()
+
+    # Early exit: if the snapshots table has no rows for any of these races
+    # we can skip the per-entry work entirely.
+    snap_count = (
+        db.query(func.count(OddsSnapshot.id))
+        .filter(OddsSnapshot.race_id.in_(race_ids))
+        .scalar()
+    )
+    if not snap_count:
+        logger.info("Skipped odds-snapshot features — no snapshots for target races")
+        return X
+
+    snap_rows = (
+        db.query(
+            OddsSnapshot.race_id,
+            OddsSnapshot.dog_id,
+            OddsSnapshot.bookmaker,
+            OddsSnapshot.odds_decimal,
+            OddsSnapshot.scraped_at,
+            OddsSnapshot.is_sp,
+        )
+        .filter(
+            OddsSnapshot.race_id.in_(race_ids),
+            OddsSnapshot.odds_decimal > 0,
+        )
+        .all()
+    )
+    if not snap_rows:
+        return X
+
+    snaps = pd.DataFrame(snap_rows, columns=[
+        "race_id", "dog_id", "bookmaker", "odds_decimal", "scraped_at", "is_sp",
+    ])
+    snaps["log_odds"] = np.log(snaps["odds_decimal"])
+    snaps = snaps.sort_values(["race_id", "dog_id", "scraped_at"])
+
+    drift: dict[int, float] = {}
+    steam: dict[int, float] = {}
+    disagreement: dict[int, float] = {}
+
+    # Iterate per (race_id, dog_id) — typically 6 dogs * a few races, cheap
+    for (race_id, dog_id), group in snaps.groupby(["race_id", "dog_id"]):
+        pre_sp = group[group["is_sp"] == False]  # noqa: E712 — SQL-style
+        if pre_sp.empty:
+            continue
+        first_row = pre_sp.iloc[0]
+        last_row = pre_sp.iloc[-1]
+
+        # Match this (race, dog) back to an entry_id
+        matching = meta[(meta["race_id"] == race_id) & (meta["dog_id"] == dog_id)]
+        if matching.empty:
+            continue
+        entry_id = matching.index[0]
+        sp_decimal = matching.iloc[0]["sp_decimal"]
+
+        if sp_decimal is not None and sp_decimal > 0:
+            drift[entry_id] = float(np.log(sp_decimal) - first_row["log_odds"])
+
+        # Steam: slope of log_odds over last hour of snapshots.  Positive slope
+        # = drifting out, negative = steaming in.
+        one_hour = pre_sp[pre_sp["scraped_at"] >= (last_row["scraped_at"] - pd.Timedelta(hours=1))]
+        if len(one_hour) >= 3:
+            times = (one_hour["scraped_at"] - one_hour["scraped_at"].iloc[0]).dt.total_seconds().values
+            times = times.astype(float)
+            ys = one_hour["log_odds"].values.astype(float)
+            if times.max() > 0:
+                slope = float(np.polyfit(times / 3600.0, ys, 1)[0])
+                steam[entry_id] = slope
+
+        # Cross-book disagreement: stdev of implied prob across bookmakers at
+        # the latest scrape time per book.
+        latest_per_book = (
+            group.sort_values("scraped_at")
+            .groupby("bookmaker")
+            .tail(1)
+        )
+        if len(latest_per_book) >= 2:
+            implied = 1.0 / latest_per_book["odds_decimal"]
+            disagreement[entry_id] = float(implied.std())
+
+    X = X.copy()
+    X["opening_to_sp_drift"] = pd.Series(drift)
+    X["odds_steam_rate"] = pd.Series(steam)
+    X["cross_book_disagreement"] = pd.Series(disagreement)
+
+    # Align to the full index so downstream NaN handling applies
+    X["opening_to_sp_drift"] = X["opening_to_sp_drift"].reindex(X.index)
+    X["odds_steam_rate"] = X["odds_steam_rate"].reindex(X.index)
+    X["cross_book_disagreement"] = X["cross_book_disagreement"].reindex(X.index)
+
+    logger.info(
+        "Added odds-snapshot features: drift=%d, steam=%d, disagreement=%d non-null values",
+        X["opening_to_sp_drift"].notna().sum(),
+        X["odds_steam_rate"].notna().sum(),
+        X["cross_book_disagreement"].notna().sum(),
+    )
     return X
 
 
 def _add_pace_shape_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataFrame:
-    """Add race-level pace shape features that require seeing all runners.
+    """Add race-level pace-shape features that require seeing all runners.
 
-    These capture tactical dynamics: how many front-runners in the race,
-    whether a dog is the sole leader, and early-speed rank in the field.
+    Pace shape is the single biggest source of value in greyhound racing that
+    the market chronically mis-prices — a lone front-runner has a hugely
+    favourable scenario, a closer in a no-speed race is set up to fail.
+
+    Features emitted:
+      num_front_runners_in_race   count of dogs with is_front_runner > 0.5
+      is_sole_front_runner        dog is the only likely leader
+      pace_pressure               is_front_runner score * race front-runner count
+      early_speed_rank            rank (1 = fastest breaker) by early-speed ratio
+      is_predicted_leader         1.0 if this dog has the fastest early speed
+      pace_scenario_lone_speed    1.0 if exactly one front-runner in the field
+      pace_scenario_duel          1.0 if exactly two front-runners
+      pace_scenario_contested     1.0 if three or more front-runners
+      pace_scenario_no_speed      1.0 if no front-runners
+      expected_lead_probability   softmax over -early_speed_ratio across the field
+      avg_opponent_early_speed    mean early-speed ratio of OTHER dogs in the race
+      early_speed_vs_field        dog's early-speed gap to the field median
+      running_style_mismatch      penalty score: negative when style suits the pace
+                                  scenario, positive when it doesn't
     """
     X = X.copy()
 
-    if "is_front_runner" in X.columns:
+    has_fr = "is_front_runner" in X.columns
+    has_es = "early_speed_ratio" in X.columns
+
+    if has_fr:
         front_runner_count = X["is_front_runner"].groupby(race_ids).transform(
             lambda x: (x > 0.5).sum()
         )
@@ -448,16 +675,77 @@ def _add_pace_shape_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataFra
 
         X["pace_pressure"] = X["is_front_runner"] * front_runner_count
 
-    if "early_speed_ratio" in X.columns:
+        # One-hot pace scenario
+        X["pace_scenario_lone_speed"] = (front_runner_count == 1).astype(float)
+        X["pace_scenario_duel"] = (front_runner_count == 2).astype(float)
+        X["pace_scenario_contested"] = (front_runner_count >= 3).astype(float)
+        X["pace_scenario_no_speed"] = (front_runner_count == 0).astype(float)
+
+    if has_es:
         # Lower early_speed_ratio = faster to first bend, so rank ascending
         X["early_speed_rank"] = X["early_speed_ratio"].groupby(race_ids).rank(method="min")
         X["is_predicted_leader"] = (X["early_speed_rank"] == 1).astype(float)
 
-    n_added = sum(1 for c in ["num_front_runners_in_race", "is_sole_front_runner",
-                               "pace_pressure", "early_speed_rank", "is_predicted_leader"]
-                  if c in X.columns)
-    if n_added:
-        logger.info("Added %d pace-shape features", n_added)
+        # Softmax over -early_speed_ratio so faster dogs get higher lead prob
+        def _lead_softmax(s: pd.Series) -> pd.Series:
+            valid = s.notna()
+            if valid.sum() == 0:
+                return pd.Series(np.nan, index=s.index)
+            # Negate: we want small early_speed_ratio to map to high probability
+            neg = -s
+            neg_max = neg[valid].max()
+            exp = np.exp(neg - neg_max)
+            exp = exp.where(valid, 0.0)
+            total = exp.sum()
+            if total <= 0:
+                return pd.Series(np.nan, index=s.index)
+            return exp / total
+
+        X["expected_lead_probability"] = (
+            X["early_speed_ratio"].groupby(race_ids).transform(_lead_softmax)
+        )
+
+        # Average of OTHER dogs' early speed in the field: (total - self) / (n - 1)
+        race_total = X["early_speed_ratio"].groupby(race_ids).transform("sum")
+        race_count = X["early_speed_ratio"].groupby(race_ids).transform("count")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            X["avg_opponent_early_speed"] = np.where(
+                race_count > 1,
+                (race_total - X["early_speed_ratio"]) / (race_count - 1),
+                np.nan,
+            )
+
+        # Early-speed gap vs field median (negative = this dog breaks faster)
+        race_median_es = X["early_speed_ratio"].groupby(race_ids).transform("median")
+        X["early_speed_vs_field"] = X["early_speed_ratio"] - race_median_es
+
+    # Running-style mismatch: combines pace scenario + the dog's own style.
+    # A closer (low is_front_runner) in a no_speed race gets penalised (no one
+    # will set up the race).  A front-runner in a lone_speed race gets bonus.
+    if has_fr:
+        fr = X["is_front_runner"].fillna(0.0)
+        # Bonus when dog is a front-runner and scenario favours it
+        lone_speed_bonus = fr * X.get("pace_scenario_lone_speed", 0.0)
+        contested_penalty = fr * X.get("pace_scenario_contested", 0.0)
+        # Closers (1 - fr) do well when the race is contested (chaos + tiring leaders)
+        closer_boost = (1.0 - fr) * X.get("pace_scenario_contested", 0.0)
+        closer_penalty = (1.0 - fr) * X.get("pace_scenario_no_speed", 0.0)
+        X["running_style_mismatch"] = (
+            closer_penalty + contested_penalty - lone_speed_bonus - closer_boost
+        )
+
+    added = [
+        c for c in (
+            "num_front_runners_in_race", "is_sole_front_runner", "pace_pressure",
+            "early_speed_rank", "is_predicted_leader",
+            "pace_scenario_lone_speed", "pace_scenario_duel",
+            "pace_scenario_contested", "pace_scenario_no_speed",
+            "expected_lead_probability", "avg_opponent_early_speed",
+            "early_speed_vs_field", "running_style_mismatch",
+        ) if c in X.columns
+    ]
+    if added:
+        logger.info("Added %d pace-shape features", len(added))
 
     return X
 
@@ -555,6 +843,8 @@ def add_race_relative_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataF
         "dog_elo",
         "dog_elo_at_distance",
         "dog_elo_at_track",
+        # Tier 7 — class gap vs field median (lower index = higher class = better)
+        "dog_median_career_grade_index",
     ]
 
     cols_to_process = [c for c in KEY_FEATURES if c in X.columns]

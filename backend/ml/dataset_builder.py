@@ -419,6 +419,104 @@ def _compute_group_sizes(race_ids: pd.Series) -> list[int]:
     return groups
 
 
+# Registries of feature names emitted by the helper functions below.  These
+# are surfaced through the /features/auto-injected API so the UI can list
+# everything the training pipeline injects alongside user-defined features.
+SP_FEATURE_NAMES = [
+    "current_sp_decimal",
+    "current_sp_implied_prob",
+    "current_sp_log_odds",
+    "sp_rank_in_field",
+    "market_overround",
+    "current_sp_devigged_prob",
+    "is_favorite",
+    "is_second_favorite",
+    "fav_gap",
+    "second_fav_gap",
+    "sp_vs_field_mean",
+]
+
+ODDS_SNAPSHOT_FEATURE_NAMES = [
+    "opening_to_sp_drift",
+    "odds_steam_rate",
+    "cross_book_disagreement",
+]
+
+PACE_SHAPE_FEATURE_NAMES = [
+    "num_front_runners_in_race",
+    "is_sole_front_runner",
+    "pace_pressure",
+    "early_speed_rank",
+    "is_predicted_leader",
+    "pace_scenario_lone_speed",
+    "pace_scenario_duel",
+    "pace_scenario_contested",
+    "pace_scenario_no_speed",
+    "expected_lead_probability",
+    "avg_opponent_early_speed",
+    "early_speed_vs_field",
+    "running_style_mismatch",
+]
+
+# Base columns for which add_race_relative_features emits 5 variants each
+# (__vs_field, __rank, __z_in_field, __gap_to_best, __is_field_best).
+# Exposed so the UI can describe what field-relative features exist without
+# having to enumerate every suffix.
+RACE_RELATIVE_BASE_COLUMNS = [
+    # Time / pace
+    "mean_finish_time_last5",
+    "min_finish_time_last10",
+    "mean_adjusted_time_last5",
+    "best_adjusted_time_last10",
+    "ewm_adjusted_time_last10",
+    "mean_sectional_last5",
+    "stdev_finish_time_last5",
+    "mean_beaten_dist_last5",
+    # Position-based
+    "mean_position_last5",
+    "ewm_position_last10",
+    "win_rate_last10",
+    "place_rate_last10",
+    "bayesian_win_rate",
+    "bayesian_place_rate",
+    # Market
+    "mean_sp_last5",
+    # Experience / freshness
+    "career_runs",
+    "days_since_last_race",
+    # Trainer / sire / track
+    "trainer_win_rate",
+    "trainer_place_rate",
+    "trainer_win_rate_at_track",
+    "sire_progeny_win_rate",
+    "track_speed_rating",
+    # Tier 3 — speed figure
+    "speed_figure_best_last10",
+    "speed_figure_mean_last5",
+    "speed_figure_ewm_last10",
+    "career_peak_speed_figure",
+    # Tier 1 — ELO
+    "dog_elo",
+    "dog_elo_at_distance",
+    "dog_elo_at_track",
+    # Tier 7 — class gap vs field median
+    "dog_median_career_grade_index",
+    # Comment-derived
+    "quick_away_rate_last10",
+    "led_at_bend1_rate_last10",
+    "finish_well_rate_last10",
+    "clear_win_rate_last10",
+]
+
+RACE_RELATIVE_SUFFIXES = [
+    "__vs_field",
+    "__rank",
+    "__z_in_field",
+    "__gap_to_best",
+    "__is_field_best",
+]
+
+
 def _add_sp_features(X: pd.DataFrame, entries_df: pd.DataFrame) -> pd.DataFrame:
     """Add starting-price-derived features from the current race.
 
@@ -808,56 +906,7 @@ def add_race_relative_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataF
     X = X.copy()
     race_ids_aligned = race_ids.loc[X.index]
 
-    # Broader set: include adjusted-time, Bayesian rates, trainer/sire,
-    # speed-figure and ELO so the rank model sees relative versions of the
-    # features that actually carry the most information.
-    KEY_FEATURES = [
-        # Time / pace
-        "mean_finish_time_last5",
-        "min_finish_time_last10",
-        "mean_adjusted_time_last5",
-        "best_adjusted_time_last10",
-        "ewm_adjusted_time_last10",
-        "mean_sectional_last5",
-        "stdev_finish_time_last5",
-        "mean_beaten_dist_last5",
-        # Position-based
-        "mean_position_last5",
-        "ewm_position_last10",
-        "win_rate_last10",
-        "place_rate_last10",
-        "bayesian_win_rate",
-        "bayesian_place_rate",
-        # Market
-        "mean_sp_last5",
-        # Experience / freshness
-        "career_runs",
-        "days_since_last_race",
-        # Trainer / sire / track
-        "trainer_win_rate",
-        "trainer_place_rate",
-        "trainer_win_rate_at_track",
-        "sire_progeny_win_rate",
-        "track_speed_rating",
-        # Tier 3 — speed figure
-        "speed_figure_best_last10",
-        "speed_figure_mean_last5",
-        "speed_figure_ewm_last10",
-        "career_peak_speed_figure",
-        # Tier 1 — ELO
-        "dog_elo",
-        "dog_elo_at_distance",
-        "dog_elo_at_track",
-        # Tier 7 — class gap vs field median (lower index = higher class = better)
-        "dog_median_career_grade_index",
-        # Comment-derived — strong signals benefit from within-race comparison
-        "quick_away_rate_last10",
-        "led_at_bend1_rate_last10",
-        "finish_well_rate_last10",
-        "clear_win_rate_last10",
-    ]
-
-    cols_to_process = [c for c in KEY_FEATURES if c in X.columns]
+    cols_to_process = [c for c in RACE_RELATIVE_BASE_COLUMNS if c in X.columns]
 
     new_cols: dict[str, pd.Series] = {}
 

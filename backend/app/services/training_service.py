@@ -93,6 +93,12 @@ def create_trainer(algorithm: str, params: dict[str, Any], target: str):
     """Factory function to create the appropriate trainer."""
     target_type = "regression" if target == "finish_time" else "classification"
 
+    # Pass the original target through to trainers that support monotonic
+    # constraints so the sign convention (lower finish_time/position is
+    # better) can be flipped automatically.
+    params = dict(params)
+    params.setdefault("_target", target)
+
     if algorithm == "lambdarank":
         from ml.trainers.lambdarank_trainer import LambdaRankTrainer
         return LambdaRankTrainer(params, target_type)
@@ -468,22 +474,166 @@ def run_optuna_optimization(
         is_ranking = experiment.algorithm == "lambdarank"
         group_train = dataset.get("group_train")
         group_val = dataset.get("group_val")
+        meta_train = dataset.get("meta_train")
+        meta_val = dataset.get("meta_val")
+
+        # Optuna objective selector.  Defaults to log_loss (minimize).
+        # Betting objectives maximize ROI/Sharpe on the VAL set; we flip
+        # sign to stay with Optuna direction="minimize".
+        optuna_objective = split_cfg.get("optuna_objective", "log_loss")
+        has_sp = (
+            meta_val is not None
+            and "sp_decimal" in meta_val.columns
+            and "race_id" in meta_val.columns
+            and meta_val["sp_decimal"].notna().any()
+        )
+        if optuna_objective != "log_loss" and not has_sp:
+            logger.warning(
+                "Optuna objective '%s' requires SP data in the val set — "
+                "falling back to log_loss",
+                optuna_objective,
+            )
+            optuna_objective = "log_loss"
+
+        # Walk-forward CV settings
+        walk_forward_folds = int(split_cfg.get("walk_forward_folds", 1) or 1)
+        embargo_days = int(split_cfg.get("embargo_days", 0) or 0)
+
+        # Pre-build fold indices over the combined train+val region if
+        # walk-forward is requested.  All folds share the same fully
+        # built feature matrix; only the row masks differ per trial.
+        wf_folds: list[tuple[np.ndarray, np.ndarray]] = []
+        X_tv = X_train
+        y_tv = y_train
+        meta_tv = meta_train
+        if walk_forward_folds > 1:
+            from ml.dataset_builder import (
+                generate_walk_forward_fold_indices,
+                _compute_group_sizes,
+            )
+            X_tv = np.vstack([X_train.values, X_val.values])
+            X_tv = pd.DataFrame(X_tv, columns=X_train.columns)
+            y_tv = np.concatenate([np.asarray(y_train), np.asarray(y_val)])
+            y_tv = pd.Series(y_tv)
+            meta_tv = pd.concat([meta_train, meta_val], ignore_index=True)
+            wf_folds = generate_walk_forward_fold_indices(
+                meta_tv["race_id"], meta_tv["race_date"],
+                n_folds=walk_forward_folds, embargo_days=embargo_days,
+            )
+            if not wf_folds:
+                logger.warning(
+                    "Walk-forward CV requested (folds=%d, embargo=%d) but no "
+                    "valid folds were generated — falling back to single-split.",
+                    walk_forward_folds, embargo_days,
+                )
+                walk_forward_folds = 1
+
+        def _val_win_proba_on(trainer, X_v, group_v):
+            """Extract per-entry win probability on a validation fold."""
+            if is_ranking:
+                scores = trainer.predict(X_v)
+                return trainer.scores_to_proba(
+                    scores, group_sizes=group_v, calibrate=False,
+                )
+            if target_type == "classification":
+                return trainer.predict_proba(X_v, calibrate=False)
+            return None
+
+        def _score_fold(trainer, result, X_v, y_v, meta_v, group_v):
+            """Score a single fold's result against the chosen objective."""
+            if optuna_objective == "log_loss":
+                if is_ranking:
+                    return -(result.metrics.get("top1_accuracy", 0))
+                if target_type == "classification":
+                    return result.metrics.get("log_loss", 999)
+                return result.metrics.get("rmse", 999)
+
+            proba = _val_win_proba_on(trainer, X_v, group_v)
+            if proba is None:
+                return result.metrics.get("log_loss", 999)
+
+            y_val_arr = np.asarray(y_v)
+            y_val_binary = (y_val_arr == 1).astype(int)
+
+            from ml.evaluation import compute_betting_metrics
+            bm = compute_betting_metrics(
+                y_val_binary,
+                np.asarray(proba),
+                meta_v["sp_decimal"].values,
+                meta_v["race_id"].values,
+            )
+
+            if optuna_objective == "top_pick_roi":
+                return -float(bm.get("top_pick_roi", -999))
+            if optuna_objective == "value_bet_roi":
+                if bm.get("value_bet_count", 0) < 10:
+                    return 999.0
+                return -float(bm.get("value_bet_roi", -999))
+            if optuna_objective == "kelly_roi":
+                if bm.get("kelly_races", 0) < 10:
+                    return 999.0
+                return -float(bm.get("kelly_roi", -999))
+            if optuna_objective == "sharpe":
+                kelly_cum = bm.get("kelly_pnl_by_race", [])
+                if len(kelly_cum) < 5:
+                    return 999.0
+                pnls = [kelly_cum[0]["pnl"]]
+                for i in range(1, len(kelly_cum)):
+                    pnls.append(kelly_cum[i]["pnl"] - kelly_cum[i - 1]["pnl"])
+                arr = np.asarray(pnls, dtype=float)
+                std = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
+                if std < 1e-9:
+                    return 999.0
+                sharpe = float(arr.mean()) / std
+                return -sharpe
+            return result.metrics.get("log_loss", 999)
 
         def objective(trial):
-            _heartbeat(db, experiment, f"optuna_trial_{trial.number + 1}_of_{n_trials}", log_handler)
+            _heartbeat(
+                db, experiment,
+                f"optuna_trial_{trial.number + 1}_of_{n_trials}",
+                log_handler,
+            )
             params = _suggest_params(trial, experiment.algorithm)
-            trainer = create_trainer(experiment.algorithm, params, experiment.target)
-            if is_ranking:
-                result = trainer.train(X_train, y_train, X_val, y_val,
-                                       group_train=group_train, group_val=group_val)
-                # Optimize for top-1 accuracy (maximize), return negative
-                return -(result.metrics.get("top1_accuracy", 0))
-            elif target_type == "classification":
-                result = trainer.train(X_train, y_train, X_val, y_val)
-                return result.metrics.get("log_loss", 999)
-            else:
-                result = trainer.train(X_train, y_train, X_val, y_val)
-                return result.metrics.get("rmse", 999)
+
+            if walk_forward_folds <= 1:
+                # Single-split (original behaviour)
+                trainer = create_trainer(experiment.algorithm, params, experiment.target)
+                if is_ranking:
+                    result = trainer.train(
+                        X_train, y_train, X_val, y_val,
+                        group_train=group_train, group_val=group_val,
+                    )
+                else:
+                    result = trainer.train(X_train, y_train, X_val, y_val)
+                return _score_fold(trainer, result, X_val, y_val, meta_val, group_val)
+
+            # Walk-forward CV: train per fold, average the scores
+            from ml.dataset_builder import _compute_group_sizes as _gs
+            fold_scores = []
+            for fold_i, (tr_idx, v_idx) in enumerate(wf_folds):
+                _heartbeat(
+                    db, experiment,
+                    f"optuna_trial_{trial.number + 1}_fold_{fold_i + 1}",
+                    log_handler,
+                )
+                X_tr = X_tv.iloc[tr_idx]
+                y_tr = y_tv.iloc[tr_idx]
+                X_v = X_tv.iloc[v_idx]
+                y_v = y_tv.iloc[v_idx]
+                meta_v = meta_tv.iloc[v_idx]
+                trainer = create_trainer(experiment.algorithm, params, experiment.target)
+                if is_ranking:
+                    gtr = _gs(meta_tv["race_id"].iloc[tr_idx])
+                    gv = _gs(meta_tv["race_id"].iloc[v_idx])
+                    result = trainer.train(X_tr, y_tr, X_v, y_v,
+                                           group_train=gtr, group_val=gv)
+                    fold_score = _score_fold(trainer, result, X_v, y_v, meta_v, gv)
+                else:
+                    result = trainer.train(X_tr, y_tr, X_v, y_v)
+                    fold_score = _score_fold(trainer, result, X_v, y_v, meta_v, None)
+                fold_scores.append(fold_score)
+            return float(np.mean(fold_scores)) if fold_scores else 999.0
 
         study = optuna.create_study(direction="minimize")
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)

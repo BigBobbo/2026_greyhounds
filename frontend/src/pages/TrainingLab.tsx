@@ -41,6 +41,11 @@ export default function TrainingLab() {
   const [selectedVersionId, setSelectedVersionId] = useState<number | null>(null);
   const [autoTune, setAutoTune] = useState(false);
   const [optunTrials, setOptunTrials] = useState(50);
+  const [optunaObjective, setOptunaObjective] = useState<
+    'log_loss' | 'top_pick_roi' | 'value_bet_roi' | 'kelly_roi' | 'sharpe'
+  >('log_loss');
+  const [walkForwardFolds, setWalkForwardFolds] = useState(1);
+  const [embargoDays, setEmbargoDays] = useState(0);
 
   // Date range for train/test split
   const [testAfter, setTestAfter] = useState('2026-01-01');
@@ -92,6 +97,9 @@ export default function TrainingLab() {
         include_elo_features: includeElo,
         include_odds_snapshot_features: includeOddsSnapshot,
         include_h2h_features: includeH2H,
+        optuna_objective: optunaObjective,
+        walk_forward_folds: walkForwardFolds,
+        embargo_days: embargoDays,
       };
       if (selectedVersionId !== null) {
         splitConfig.version_id = selectedVersionId;
@@ -270,7 +278,7 @@ export default function TrainingLab() {
           </div>
 
           <div className="mb-4">
-            <label className="flex items-center gap-2 text-sm">
+            <label className="flex items-center gap-2 text-sm flex-wrap">
               <input
                 type="checkbox"
                 checked={autoTune}
@@ -289,9 +297,64 @@ export default function TrainingLab() {
                     className="border rounded px-2 py-1 w-20 text-xs ml-2"
                   />
                   <span className="text-xs text-gray-400">trials</span>
+                  <span className="text-xs text-gray-500 ml-3">Optimise:</span>
+                  <select
+                    value={optunaObjective}
+                    onChange={(e) => setOptunaObjective(e.target.value as typeof optunaObjective)}
+                    className="border rounded px-2 py-1 text-xs"
+                  >
+                    <option value="log_loss">log-loss (default)</option>
+                    <option value="top_pick_roi">top-pick ROI</option>
+                    <option value="value_bet_roi">value-bet ROI</option>
+                    <option value="kelly_roi">Kelly ROI</option>
+                    <option value="sharpe">Sharpe ratio (Kelly)</option>
+                  </select>
                 </>
               )}
             </label>
+            {autoTune && optunaObjective !== 'log_loss' && (
+              <p className="text-xs text-gray-500 mt-1 ml-6 max-w-3xl">
+                Betting objectives optimise the model for profit on the
+                validation set rather than calibration of probabilities.
+                They require SP (starting-price) data on val-set entries.
+                Trials with fewer than ~10 qualifying bets are penalised
+                so Optuna doesn&apos;t find degenerate &quot;no bets, no
+                losses&quot; parameters.
+              </p>
+            )}
+            {autoTune && (
+              <div className="flex items-center gap-2 text-sm flex-wrap mt-2 ml-6">
+                <span className="text-xs text-gray-500">Walk-forward CV:</span>
+                <input
+                  type="number"
+                  value={walkForwardFolds}
+                  onChange={(e) => setWalkForwardFolds(parseInt(e.target.value) || 1)}
+                  min={1}
+                  max={10}
+                  className="border rounded px-2 py-1 w-16 text-xs"
+                />
+                <span className="text-xs text-gray-400">folds</span>
+                <span className="text-xs text-gray-500 ml-3">Embargo:</span>
+                <input
+                  type="number"
+                  value={embargoDays}
+                  onChange={(e) => setEmbargoDays(parseInt(e.target.value) || 0)}
+                  min={0}
+                  max={60}
+                  className="border rounded px-2 py-1 w-16 text-xs"
+                />
+                <span className="text-xs text-gray-400">days</span>
+              </div>
+            )}
+            {autoTune && walkForwardFolds > 1 && (
+              <p className="text-xs text-gray-500 mt-1 ml-6 max-w-3xl">
+                Walk-forward expanding-window CV averages each Optuna
+                trial&apos;s score across {walkForwardFolds} chronological
+                folds with a {embargoDays}-day embargo between train and
+                val. Reduces overfitting to a single val window at the
+                cost of {walkForwardFolds}× training time per trial.
+              </p>
+            )}
           </div>
 
           <div className="mb-4">

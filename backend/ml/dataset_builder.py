@@ -226,9 +226,9 @@ def build_dataset(
     )
 
     # Also split the metadata (sp_decimal, race_id) for betting evaluation
-    meta_train = entries_df.loc[X_train.index, ["sp_decimal", "race_id"]]
-    meta_val = entries_df.loc[X_val.index, ["sp_decimal", "race_id"]]
-    meta_test = entries_df.loc[X_test.index, ["sp_decimal", "race_id"]]
+    meta_train = entries_df.loc[X_train.index, ["sp_decimal", "race_id", "race_date"]]
+    meta_val = entries_df.loc[X_val.index, ["sp_decimal", "race_id", "race_date"]]
+    meta_test = entries_df.loc[X_test.index, ["sp_decimal", "race_id", "race_date"]]
 
     feature_names = list(X.columns)
 
@@ -392,6 +392,101 @@ def _compute_builtin_features(db: Session, entry_ids: list[int],
     if not all_dfs:
         return pd.DataFrame()
     return pd.concat(all_dfs)
+
+
+def generate_walk_forward_fold_indices(
+    race_ids: pd.Series,
+    race_dates: pd.Series,
+    n_folds: int,
+    embargo_days: int = 0,
+    min_train_pct: float = 0.4,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Generate expanding-window walk-forward CV fold indices.
+
+    Each fold keeps all dogs of the same race together, enforces strict
+    chronological order (train races all precede val races), and applies
+    a `embargo_days`-day gap between the last training race and the
+    first val race to prevent leakage from features computed over rolling
+    windows that straddle the cutoff.
+
+    Args:
+        race_ids: per-row race id, aligned positionally with race_dates.
+                  Must be sorted chronologically (the caller has already
+                  pre-sorted by race_date for the single-split pipeline,
+                  so this typically holds).
+        race_dates: per-row race date, same length as race_ids.
+        n_folds: number of folds to generate.  n_folds=1 returns a single
+                  fold whose val set is the last (1 - min_train_pct) of
+                  races — equivalent to the current single-split behaviour.
+        embargo_days: minimum number of days between the last train race
+                  and the first val race; val races within this gap are
+                  skipped.
+        min_train_pct: minimum fraction of races that must be in the
+                  training set for the first fold (expanding window starts
+                  at this size and grows for each subsequent fold).
+
+    Returns:
+        List of (train_idx, val_idx) tuples where each is a numpy array of
+        positional indices into `race_ids`/`race_dates`.
+    """
+    from datetime import timedelta as _td
+
+    if n_folds < 1:
+        return []
+
+    # Race-aligned sequence (preserve appearance order — race_ids is sorted
+    # chronologically so drop_duplicates yields chronological order).
+    ord_idx = race_ids.index
+    unique_races_series = race_ids.drop_duplicates()
+    unique_race_ids = unique_races_series.values
+    unique_race_dates = race_dates.loc[unique_races_series.index].values
+    n_races = len(unique_race_ids)
+    if n_races < n_folds + 1:
+        return []
+
+    val_size = int(n_races * (1.0 - min_train_pct) / n_folds)
+    val_size = max(1, val_size)
+    train_start_size = max(1, n_races - val_size * n_folds)
+
+    # Build a lookup from row index -> positional index within input
+    pos_by_index = {idx: i for i, idx in enumerate(ord_idx)}
+
+    folds: list[tuple[np.ndarray, np.ndarray]] = []
+    for fold in range(n_folds):
+        train_end_race = train_start_size + fold * val_size
+        val_start_race = train_end_race
+        val_end_race = min(val_start_race + val_size, n_races)
+        if val_end_race <= val_start_race:
+            break
+        if train_end_race < 1:
+            continue
+
+        train_last_date = unique_race_dates[train_end_race - 1]
+        # race_date may be date or datetime64; handle both
+        try:
+            embargo_cutoff = train_last_date + _td(days=embargo_days)
+        except TypeError:
+            # numpy.datetime64 arithmetic
+            embargo_cutoff = train_last_date + np.timedelta64(embargo_days, "D")
+
+        # Skip val races inside the embargo window
+        while val_start_race < val_end_race and unique_race_dates[val_start_race] <= embargo_cutoff:
+            val_start_race += 1
+        if val_start_race >= val_end_race:
+            continue
+
+        train_race_set = set(unique_race_ids[:train_end_race])
+        val_race_set = set(unique_race_ids[val_start_race:val_end_race])
+
+        train_mask = race_ids.isin(train_race_set).values
+        val_mask = race_ids.isin(val_race_set).values
+
+        train_idx = np.where(train_mask)[0]
+        val_idx = np.where(val_mask)[0]
+        if len(train_idx) > 0 and len(val_idx) > 0:
+            folds.append((train_idx, val_idx))
+
+    return folds
 
 
 def _compute_group_sizes(race_ids: pd.Series) -> list[int]:

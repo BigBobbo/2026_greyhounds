@@ -7,6 +7,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression as _PlattLR
 from xgboost import XGBClassifier, XGBRegressor
 
+from ml.monotonic_constraints import build_monotone_constraints
 from ml.trainers.base import BaseTrainer, TrainResult
 
 
@@ -15,20 +16,36 @@ class XGBoostTrainer(BaseTrainer):
         super().__init__(params)
         self.target_type = target_type
         self.calibrator: _PlattLR | None = None
+        self._target = params.get("_target", "win_prob")
+        self._apply_monotone = params.get("apply_monotone_constraints", True)
 
-        model_params = {k: v for k, v in params.items() if k not in ("target_type",)}
+        model_params = {
+            k: v for k, v in params.items()
+            if k not in ("target_type", "_target", "apply_monotone_constraints")
+        }
         model_params.setdefault("verbosity", 0)
         model_params.setdefault("random_state", 42)
-
         if target_type == "classification":
             # Handle class imbalance: win is ~16.7% in 6-dog races
             # scale_pos_weight = neg_count / pos_count ≈ 5.0
             model_params.setdefault("scale_pos_weight", 5.0)
+        self._model_params = model_params
+        self.model = None
+
+    def train(self, X_train, y_train, X_val, y_val) -> TrainResult:
+        model_params = dict(self._model_params)
+        if self._apply_monotone:
+            constraints = build_monotone_constraints(
+                list(X_train.columns), self._target,
+            )
+            # XGBoost accepts either a tuple or a string like "(0,1,-1,...)"
+            model_params["monotone_constraints"] = tuple(constraints)
+
+        if self.target_type == "classification":
             self.model = XGBClassifier(**model_params)
         else:
             self.model = XGBRegressor(**model_params)
 
-    def train(self, X_train, y_train, X_val, y_val) -> TrainResult:
         self.model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],

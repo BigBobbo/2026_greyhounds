@@ -95,6 +95,8 @@ export default function ExperimentDetail() {
         };
         const formatStage = (stage: string | null) => {
           if (!stage) return null;
+          const wf = stage.match(/^optuna_trial_(\d+)_fold_(\d+)$/);
+          if (wf) return `Optuna trial ${wf[1]} · fold ${wf[2]}`;
           const m = stage.match(/^optuna_trial_(\d+)_of_(\d+)$/);
           if (m) return `Optuna trial ${m[1]}/${m[2]}`;
           return STAGE_LABELS[stage] || stage;
@@ -182,6 +184,20 @@ export default function ExperimentDetail() {
               </span>
             )}
           </p>
+          {(() => {
+            const sc = (exp.split_config as any) || {};
+            const obj = sc.optuna_objective || 'log_loss';
+            const folds = sc.walk_forward_folds || 1;
+            const embargo = sc.embargo_days || 0;
+            const monotone = sc.apply_monotone_constraints !== false;
+            return (
+              <div className="text-xs text-gray-500 mt-2 space-y-0.5">
+                <div>Objective: <span className="font-mono text-gray-700">{obj}</span></div>
+                <div>Walk-forward: <span className="font-mono text-gray-700">{folds}</span> fold{folds === 1 ? '' : 's'}{embargo > 0 ? ` · ${embargo}d embargo` : ''}</div>
+                <div>Monotonic constraints: <span className="font-mono text-gray-700">{monotone ? 'on' : 'off'}</span></div>
+              </div>
+            );
+          })()}
         </div>
         <div className="bg-white rounded-lg shadow p-4">
           <p className="text-xs text-gray-500">Target</p>

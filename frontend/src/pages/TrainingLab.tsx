@@ -154,7 +154,10 @@ export default function TrainingLab() {
 
   const formatStage = (stage: string | null) => {
     if (!stage) return null;
-    // Handle optuna trial stages like "optuna_trial_3_of_50"
+    // Walk-forward Optuna stage: optuna_trial_3_fold_2
+    const wfMatch = stage.match(/^optuna_trial_(\d+)_fold_(\d+)$/);
+    if (wfMatch) return `Optuna trial ${wfMatch[1]} · fold ${wfMatch[2]}`;
+    // Single-split Optuna: optuna_trial_3_of_50
     const optunaMatch = stage.match(/^optuna_trial_(\d+)_of_(\d+)$/);
     if (optunaMatch) return `Optuna trial ${optunaMatch[1]}/${optunaMatch[2]}`;
     return STAGE_LABELS[stage] || stage;
@@ -575,7 +578,16 @@ export default function TrainingLab() {
             <strong>Training plan:</strong> Train {algorithm === 'lambdarank' ? 'LambdaRank (LightGBM Ranker)' : algorithm.toUpperCase()} to predict <strong>{algorithm === 'lambdarank' ? 'race ranking (win probability derived via softmax)' : target}</strong> using {selectedFeatures.length} features
             {selectedVersionId ? <> from version <strong>{versions.find(v => v.id === selectedVersionId)?.name}</strong></> : ' (latest unversioned)'}.
             Train on all data before <strong>{testAfter}</strong>, test on data after.
-            {autoTune && ` Auto-tune with ${optunTrials} Optuna trials.`}
+            {autoTune && (
+              <>
+                {' '}Auto-tune with <strong>{optunTrials}</strong> Optuna trials,
+                optimising <strong>{optunaObjective}</strong>
+                {walkForwardFolds > 1 && (
+                  <> across <strong>{walkForwardFolds}</strong> walk-forward folds with a <strong>{embargoDays}</strong>-day embargo</>
+                )}.
+              </>
+            )}
+            {' '}Monotonic constraints are <strong>{applyMonotonicConstraints ? 'on' : 'off'}</strong>.
             {' '}Betting P&L will be evaluated by simulating $1 flat bets + Kelly criterion on the test set.
           </div>
 
@@ -629,6 +641,21 @@ export default function TrainingLab() {
                         Optuna: {exp.metrics.optuna_n_trials} trials
                       </span>
                     )}
+                    {(() => {
+                      const sc = (exp.split_config as any) || {};
+                      const obj = sc.optuna_objective;
+                      const folds = sc.walk_forward_folds;
+                      const embargo = sc.embargo_days;
+                      const monotone = sc.apply_monotone_constraints;
+                      const tags = [];
+                      if (obj && obj !== 'log_loss') tags.push(`obj=${obj}`);
+                      if (folds && folds > 1) tags.push(`folds=${folds}`);
+                      if (embargo && embargo > 0) tags.push(`embargo=${embargo}d`);
+                      if (monotone === false) tags.push('no monotone');
+                      return tags.length > 0 ? (
+                        <p className="text-xs text-purple-600 mt-1">{tags.join(' · ')}</p>
+                      ) : null;
+                    })()}
                     {exp.hyperparameters && Object.keys(exp.hyperparameters).length > 0 && (
                       <p className="text-xs text-gray-400 mt-1 truncate max-w-xs" title={Object.entries(exp.hyperparameters).map(([k, v]) => `${k}: ${typeof v === 'number' ? (v % 1 === 0 ? v : Number(v).toPrecision(3)) : v}`).join(', ')}>
                         {Object.entries(exp.hyperparameters).map(([k, v]) =>

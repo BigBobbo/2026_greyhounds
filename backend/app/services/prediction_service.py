@@ -573,6 +573,9 @@ def save_predictions(db: Session, predictions: list[dict[str, Any]]) -> int:
             existing.predicted_position = pred.get("predicted_position")
             existing.predicted_time = pred.get("predicted_time")
             existing.confidence = pred.get("confidence")
+            existing.place2_probability = pred.get("place_probability_top2")
+            existing.place3_probability = pred.get("place_probability_top3")
+            existing.position_probs_json = pred.get("position_probabilities")
             existing.created_at = datetime.utcnow()
         else:
             db.add(Prediction(
@@ -582,6 +585,9 @@ def save_predictions(db: Session, predictions: list[dict[str, Any]]) -> int:
                 predicted_position=pred.get("predicted_position"),
                 predicted_time=pred.get("predicted_time"),
                 confidence=pred.get("confidence"),
+                place2_probability=pred.get("place_probability_top2"),
+                place3_probability=pred.get("place_probability_top3"),
+                position_probs_json=pred.get("position_probabilities"),
             ))
         saved += 1
 

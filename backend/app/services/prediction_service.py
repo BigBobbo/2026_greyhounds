@@ -32,8 +32,29 @@ from app.services.feature_engine import get_dog_history, get_race_context, compu
 from app.services.feature_sandbox import execute_feature_code
 from app.models.feature_definition import FeatureDefinition
 from ml.race_features import compute_race_context_features
+from ml.position_distribution import (
+    expected_value,
+    top_exactas,
+    top_trifectas,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _format_combo(scores_to_dog: list[dict[str, Any]], indices: tuple[int, ...], prob: float) -> dict[str, Any]:
+    """Build a dict describing an ordered combination bet."""
+    dogs = [scores_to_dog[i] for i in indices]
+    return {
+        "dogs": [
+            {
+                "race_entry_id": d["race_entry_id"],
+                "dog_name": d["dog_name"],
+                "trap": d["trap"],
+            }
+            for d in dogs
+        ],
+        "probability": round(float(prob), 6),
+    }
 
 
 def load_trained_model(experiment: Experiment) -> dict[str, Any]:
@@ -363,6 +384,20 @@ def predict_race(
     # Generate predictions
     raw_scores = trainer.predict(X)
 
+    # Compute full per-position probability distribution if the trainer
+    # supports it (Plackett-Luce).  Other trainers fall back to win-only.
+    position_dist: np.ndarray | None = None
+    if hasattr(trainer, "position_distributions"):
+        try:
+            dist_groups = trainer.position_distributions(
+                raw_scores, group_sizes=[len(X)]
+            )
+            if dist_groups:
+                position_dist = dist_groups[0]
+        except Exception as e:
+            logger.warning("position_distributions failed, falling back: %s", e)
+            position_dist = None
+
     # Compute probabilities (calibration is built into the trainer)
     if is_ranking:
         # LambdaRank: softmax + isotonic calibration (built into scores_to_proba)
@@ -430,6 +465,21 @@ def predict_race(
                 pred_data["edge"] = None
                 pred_data["is_value"] = None
 
+            # Per-position breakdown (Plackett-Luce / Henery).  Only present
+            # when the trainer can produce a full position distribution.
+            if position_dist is not None and i < position_dist.shape[0]:
+                row = position_dist[i]
+                pred_data["position_probabilities"] = {
+                    "p1": round(float(row[0]), 6),
+                    "p2": round(float(row[1]), 6),
+                    "p3": round(float(row[2]), 6),
+                    "p4_plus": round(float(row[3]), 6),
+                }
+                place2 = float(row[0] + row[1])
+                place3 = float(row[0] + row[1] + row[2])
+                pred_data["place_probability_top2"] = round(place2, 6)
+                pred_data["place_probability_top3"] = round(place3, 6)
+
         elif experiment.target == "finish_position":
             pred_data["win_probability"] = None
             pred_data["predicted_position"] = float(raw_scores[i])
@@ -442,6 +492,57 @@ def predict_race(
             pred_data["confidence"] = None
 
         predictions.append(pred_data)
+
+    # Attach top exacta / trifecta combinations when we have a full
+    # position distribution (Plackett-Luce trainer).  These ride on the
+    # first prediction dict under ``race_combinations`` so callers get
+    # them without changing the return shape.
+    if position_dist is not None and predictions:
+        # Index alignment: position_dist rows are in the same order as `entries`,
+        # which matches `predictions` BEFORE the sort below.
+        sp_by_index = [
+            entry_row.RaceEntry.sp_decimal for entry_row in entries
+        ]
+        score_to_dog: list[dict[str, Any]] = []
+        for entry_row, eid in zip(entries, entry_ids):
+            entry = entry_row.RaceEntry
+            score_to_dog.append({
+                "race_entry_id": eid,
+                "dog_name": entry_row.dog_name,
+                "trap": entry.trap,
+            })
+
+        henery = getattr(trainer, "henery", None)
+        exacta_combos = top_exactas(raw_scores, k=10, lambdas=henery)
+        trifecta_combos = top_trifectas(raw_scores, k=10, lambdas=henery)
+
+        exacta_payload = []
+        for first, second, prob in exacta_combos:
+            payload = _format_combo(score_to_dog, (first, second), prob)
+            # Use the second dog's SP as a crude payout proxy (forecast odds
+            # aren't yet scraped).  EV is computed only when SP exists.
+            sp_proxy = sp_by_index[second]
+            payload["second_dog_sp_decimal"] = sp_proxy
+            payload["expected_value"] = (
+                expected_value(prob, sp_proxy) if sp_proxy else None
+            )
+            exacta_payload.append(payload)
+
+        trifecta_payload = []
+        for first, second, third, prob in trifecta_combos:
+            payload = _format_combo(score_to_dog, (first, second, third), prob)
+            payload["expected_value"] = None  # tricast dividends not yet scraped
+            trifecta_payload.append(payload)
+
+        predictions[0]["race_combinations"] = {
+            "exacta_top10": exacta_payload,
+            "trifecta_top10": trifecta_payload,
+            "henery_lambdas": (
+                {"lambda_2": henery.lambda_2, "lambda_3": henery.lambda_3}
+                if henery is not None
+                else None
+            ),
+        }
 
     # Sort by win probability (highest first) or predicted position/time
     if is_ranking or experiment.target == "win_prob":

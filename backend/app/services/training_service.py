@@ -96,6 +96,9 @@ def create_trainer(algorithm: str, params: dict[str, Any], target: str):
     if algorithm == "lambdarank":
         from ml.trainers.lambdarank_trainer import LambdaRankTrainer
         return LambdaRankTrainer(params, target_type)
+    elif algorithm == "plackett_luce":
+        from ml.trainers.plackett_luce_trainer import PlackettLuceTrainer
+        return PlackettLuceTrainer(params, target_type)
     elif algorithm == "xgboost":
         from ml.trainers.xgboost_trainer import XGBoostTrainer
         return XGBoostTrainer(params, target_type)
@@ -135,7 +138,7 @@ def run_training(db: Session, experiment_id: int) -> None:
         _heartbeat(db, experiment, "building_dataset", log_handler)
         split_cfg = experiment.split_config or {}
         # LambdaRank always uses finish_position internally
-        build_target = "finish_position" if experiment.algorithm == "lambdarank" else experiment.target
+        build_target = "finish_position" if experiment.algorithm in ("lambdarank", "plackett_luce") else experiment.target
 
         def _dataset_heartbeat():
             _heartbeat(db, experiment, "building_dataset", log_handler)
@@ -184,7 +187,7 @@ def run_training(db: Session, experiment_id: int) -> None:
             experiment.target,
         )
 
-        is_ranking = experiment.algorithm == "lambdarank"
+        is_ranking = experiment.algorithm in ("lambdarank", "plackett_luce")
         group_train = dataset.get("group_train")
         group_val = dataset.get("group_val")
         group_test = dataset.get("group_test")
@@ -429,7 +432,7 @@ def run_optuna_optimization(
         logger.info("Building dataset for Optuna experiment %d (%d trials)", experiment_id, n_trials)
         _heartbeat(db, experiment, "building_dataset", log_handler)
         split_cfg = experiment.split_config or {}
-        build_target = "finish_position" if experiment.algorithm == "lambdarank" else experiment.target
+        build_target = "finish_position" if experiment.algorithm in ("lambdarank", "plackett_luce") else experiment.target
 
         def _dataset_heartbeat():
             _heartbeat(db, experiment, "building_dataset", log_handler)
@@ -465,7 +468,7 @@ def run_optuna_optimization(
         experiment.split_config = split_config
         db.commit()
 
-        is_ranking = experiment.algorithm == "lambdarank"
+        is_ranking = experiment.algorithm in ("lambdarank", "plackett_luce")
         group_train = dataset.get("group_train")
         group_val = dataset.get("group_val")
 
@@ -662,7 +665,7 @@ def run_optuna_optimization(
 
 def _suggest_params(trial, algorithm: str) -> dict:
     """Suggest hyperparameters for Optuna trial."""
-    if algorithm == "lambdarank":
+    if algorithm in ("lambdarank", "plackett_luce"):
         return {
             "n_estimators": trial.suggest_int("n_estimators", 100, 600),
             "num_leaves": trial.suggest_int("num_leaves", 15, 63),

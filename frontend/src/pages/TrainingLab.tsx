@@ -47,7 +47,11 @@ export default function TrainingLab() {
 
   // Auto-added feature-group toggles (see dataset_builder.build_dataset)
   const [includeBuiltin, setIncludeBuiltin] = useState(true);
-  const [includeSpFeatures, setIncludeSpFeatures] = useState(true);
+  // Default OFF: the current race's SP is only published in results, so using
+  // it as a training feature leaks post-race data (the scraper has no way to
+  // observe SP before the race is run).  Historical SP from prior races is
+  // computed separately and is unaffected by this toggle.
+  const [includeSpFeatures, setIncludeSpFeatures] = useState(false);
   const [includePaceShape, setIncludePaceShape] = useState(true);
   const [includeRaceRelative, setIncludeRaceRelative] = useState(true);
 
@@ -338,8 +342,9 @@ export default function TrainingLab() {
             </label>
             <p className="text-xs text-gray-500 mb-2">
               In addition to the features you selected above, the training pipeline
-              normally injects several race-context feature groups. Disable any you
-              want excluded from this experiment. All are on by default.
+              can inject several race-context feature groups. Disable any you want
+              excluded from this experiment. Current-race SP is off by default to
+              prevent leakage from post-race data.
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <label className="flex items-start gap-2 text-sm">
@@ -365,10 +370,19 @@ export default function TrainingLab() {
                   className="mt-0.5 rounded"
                 />
                 <span>
-                  <span className="font-medium">SP-derived features</span>
+                  <span className="font-medium">
+                    Current-race starting price{' '}
+                    <span className="text-amber-600">(leakage risk)</span>
+                  </span>
                   <span className="block text-xs text-gray-500">
-                    current_sp_decimal, current_sp_implied_prob, sp_rank_in_field,
-                    market_overround.
+                    Adds current_sp_decimal, current_sp_implied_prob, sp_rank_in_field,
+                    market_overround computed from this race's own SP. GRI only
+                    publishes SP on the results page, so it is not available before
+                    the race goes off — including it at training time leaks
+                    post-race data and inflates test-set metrics. Leave OFF unless
+                    you have wired up a live pre-race odds feed. Historical SP from
+                    previous races (e.g. mean_sp_last5) is computed separately and
+                    is unaffected by this toggle.
                   </span>
                 </span>
               </label>

@@ -46,6 +46,7 @@ export default function TrainingLab() {
   >('log_loss');
   const [walkForwardFolds, setWalkForwardFolds] = useState(1);
   const [embargoDays, setEmbargoDays] = useState(0);
+  const [applyMonotonicConstraints, setApplyMonotonicConstraints] = useState(true);
 
   // Date range for train/test split
   const [testAfter, setTestAfter] = useState('2026-01-01');
@@ -100,6 +101,7 @@ export default function TrainingLab() {
         optuna_objective: optunaObjective,
         walk_forward_folds: walkForwardFolds,
         embargo_days: embargoDays,
+        apply_monotone_constraints: applyMonotonicConstraints,
       };
       if (selectedVersionId !== null) {
         splitConfig.version_id = selectedVersionId;
@@ -275,6 +277,30 @@ export default function TrainingLab() {
               Select a versioned snapshot for reproducibility, or use "Latest" for the most recent feature values.
               {versions.length === 0 && ' Create versions in the Feature Builder page.'}
             </p>
+          </div>
+
+          <div className="mb-4">
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={applyMonotonicConstraints}
+                onChange={(e) => setApplyMonotonicConstraints(e.target.checked)}
+                className="mt-0.5 rounded"
+              />
+              <span>
+                <span className="font-medium">Monotonic constraints</span>
+                <span className="block text-xs text-gray-500 max-w-3xl">
+                  Encodes domain knowledge directly into the tree splits:
+                  ELO, speed-figure and trainer/sire features must monotonically
+                  increase win probability, while SP, finish time and trouble
+                  rates must monotonically decrease it. Free regularisation that
+                  prevents the model from overfitting to spurious non-monotonic
+                  patterns. Applies to XGBoost, LightGBM and LambdaRank; has no
+                  effect on sklearn trainers (logistic regression / random
+                  forest).
+                </span>
+              </span>
+            </label>
           </div>
 
           <div className="mb-4">

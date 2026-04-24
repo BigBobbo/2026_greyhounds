@@ -89,8 +89,19 @@ def _heartbeat(db: Session, experiment: "Experiment", stage: str,
     db.commit()
 
 
-def create_trainer(algorithm: str, params: dict[str, Any], target: str):
-    """Factory function to create the appropriate trainer."""
+def create_trainer(
+    algorithm: str,
+    params: dict[str, Any],
+    target: str,
+    split_cfg: dict[str, Any] | None = None,
+):
+    """Factory function to create the appropriate trainer.
+
+    Args:
+        split_cfg: optional training-pipeline config; used to read
+            apply_monotone_constraints so the caller can toggle it via
+            the UI without having to put it in hyperparameters.
+    """
     target_type = "regression" if target == "finish_time" else "classification"
 
     # Pass the original target through to trainers that support monotonic
@@ -98,6 +109,11 @@ def create_trainer(algorithm: str, params: dict[str, Any], target: str):
     # better) can be flipped automatically.
     params = dict(params)
     params.setdefault("_target", target)
+    if split_cfg is not None and "apply_monotone_constraints" in split_cfg:
+        params.setdefault(
+            "apply_monotone_constraints",
+            bool(split_cfg["apply_monotone_constraints"]),
+        )
 
     if algorithm == "lambdarank":
         from ml.trainers.lambdarank_trainer import LambdaRankTrainer
@@ -188,6 +204,7 @@ def run_training(db: Session, experiment_id: int) -> None:
             experiment.algorithm,
             experiment.hyperparameters,
             experiment.target,
+            split_cfg=split_cfg,
         )
 
         is_ranking = experiment.algorithm == "lambdarank"
@@ -598,7 +615,10 @@ def run_optuna_optimization(
 
             if walk_forward_folds <= 1:
                 # Single-split (original behaviour)
-                trainer = create_trainer(experiment.algorithm, params, experiment.target)
+                trainer = create_trainer(
+                    experiment.algorithm, params, experiment.target,
+                    split_cfg=split_cfg,
+                )
                 if is_ranking:
                     result = trainer.train(
                         X_train, y_train, X_val, y_val,
@@ -622,7 +642,10 @@ def run_optuna_optimization(
                 X_v = X_tv.iloc[v_idx]
                 y_v = y_tv.iloc[v_idx]
                 meta_v = meta_tv.iloc[v_idx]
-                trainer = create_trainer(experiment.algorithm, params, experiment.target)
+                trainer = create_trainer(
+                    experiment.algorithm, params, experiment.target,
+                    split_cfg=split_cfg,
+                )
                 if is_ranking:
                     gtr = _gs(meta_tv["race_id"].iloc[tr_idx])
                     gv = _gs(meta_tv["race_id"].iloc[v_idx])
@@ -643,7 +666,10 @@ def run_optuna_optimization(
         best_params = study.best_params
         experiment.hyperparameters = best_params
 
-        trainer = create_trainer(experiment.algorithm, best_params, experiment.target)
+        trainer = create_trainer(
+            experiment.algorithm, best_params, experiment.target,
+            split_cfg=split_cfg,
+        )
         if is_ranking:
             result = trainer.train(X_train, y_train, X_val, y_val,
                                    group_train=group_train, group_val=group_val)

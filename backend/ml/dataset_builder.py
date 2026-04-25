@@ -34,7 +34,7 @@ def build_dataset(
     only_complete: bool = False,
     version_id: int | None = None,
     include_builtin_features: bool = True,
-    include_sp_features: bool = True,
+    include_sp_features: bool = False,
     include_pace_shape_features: bool = True,
     include_race_relative_features: bool = True,
     include_elo_features: bool = True,
@@ -56,8 +56,13 @@ def build_dataset(
             If None, uses unversioned features.
         include_builtin_features: If True, add built-in race-context features
             (trap bias, grade movement, days since last, weight change, etc.)
-        include_sp_features: If True, add SP-derived features (current_sp_decimal,
+        include_sp_features: If True, add SP-derived features computed from
+            the *current* race's starting price (current_sp_decimal,
             current_sp_implied_prob, sp_rank_in_field, market_overround).
+            Defaults to False because GRI only publishes SP on the results
+            page, so enabling this leaks post-race data.  Historical SP
+            aggregates from prior races (e.g. mean_sp_last5) are computed
+            in a separate code path and are not gated by this flag.
         include_pace_shape_features: If True, add pace-shape features derived from
             is_front_runner / early_speed_ratio (num_front_runners_in_race,
             is_sole_front_runner, pace_pressure, early_speed_rank, is_predicted_leader).
@@ -615,8 +620,14 @@ RACE_RELATIVE_SUFFIXES = [
 def _add_sp_features(X: pd.DataFrame, entries_df: pd.DataFrame) -> pd.DataFrame:
     """Add starting-price-derived features from the current race.
 
-    SP is the single strongest predictor of race outcomes (Benter 1994).
-    These features use information known before the race starts.
+    SP is the single strongest predictor of race outcomes (Benter 1994), but
+    on GRI the SP is only published on the results page — the scraper cannot
+    observe it before the race is run.  Enabling these features at training
+    time is therefore equivalent to peeking at the closing market, and any
+    saved model that relies on them cannot be served at prediction time
+    without a live pre-race odds feed.  Gated by ``include_sp_features`` in
+    ``build_dataset`` (default off) and by the matching toggle in the
+    Training Lab UI.
 
     In addition to raw SP and the naive 1/odds implied probability, this
     function emits:

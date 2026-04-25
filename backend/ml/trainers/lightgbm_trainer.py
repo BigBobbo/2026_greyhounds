@@ -7,6 +7,7 @@ import pandas as pd
 from lightgbm import LGBMClassifier, LGBMRegressor
 from sklearn.linear_model import LogisticRegression as _PlattLR
 
+from ml.monotonic_constraints import build_monotone_constraints
 from ml.trainers.base import BaseTrainer, TrainResult
 
 
@@ -15,19 +16,37 @@ class LightGBMTrainer(BaseTrainer):
         super().__init__(params)
         self.target_type = target_type
         self.calibrator: _PlattLR | None = None
+        self._target = params.get("_target", "win_prob")
+        self._apply_monotone = params.get("apply_monotone_constraints", True)
 
-        model_params = {k: v for k, v in params.items() if k not in ("target_type",)}
+        # Keep the raw params around; the model is instantiated in train()
+        # once we know the feature-name order so monotone constraints can
+        # be aligned column-by-column.
+        model_params = {
+            k: v for k, v in params.items()
+            if k not in ("target_type", "_target", "apply_monotone_constraints")
+        }
         model_params.setdefault("verbosity", -1)
         model_params.setdefault("random_state", 42)
-
         if target_type == "classification":
-            # Handle class imbalance: win is ~16.7% in 6-dog races
             model_params.setdefault("is_unbalance", True)
+        self._model_params = model_params
+        self.model = None
+
+    def train(self, X_train, y_train, X_val, y_val) -> TrainResult:
+        model_params = dict(self._model_params)
+        if self._apply_monotone:
+            constraints = build_monotone_constraints(
+                list(X_train.columns), self._target,
+            )
+            # LightGBM accepts a list of ints of same length as features.
+            model_params["monotone_constraints"] = constraints
+
+        if self.target_type == "classification":
             self.model = LGBMClassifier(**model_params)
         else:
             self.model = LGBMRegressor(**model_params)
 
-    def train(self, X_train, y_train, X_val, y_val) -> TrainResult:
         self.model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],

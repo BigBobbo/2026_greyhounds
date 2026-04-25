@@ -25,6 +25,7 @@ from app.models.track import Track
 from ml.race_features import (
     compute_builtin_features_batch,
     compute_elo_features_batch,
+    compute_h2h_features_batch,
 )
 
 
@@ -259,6 +260,154 @@ def test_elo_handles_unresulted_prediction_race(db):
     # Simplest check: ratings strictly between min and max baseline ratings
     for col in ("dog_elo", "field_avg_elo", "field_max_elo"):
         assert df[col].notna().all()
+
+
+def test_h2h_tracks_wins_and_losses_within_field(db):
+    _track, dogs, races = _seed_simple(db)
+    # The last race has all 4 dogs with a stable skill ordering — by then
+    # Alpha has beaten every other dog many times.
+    last_race = max(races, key=lambda r: r.race_date)
+    last_entries = (
+        db.query(RaceEntry)
+        .filter(RaceEntry.race_id == last_race.id)
+        .all()
+    )
+    entry_ids = [e.id for e in last_entries]
+
+    df = compute_h2h_features_batch(db, entry_ids)
+    assert not df.empty
+    assert set(df.columns) >= {
+        "h2h_meetings_vs_field",
+        "h2h_wins_vs_field",
+        "h2h_losses_vs_field",
+        "h2h_win_rate_vs_field",
+        "h2h_avg_beaten_length_vs_field",
+        "best_opponent_beaten_count",
+    }
+
+    name_to_entry = {}
+    for e in last_entries:
+        dog = db.query(Dog).filter(Dog.id == e.dog_id).first()
+        name_to_entry[dog.name] = e.id
+
+    # Every dog has raced with the other three in every prior race, so
+    # meetings should be: 11 prior races * 3 opponents = 33
+    for dog_name in ("Alpha", "Bravo", "Charlie", "Delta"):
+        meetings = df.loc[name_to_entry[dog_name], "h2h_meetings_vs_field"]
+        assert meetings == 33
+
+    # Alpha (fastest) should have the highest win rate vs field
+    win_rate_alpha = df.loc[name_to_entry["Alpha"], "h2h_win_rate_vs_field"]
+    win_rate_delta = df.loc[name_to_entry["Delta"], "h2h_win_rate_vs_field"]
+    assert win_rate_alpha > win_rate_delta
+
+    # Alpha should have beaten all 3 opponents at least once
+    assert df.loc[name_to_entry["Alpha"], "best_opponent_beaten_count"] == 3
+
+
+def test_h2h_returns_empty_on_empty_input(db):
+    df = compute_h2h_features_batch(db, [])
+    assert df.empty
+
+
+def test_comment_derived_features_surface_through_batch(db):
+    """Verify the structured comment parser propagates through the batch
+    pipeline: when we seed every race with specific comments, the per-dog
+    rate features should reflect what was actually parsed."""
+    track = Track(name="CmtTrack", code="CMT", active=True)
+    db.add(track)
+    db.commit()
+
+    dog = Dog(name="Runner", trainer_name="Anon", birth_date=date(2023, 1, 1))
+    db.add(dog)
+    db.commit()
+
+    # Need a 2-dog field so the race is valid in our schema
+    dog2 = Dog(name="Filler", trainer_name="Anon", birth_date=date(2023, 1, 1))
+    db.add(dog2)
+    db.commit()
+
+    # Seed 10 resulted races; in 7 of them Runner is "EP Ld 1", in 3 "SAw Fd".
+    comments = ["EP Ld 1"] * 7 + ["SAw Fd Ck 2"] * 3
+    target_race = None
+    for i, comment in enumerate(comments):
+        race = Race(
+            track_id=track.id,
+            race_date=date(2025, 2, 1) + timedelta(days=i),
+            race_time=time(19, 30),
+            race_number=i + 1,
+            distance_m=525,
+            grade="A3",
+            race_type="flat",
+            going="standard",
+            num_runners=2,
+            status="resulted",
+        )
+        db.add(race)
+        db.commit()
+        # Runner wins 7, loses 3 — matches the EP/SAw pattern
+        runner_pos = 1 if comment.startswith("EP") else 2
+        filler_pos = 2 if runner_pos == 1 else 1
+        db.add(RaceEntry(
+            race_id=race.id, dog_id=dog.id, trap=1,
+            finish_position=runner_pos, finish_time=29.0 + 0.1 * runner_pos,
+            adjusted_time=29.0 + 0.1 * runner_pos,
+            sectional_time=5.0,
+            weight_kg=32.0, sp_decimal=2.0, comment=comment,
+        ))
+        db.add(RaceEntry(
+            race_id=race.id, dog_id=dog2.id, trap=2,
+            finish_position=filler_pos, finish_time=29.0 + 0.1 * filler_pos,
+            adjusted_time=29.0 + 0.1 * filler_pos,
+            sectional_time=5.0,
+            weight_kg=32.0, sp_decimal=2.0, comment="",
+        ))
+        db.commit()
+        target_race = race
+
+    # Now add an 11th (target) race — features for this entry should reflect
+    # the previous 10 history rows of Runner.
+    target_race = Race(
+        track_id=track.id,
+        race_date=date(2025, 2, 20),
+        race_time=time(19, 30),
+        race_number=99,
+        distance_m=525,
+        grade="A3",
+        race_type="flat",
+        going="standard",
+        num_runners=2,
+        status="resulted",
+    )
+    db.add(target_race)
+    db.commit()
+    target_entry = RaceEntry(
+        race_id=target_race.id, dog_id=dog.id, trap=1,
+        finish_position=1, finish_time=29.1, adjusted_time=29.1,
+        sectional_time=5.0, weight_kg=32.0, sp_decimal=2.0,
+    )
+    db.add(target_entry)
+    db.add(RaceEntry(
+        race_id=target_race.id, dog_id=dog2.id, trap=2,
+        finish_position=2, finish_time=29.2, adjusted_time=29.2,
+        sectional_time=5.0, weight_kg=32.0, sp_decimal=2.0,
+    ))
+    db.commit()
+
+    df = compute_builtin_features_batch(db, [target_entry.id])
+    row = df.loc[target_entry.id]
+
+    # 7 of 10 prior comments were "EP Ld 1"
+    assert abs(row["running_style_ep_rate_last10"] - 0.7) < 1e-6
+    assert abs(row["led_at_bend1_rate_last10"] - 0.7) < 1e-6
+    # 3 of 10 were "SAw Fd Ck 2"
+    assert abs(row["slow_away_rate_last10"] - 0.3) < 1e-6
+    assert abs(row["faded_rate_last10"] - 0.3) < 1e-6
+    assert abs(row["trouble_bend2_rate_last10"] - 0.3) < 1e-6
+    # No "MP" / "LP" / wide / railed tokens in the seed comments
+    assert row["running_style_mp_rate_last10"] == 0.0
+    assert row["running_style_lp_rate_last10"] == 0.0
+    assert row["ran_wide_rate_last10"] == 0.0
 
 
 def test_speed_figure_orders_with_skill(db):

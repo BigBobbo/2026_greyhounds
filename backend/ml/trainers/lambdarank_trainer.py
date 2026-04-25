@@ -18,6 +18,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
+from ml.monotonic_constraints import build_monotone_constraints
 from ml.trainers.base import BaseTrainer, TrainResult
 
 
@@ -27,6 +28,7 @@ class LambdaRankTrainer(BaseTrainer):
     def __init__(self, params: dict[str, Any], target_type: str = "classification"):
         super().__init__(params)
         self.target_type = target_type  # always treated as ranking internally
+        self._apply_monotone = params.get("apply_monotone_constraints", True)
 
         self.lgb_params = {
             "objective": "lambdarank",
@@ -68,9 +70,19 @@ class LambdaRankTrainer(BaseTrainer):
 
         n_estimators = self.lgb_params.pop("n_estimators", 200)
 
+        # LambdaRank score: higher = more relevant = predicted winner, so
+        # monotone directions follow the win-probability convention (no
+        # sign flip).  Use "win_prob" as the target key.
+        extra_params = {}
+        if self._apply_monotone and self._feature_names:
+            extra_params["monotone_constraints"] = build_monotone_constraints(
+                self._feature_names, target="win_prob",
+            )
+
         self.model = lgb.LGBMRanker(
             n_estimators=n_estimators,
             **self.lgb_params,
+            **extra_params,
         )
         self.model.fit(
             X_train, y_train_rel,

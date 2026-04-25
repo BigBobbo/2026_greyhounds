@@ -88,6 +88,144 @@ def get_coverage(version_id: int | None = None, db: Session = Depends(get_db)):
     return get_feature_coverage(db, version_id=version_id)
 
 
+@router.get("/auto-injected")
+def list_auto_injected_features() -> dict:
+    """List features that the training pipeline injects automatically in
+    addition to user-defined FeatureDefinitions.
+
+    These features are computed on-the-fly during dataset assembly and
+    prediction — they are NOT materialized in the `computed_features`
+    table, and cannot be toggled individually.  Each group is controlled
+    by a single include_* flag on the experiment's split_config.  This
+    endpoint exists purely for visibility so the UI can show what the
+    model actually trains on.
+    """
+    from ml.race_features import (
+        BUILTIN_FEATURE_NAMES,
+        ELO_FEATURE_NAMES,
+        H2H_FEATURE_NAMES,
+    )
+    from ml.race_comments import COMMENT_FEATURE_NAMES
+    from ml.dataset_builder import (
+        SP_FEATURE_NAMES,
+        ODDS_SNAPSHOT_FEATURE_NAMES,
+        PACE_SHAPE_FEATURE_NAMES,
+        RACE_RELATIVE_BASE_COLUMNS,
+        RACE_RELATIVE_SUFFIXES,
+    )
+
+    # BUILTIN_FEATURE_NAMES already contains COMMENT_FEATURE_NAMES via the
+    # spread at the end of the registry.  Split them so the UI can present
+    # comments as a distinct category.
+    builtin_non_comment = [
+        n for n in BUILTIN_FEATURE_NAMES if n not in set(COMMENT_FEATURE_NAMES)
+    ]
+
+    groups = [
+        {
+            "key": "builtin",
+            "title": "Built-in race-context",
+            "toggle_flag": "include_builtin_features",
+            "description": (
+                "Trap bias (incl. going-conditional), grade movement / dynamics, "
+                "days-since-last, weight change, early-speed ratio, front-runner "
+                "heuristics, trainer and sire stats, speed figures (Beyer-style), "
+                "stamina profile, first-time flags, workload/fitness cycle, "
+                "trouble-adjusted runs."
+            ),
+            "features": builtin_non_comment,
+        },
+        {
+            "key": "comment",
+            "title": "Comment-derived",
+            "toggle_flag": "include_builtin_features",
+            "description": (
+                "Structured parse of the race-comment field: running style "
+                "(EP/MP/LP), break quality (QAw/SAw/Awk), led-at-bend rates, "
+                "finish-well / faded markers, bend-by-bend trouble, rail vs "
+                "wide preference, clear-win rate.  Computed over the dog's "
+                "last 10 prior runs only — the current race's comment is "
+                "never used."
+            ),
+            "features": list(COMMENT_FEATURE_NAMES),
+        },
+        {
+            "key": "elo",
+            "title": "ELO skill ratings",
+            "toggle_flag": "include_elo_features",
+            "description": (
+                "Pairwise multi-entrant ELO maintained in a chronological "
+                "walk over every resulted race.  Separate ratings for "
+                "overall, per-distance and per-track.  Plus field-level "
+                "aggregates (avg, max, rank, gap-to-best, gap-to-avg)."
+            ),
+            "features": list(ELO_FEATURE_NAMES),
+        },
+        {
+            "key": "sp",
+            "title": "SP / market",
+            "toggle_flag": "include_sp_features",
+            "description": (
+                "Starting price, log-odds, de-vigged implied probability, "
+                "favourite / second-favourite flags and gaps."
+            ),
+            "features": list(SP_FEATURE_NAMES),
+        },
+        {
+            "key": "odds_snapshot",
+            "title": "Odds-snapshot drift",
+            "toggle_flag": "include_odds_snapshot_features",
+            "description": (
+                "Derived from the odds_snapshots table: opening-to-SP drift, "
+                "late-window steam, cross-book disagreement.  No-op until "
+                "live odds are being scraped."
+            ),
+            "features": list(ODDS_SNAPSHOT_FEATURE_NAMES),
+        },
+        {
+            "key": "pace_shape",
+            "title": "Pace shape",
+            "toggle_flag": "include_pace_shape_features",
+            "description": (
+                "Race-level pace dynamics from early-speed ratio + front-runner "
+                "score: pace scenario one-hots, expected lead probability, "
+                "opponent early-speed average, running-style mismatch."
+            ),
+            "features": list(PACE_SHAPE_FEATURE_NAMES),
+        },
+        {
+            "key": "h2h",
+            "title": "Head-to-head",
+            "toggle_flag": "include_h2h_features",
+            "description": (
+                "Prior meeting record against the specific opponents in "
+                "today's race, with Beta-shrunk win rate."
+            ),
+            "features": list(H2H_FEATURE_NAMES),
+        },
+        {
+            "key": "race_relative",
+            "title": "Race-relative variants",
+            "toggle_flag": "include_race_relative_features",
+            "description": (
+                "For each base column below, five within-race variants are "
+                "emitted: {col}__vs_field, {col}__rank, {col}__z_in_field "
+                "(signed by direction), {col}__gap_to_best, "
+                "{col}__is_field_best.  Plus num_runners."
+            ),
+            "features": [
+                f"{col}{suffix}"
+                for col in RACE_RELATIVE_BASE_COLUMNS
+                for suffix in RACE_RELATIVE_SUFFIXES
+            ] + ["num_runners"],
+            "base_columns": list(RACE_RELATIVE_BASE_COLUMNS),
+        },
+    ]
+
+    total = sum(len(g["features"]) for g in groups)
+    return {"groups": groups, "total": total}
+
+
 @router.get("/data-integrity")
 def get_data_integrity(
     start_date: str | None = None,

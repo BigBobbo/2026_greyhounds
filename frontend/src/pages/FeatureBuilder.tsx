@@ -74,6 +74,21 @@ export default function FeatureBuilder() {
   }[]>([]);
   const [showCoverage, setShowCoverage] = useState(false);
 
+  // Auto-injected feature groups (ELO, speed figures, H2H, etc. — computed
+  // on-the-fly during training/prediction, not materialized)
+  type AutoGroup = {
+    key: string;
+    title: string;
+    toggle_flag: string;
+    description: string;
+    features: string[];
+    base_columns?: string[];
+  };
+  const [autoGroups, setAutoGroups] = useState<AutoGroup[] | null>(null);
+  const [autoTotal, setAutoTotal] = useState(0);
+  const [showAutoInjected, setShowAutoInjected] = useState(false);
+  const [expandedAuto, setExpandedAuto] = useState<Record<string, boolean>>({});
+
   // Versioning
   const [versions, setVersions] = useState<{
     id: number; name: string; description: string | null;
@@ -208,6 +223,14 @@ export default function FeatureBuilder() {
     }).catch(() => {});
   }, []);
 
+  const fetchAutoInjected = useCallback(() => {
+    if (autoGroups !== null) return;  // cache — registries are static
+    api.get('/features/auto-injected').then(res => {
+      setAutoGroups(res.data.groups);
+      setAutoTotal(res.data.total);
+    }).catch(() => {});
+  }, [autoGroups]);
+
   const handleCreateVersion = async () => {
     if (!newVersionName.trim()) return;
     setCreatingVersion(true);
@@ -283,6 +306,12 @@ export default function FeatureBuilder() {
             className="bg-gray-100 text-gray-700 px-3 sm:px-4 py-2 rounded-md text-sm hover:bg-gray-200"
           >
             {showCoverage ? 'Hide Progress' : 'Show Progress'}
+          </button>
+          <button
+            onClick={() => { setShowAutoInjected(!showAutoInjected); if (!showAutoInjected) fetchAutoInjected(); }}
+            className="bg-gray-100 text-gray-700 px-3 sm:px-4 py-2 rounded-md text-sm hover:bg-gray-200"
+          >
+            {showAutoInjected ? 'Hide Auto-Injected' : 'Auto-Injected Features'}
           </button>
           <button
             onClick={handleMaterialize}
@@ -394,6 +423,95 @@ export default function FeatureBuilder() {
               <p className="text-xs text-gray-400 text-center py-2">No versions created yet</p>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Auto-injected feature inventory */}
+      {showAutoInjected && (
+        <div className="bg-white rounded-lg shadow p-5 mb-6">
+          <div className="flex items-start justify-between gap-3 mb-3">
+            <div>
+              <h2 className="font-semibold">Auto-Injected Features</h2>
+              <p className="text-xs text-gray-500 mt-1 max-w-3xl">
+                These features are <strong>not stored</strong> in the
+                computed_features table — they are computed on the fly during
+                training and prediction. Some need the full race field or a
+                chronological walk across every race (ELO, pace-shape,
+                head-to-head), so they can&apos;t fit the per-entry
+                materialization model. They&apos;re listed here purely so you
+                can see what the model actually trains on. Each group is
+                enabled by default and can be toggled via the corresponding
+                flag on the Training Lab form.
+              </p>
+            </div>
+            {autoGroups && (
+              <div className="text-sm text-gray-600 whitespace-nowrap">
+                <strong>{autoTotal}</strong> features across{' '}
+                <strong>{autoGroups.length}</strong> groups
+              </div>
+            )}
+          </div>
+
+          {!autoGroups && (
+            <div className="text-sm text-gray-500">Loading…</div>
+          )}
+
+          {autoGroups && (
+            <div className="space-y-3">
+              {autoGroups.map((g) => {
+                const isOpen = !!expandedAuto[g.key];
+                return (
+                  <div key={g.key} className="border rounded-md">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedAuto((s) => ({ ...s, [g.key]: !s[g.key] }))}
+                      className="w-full flex items-center justify-between text-left px-3 py-2 hover:bg-gray-50"
+                    >
+                      <div>
+                        <div className="font-medium text-sm">
+                          {g.title}
+                          <span className="text-xs text-gray-400 font-normal ml-2">
+                            {g.features.length} features
+                          </span>
+                        </div>
+                        <div className="text-xs text-gray-500 mt-0.5">
+                          Toggle: <code className="text-[11px]">{g.toggle_flag}</code>
+                        </div>
+                      </div>
+                      <span className="text-gray-400 text-xs">{isOpen ? '▾' : '▸'}</span>
+                    </button>
+                    {isOpen && (
+                      <div className="border-t px-3 py-3 bg-gray-50">
+                        <p className="text-xs text-gray-600 mb-2">{g.description}</p>
+                        {g.key === 'race_relative' && g.base_columns && (
+                          <p className="text-xs text-gray-500 mb-2">
+                            Base columns ({g.base_columns.length}): each gets
+                            5 variants (<code>__vs_field</code>,{' '}
+                            <code>__rank</code>, <code>__z_in_field</code>,{' '}
+                            <code>__gap_to_best</code>,{' '}
+                            <code>__is_field_best</code>).
+                          </p>
+                        )}
+                        <div className="flex flex-wrap gap-1.5">
+                          {(g.key === 'race_relative' && g.base_columns
+                            ? g.base_columns
+                            : g.features
+                          ).map((name) => (
+                            <code
+                              key={name}
+                              className="text-[11px] bg-white border border-gray-200 rounded px-1.5 py-0.5 text-gray-700"
+                            >
+                              {name}
+                            </code>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 

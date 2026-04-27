@@ -50,6 +50,8 @@ class RaceResponse(RaceBase):
     id: int
     track_name: str | None = None  # joined from track table
     created_at: datetime | None = None
+    last_scraped_at: datetime | None = None
+    last_scrape_log_id: int | None = None
 
     model_config = {"from_attributes": True}
 

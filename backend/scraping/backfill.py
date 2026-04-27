@@ -105,10 +105,12 @@ async def run_backfill(
                     races = await scrape_results(track.code, current)
 
                     if races:
-                        stats = upsert_race_results(db, races)
+                        stats = upsert_race_results(db, races, scrape_log_id=log.id)
                         track_races += stats["races_new"]
                         track_entries += stats["entries_new"]
 
+                    log.heartbeat_at = datetime.utcnow()
+                    db.commit()
                     current += timedelta(days=1)
                     await asyncio.sleep(delay)
 

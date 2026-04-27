@@ -23,6 +23,8 @@ class Race(Base):
     source_id = Column(String)
     status = Column(String, default="scheduled", index=True)  # scheduled / resulted / void
     created_at = Column(DateTime, default=datetime.utcnow)
+    last_scraped_at = Column(DateTime)
+    last_scrape_log_id = Column(Integer, ForeignKey("scrape_logs.id"), index=True)
 
     __table_args__ = (
         UniqueConstraint("track_id", "race_date", "race_number", name="uq_race_track_date_num"),

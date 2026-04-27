@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, Float, Integer, String, ForeignKey, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, ForeignKey, UniqueConstraint
 from app.database import Base
 
 
@@ -21,6 +21,8 @@ class RaceEntry(Base):
     wide_runner = Column(Boolean, default=False)
     grade_at_entry = Column(String)
     days_since_last = Column(Integer)
+    last_scraped_at = Column(DateTime)
+    last_scrape_log_id = Column(Integer, ForeignKey("scrape_logs.id"), index=True)
 
     __table_args__ = (
         UniqueConstraint("race_id", "trap", name="uq_entry_race_trap"),

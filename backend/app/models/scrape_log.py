@@ -16,4 +16,5 @@ class ScrapeLog(Base):
     records_updated = Column(Integer, default=0)
     error_message = Column(Text)
     started_at = Column(DateTime, default=datetime.utcnow)
+    heartbeat_at = Column(DateTime)
     completed_at = Column(DateTime)

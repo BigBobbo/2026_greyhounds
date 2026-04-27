@@ -39,8 +39,10 @@ logger = logging.getLogger(__name__)
 def load_trained_model(experiment: Experiment) -> dict[str, Any]:
     """Load a trained model artifact from disk.
 
-    Returns a dict with keys: trainer, feature_medians, is_ranking.
-    Backwards-compatible with old models saved as raw trainer objects.
+    Returns a dict with keys: trainer, feature_medians, feature_names, is_ranking.
+    Backwards-compatible with old models saved as raw trainer objects or
+    artifacts missing `feature_names` (in which case we try to recover the
+    list from attributes the trainer exposes).
     """
     if not experiment.model_path or not os.path.exists(experiment.model_path):
         raise FileNotFoundError(f"Model file not found: {experiment.model_path}")
@@ -49,13 +51,43 @@ def load_trained_model(experiment: Experiment) -> dict[str, Any]:
 
     # Backwards compatibility: old models were saved as the trainer directly
     if not isinstance(artifact, dict):
-        return {
+        artifact = {
             "trainer": artifact,
             "feature_medians": {},
             "is_ranking": False,
         }
 
+    # Recover feature_names from the trainer if the artifact predates the
+    # feature-list-persistence fix.  LambdaRank stashes them on the trainer
+    # itself; LightGBM/XGBoost expose them on the underlying model.
+    if not artifact.get("feature_names"):
+        artifact["feature_names"] = _extract_trainer_feature_names(artifact.get("trainer"))
+
     return artifact
+
+
+def _extract_trainer_feature_names(trainer: Any) -> list[str]:
+    """Best-effort recovery of the training feature list from a trainer."""
+    if trainer is None:
+        return []
+    names = getattr(trainer, "_feature_names", None)
+    if names:
+        return list(names)
+    model = getattr(trainer, "model", None)
+    if model is not None:
+        for attr in ("feature_names_in_", "feature_name_"):
+            names = getattr(model, attr, None)
+            if names is not None and len(names) > 0:
+                return list(names)
+        booster = getattr(model, "booster_", None)
+        if booster is not None:
+            try:
+                names = booster.feature_name()
+                if names:
+                    return list(names)
+            except Exception:
+                pass
+    return []
 
 
 def compute_features_for_entries(
@@ -285,6 +317,7 @@ def predict_race(
     artifact = load_trained_model(experiment)
     trainer = artifact["trainer"]
     feature_medians = artifact.get("feature_medians", {})
+    trained_feature_names = artifact.get("feature_names", []) or []
     is_ranking = artifact.get("is_ranking", False)
 
     # Get race entries with SP odds
@@ -348,12 +381,13 @@ def predict_race(
     # Any remaining NaN (new features, etc.) fill with 0
     X = X.fillna(0)
 
-    # Ensure columns match training
-    feature_names = [f.name for f in feature_defs]
-    for col in feature_names:
+    # Ensure base feature columns from the FeatureDefinition set are present
+    # (so race-relative derivatives can be computed on them).  Do NOT drop
+    # other columns here — built-in / ELO / H2H features were also part of
+    # the training matrix and must be preserved for the final alignment.
+    for col in (f.name for f in feature_defs):
         if col not in X.columns:
             X[col] = 0
-    X = X[feature_names]
 
     # Add race-relative features (same as training)
     # All entries belong to one race, so create a constant race_id series
@@ -362,7 +396,18 @@ def predict_race(
         race_id_series = pd.Series(race_id, index=X.index, name="race_id")
         X = add_race_relative_features(X, race_id_series)
 
-    # Fill any NaN in new relative features
+    # Final alignment to the exact column set/order the model was trained on.
+    # Race-relative / built-in / ELO / H2H features are generated dynamically
+    # and the resulting column set depends on the data, so without this step
+    # the model can see a different shape than it was fit on.
+    if trained_feature_names:
+        for col in trained_feature_names:
+            if col not in X.columns:
+                X[col] = feature_medians.get(col, 0.0) if feature_medians else 0.0
+        X = X[list(trained_feature_names)]
+
+    # Fill any NaN in new relative features (and any aligned columns that
+    # had no median available).
     X = X.fillna(0)
 
     # Generate predictions

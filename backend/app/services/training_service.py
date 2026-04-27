@@ -343,10 +343,16 @@ def run_training(db: Session, experiment_id: int) -> None:
         model_dir = settings.model_artifacts_dir
         os.makedirs(model_dir, exist_ok=True)
         model_path = os.path.join(model_dir, f"experiment_{experiment_id}.joblib")
-        # Save the trainer along with feature medians
+        # Save the trainer along with feature medians and the exact feature
+        # column list (in order) the model was trained on.  Persisting
+        # `feature_names` is critical: race-relative / built-in / ELO / H2H
+        # feature columns are generated dynamically and depend on the data,
+        # so without this list the prediction service has no way to
+        # reconstruct the same column set and order.
         artifact = {
             "trainer": trainer,
             "feature_medians": dataset.get("feature_medians", {}),
+            "feature_names": dataset.get("feature_names", []),
             "is_ranking": is_ranking,
         }
         joblib.dump(artifact, model_path)

@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import api from '../api/client';
+import type { Track } from '../types/models';
 
 interface ScrapeLog {
   id: number;
@@ -31,6 +32,12 @@ interface LastScrapeInfo {
   active_track_count: number;
 }
 
+const isoDaysAgo = (days: number) => {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return d.toISOString().split('T')[0];
+};
+
 export default function ScrapingStatusPage() {
   const [status, setStatus] = useState<ScrapingStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -40,6 +47,12 @@ export default function ScrapingStatusPage() {
   const [message, setMessage] = useState('');
   const [lastInfo, setLastInfo] = useState<LastScrapeInfo | null>(null);
   const [scrapingSinceLast, setScrapingSinceLast] = useState(false);
+  const [tracks, setTracks] = useState<Track[]>([]);
+  const [rangeStart, setRangeStart] = useState(isoDaysAgo(30));
+  const [rangeEnd, setRangeEnd] = useState(new Date().toISOString().split('T')[0]);
+  const [rangeTracks, setRangeTracks] = useState<string[]>([]);
+  const [rangeAllActive, setRangeAllActive] = useState(true);
+  const [rangeRunning, setRangeRunning] = useState(false);
 
   const fetchStatus = () => {
     api.get<ScrapingStatus>('/scraping/status').then((res) => {
@@ -56,6 +69,43 @@ export default function ScrapingStatusPage() {
     const interval = setInterval(fetchStatus, 10000); // refresh every 10s
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    api.get<Track[]>('/tracks/?active_only=true')
+      .then((res) => setTracks(res.data))
+      .catch(() => {});
+  }, []);
+
+  const dayCount = useMemo(() => {
+    if (!rangeStart || !rangeEnd) return 0;
+    const a = new Date(rangeStart);
+    const b = new Date(rangeEnd);
+    if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime()) || b < a) return 0;
+    return Math.round((b.getTime() - a.getTime()) / 86400000) + 1;
+  }, [rangeStart, rangeEnd]);
+
+  const handleRangeScrape = async () => {
+    setRangeRunning(true);
+    setMessage('');
+    try {
+      const res = await api.post('/scraping/backfill', {
+        start_date: rangeStart,
+        end_date: rangeEnd,
+        track_codes: rangeAllActive ? null : rangeTracks,
+      });
+      setMessage(res.data.message);
+      setTimeout(fetchStatus, 2000);
+    } catch {
+      setMessage('Failed to start date-range scrape');
+    }
+    setRangeRunning(false);
+  };
+
+  const toggleRangeTrack = (code: string) => {
+    setRangeTracks((cur) =>
+      cur.includes(code) ? cur.filter((c) => c !== code) : [...cur, code]
+    );
+  };
 
   const handleScrapeSinceLast = async () => {
     setScrapingSinceLast(true);
@@ -80,7 +130,7 @@ export default function ScrapingStatusPage() {
       });
       setMessage(res.data.message);
       setTimeout(fetchStatus, 2000);
-    } catch (err) {
+    } catch {
       setMessage('Failed to trigger scrape');
     }
     setTriggering(false);
@@ -175,6 +225,90 @@ export default function ScrapingStatusPage() {
         >
           {scrapingSinceLast ? 'Starting…' : 'Scrape Since Last Race Date'}
         </button>
+      </div>
+
+      {/* Date range scrape across tracks */}
+      <div className="bg-white rounded-lg shadow p-5 mb-6">
+        <h2 className="font-semibold mb-3">Date Range Scrape</h2>
+        <p className="text-xs text-gray-500 mb-3">
+          Scrape every day between two dates across selected tracks. Existing
+          races (matched by track + date + race number) are updated, never
+          duplicated.
+        </p>
+        <div className="flex gap-3 items-end flex-wrap mb-3">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Start Date</label>
+            <input
+              type="date"
+              value={rangeStart}
+              onChange={(e) => setRangeStart(e.target.value)}
+              className="border rounded-md px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">End Date</label>
+            <input
+              type="date"
+              value={rangeEnd}
+              onChange={(e) => setRangeEnd(e.target.value)}
+              className="border rounded-md px-3 py-2 text-sm"
+            />
+          </div>
+          <label className="flex items-center gap-2 text-sm pb-2">
+            <input
+              type="checkbox"
+              checked={rangeAllActive}
+              onChange={(e) => setRangeAllActive(e.target.checked)}
+            />
+            All active tracks
+          </label>
+        </div>
+
+        {!rangeAllActive && (
+          <div className="mb-3">
+            <p className="text-xs text-gray-500 mb-2">
+              Pick tracks ({rangeTracks.length} selected):
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2 max-h-44 overflow-y-auto border rounded-md p-2">
+              {tracks.map((t) => (
+                <label
+                  key={t.id}
+                  className="flex items-center gap-2 text-xs cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5"
+                >
+                  <input
+                    type="checkbox"
+                    checked={rangeTracks.includes(t.code)}
+                    onChange={() => toggleRangeTrack(t.code)}
+                  />
+                  <span className="font-mono">{t.code}</span>
+                  <span className="text-gray-500 truncate">{t.name}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center gap-3 flex-wrap">
+          <button
+            onClick={handleRangeScrape}
+            disabled={
+              rangeRunning ||
+              dayCount === 0 ||
+              (!rangeAllActive && rangeTracks.length === 0)
+            }
+            className="bg-purple-600 text-white px-4 py-2 rounded-md text-sm hover:bg-purple-700 disabled:opacity-50"
+          >
+            {rangeRunning ? 'Starting…' : 'Scrape Date Range'}
+          </button>
+          {dayCount > 0 && (
+            <span className="text-xs text-gray-500">
+              {dayCount} day{dayCount === 1 ? '' : 's'} ×{' '}
+              {rangeAllActive
+                ? `${status?.total_tracks ?? '?'} active tracks`
+                : `${rangeTracks.length} track${rangeTracks.length === 1 ? '' : 's'}`}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Manual trigger */}

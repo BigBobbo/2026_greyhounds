@@ -12,6 +12,7 @@ interface ScrapeLog {
   records_updated: number;
   error_message: string | null;
   started_at: string | null;
+  heartbeat_at: string | null;
   completed_at: string | null;
 }
 
@@ -53,6 +54,7 @@ export default function ScrapingStatusPage() {
   const [rangeTracks, setRangeTracks] = useState<string[]>([]);
   const [rangeAllActive, setRangeAllActive] = useState(true);
   const [rangeRunning, setRangeRunning] = useState(false);
+  const [reaping, setReaping] = useState(false);
 
   const fetchStatus = () => {
     api.get<ScrapingStatus>('/scraping/status').then((res) => {
@@ -143,6 +145,28 @@ export default function ScrapingStatusPage() {
     } catch {
       setMessage('Failed to start track discovery');
     }
+  };
+
+  const handleReapStale = async () => {
+    setReaping(true);
+    setMessage('');
+    try {
+      const res = await api.post<{ reaped: number; log_ids: number[] }>(
+        '/scraping/reap-stale',
+        { stale_minutes: 15 }
+      );
+      if (res.data.reaped === 0) {
+        setMessage('No stale running jobs found.');
+      } else {
+        setMessage(
+          `Marked ${res.data.reaped} stuck job${res.data.reaped === 1 ? '' : 's'} as failed (ids: ${res.data.log_ids.join(', ')}).`
+        );
+      }
+      setTimeout(fetchStatus, 500);
+    } catch {
+      setMessage('Failed to reap stale jobs');
+    }
+    setReaping(false);
   };
 
   const statusColor = (s: string) => {
@@ -355,7 +379,17 @@ export default function ScrapingStatusPage() {
 
       {/* Recent scrape logs */}
       <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
-        <h2 className="font-semibold px-5 pt-4 pb-2">Recent Scrape Logs</h2>
+        <div className="flex items-center justify-between px-5 pt-4 pb-2 gap-3 flex-wrap">
+          <h2 className="font-semibold">Recent Scrape Logs</h2>
+          <button
+            onClick={handleReapStale}
+            disabled={reaping}
+            className="text-xs bg-red-600 text-white px-3 py-1.5 rounded-md hover:bg-red-700 disabled:opacity-50"
+            title="Mark any 'running' jobs without a recent heartbeat as failed"
+          >
+            {reaping ? 'Reaping…' : 'Reap stale jobs'}
+          </button>
+        </div>
         {loading ? (
           <p className="px-5 py-4 text-gray-500">Loading...</p>
         ) : !status?.recent_logs.length ? (
@@ -378,14 +412,33 @@ export default function ScrapingStatusPage() {
                 const duration = log.started_at && log.completed_at
                   ? Math.round((new Date(log.completed_at).getTime() - new Date(log.started_at).getTime()) / 1000)
                   : null;
+                const isRunning = log.status === 'running';
+                const lastAlive = log.heartbeat_at || log.started_at;
+                const minsSinceAlive = isRunning && lastAlive
+                  ? Math.round((Date.now() - new Date(lastAlive).getTime()) / 60000)
+                  : null;
+                const isStale = isRunning && minsSinceAlive !== null && minsSinceAlive >= 15;
                 return (
                   <tr key={log.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3">{log.spider_name}</td>
-                    <td className="px-4 py-3 text-gray-500 text-xs max-w-[200px] truncate">{log.source}</td>
+                    <td
+                      className="px-4 py-3 text-gray-500 text-xs max-w-[320px] truncate"
+                      title={log.source ?? ''}
+                    >
+                      {log.source}
+                    </td>
                     <td className="px-4 py-3">
                       <span className={`px-2 py-0.5 rounded-full text-xs ${statusColor(log.status)}`}>
                         {log.status}
                       </span>
+                      {isStale && (
+                        <span
+                          className="ml-1 px-2 py-0.5 rounded-full text-xs bg-red-100 text-red-700"
+                          title={`No heartbeat for ${minsSinceAlive} minutes — likely crashed`}
+                        >
+                          stale
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3">{log.records_scraped}</td>
                     <td className="px-4 py-3">{log.records_new}</td>
@@ -393,7 +446,13 @@ export default function ScrapingStatusPage() {
                       {log.started_at ? new Date(log.started_at).toLocaleString() : '-'}
                     </td>
                     <td className="px-4 py-3 text-xs">
-                      {duration !== null ? `${duration}s` : log.status === 'running' ? 'running...' : '-'}
+                      {duration !== null
+                        ? `${duration}s`
+                        : isRunning
+                          ? minsSinceAlive !== null
+                            ? `running (${minsSinceAlive}m since heartbeat)`
+                            : 'running...'
+                          : '-'}
                     </td>
                   </tr>
                 );

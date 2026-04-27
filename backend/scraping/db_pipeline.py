@@ -10,7 +10,7 @@ Handles:
 
 import logging
 import re
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -65,10 +65,13 @@ def upsert_race(
     db: Session,
     track: Track,
     race_data: dict[str, Any],
+    scrape_log_id: int | None = None,
+    scraped_at: datetime | None = None,
 ) -> Race:
     """Upsert a race record. Returns existing or new Race."""
     race_date_val = race_data["race_date"]
     race_number = race_data.get("race_number")
+    stamp = scraped_at or datetime.utcnow()
 
     existing = (
         db.query(Race)
@@ -95,6 +98,9 @@ def upsert_race(
         # Mark as resulted if we have finish data
         if any(e.get("finish_position") for e in race_data.get("entries", [])):
             existing.status = "resulted"
+        existing.last_scraped_at = stamp
+        if scrape_log_id is not None:
+            existing.last_scrape_log_id = scrape_log_id
         return existing
 
     race = Race(
@@ -110,6 +116,8 @@ def upsert_race(
         num_runners=len(race_data.get("entries", [])),
         source="gri",
         status="resulted" if any(e.get("finish_position") for e in race_data.get("entries", [])) else "scheduled",
+        last_scraped_at=stamp,
+        last_scrape_log_id=scrape_log_id,
     )
     db.add(race)
     db.flush()
@@ -120,10 +128,13 @@ def upsert_race_entry(
     db: Session,
     race: Race,
     entry_data: dict[str, Any],
+    scrape_log_id: int | None = None,
+    scraped_at: datetime | None = None,
 ) -> RaceEntry | None:
     """Upsert a race entry. Returns existing or new RaceEntry."""
     dog_name = entry_data.get("dog_name")
     trap = entry_data.get("trap")
+    stamp = scraped_at or datetime.utcnow()
 
     if not dog_name or not trap:
         logger.warning("Entry missing dog_name or trap: %s", entry_data)
@@ -155,6 +166,9 @@ def upsert_race_entry(
             existing.weight_kg = entry_data["weight_kg"]
         if entry_data.get("comment") and not existing.comment:
             existing.comment = entry_data["comment"]
+        existing.last_scraped_at = stamp
+        if scrape_log_id is not None:
+            existing.last_scrape_log_id = scrape_log_id
         return existing
 
     entry = RaceEntry(
@@ -170,6 +184,8 @@ def upsert_race_entry(
         sp_decimal=entry_data.get("sp_decimal"),
         comment=entry_data.get("comment"),
         grade_at_entry=entry_data.get("grade_at_entry"),
+        last_scraped_at=stamp,
+        last_scrape_log_id=scrape_log_id,
     )
     db.add(entry)
     db.flush()
@@ -179,9 +195,14 @@ def upsert_race_entry(
 def upsert_race_results(
     db: Session,
     scraped_races: list[dict[str, Any]],
+    scrape_log_id: int | None = None,
 ) -> dict[str, int]:
     """
     Upsert a batch of scraped race results into the database.
+
+    `scrape_log_id` is stamped onto every upserted Race and RaceEntry along
+    with a `last_scraped_at` timestamp, so each row knows which scrape job
+    last touched it.
 
     Returns stats: {"races_new", "races_updated", "entries_new", "entries_updated", "dogs_new"}
     """
@@ -194,6 +215,7 @@ def upsert_race_results(
     }
 
     dogs_before = db.query(Dog).count()
+    stamp = datetime.utcnow()
 
     for race_data in scraped_races:
         track_code = race_data.get("track_code")
@@ -216,7 +238,7 @@ def upsert_race_results(
             .first()
         )
 
-        race = upsert_race(db, track, race_data)
+        race = upsert_race(db, track, race_data, scrape_log_id=scrape_log_id, scraped_at=stamp)
 
         if existing_race:
             stats["races_updated"] += 1
@@ -235,7 +257,7 @@ def upsert_race_results(
                     .first()
                 )
 
-            upsert_race_entry(db, race, entry_data)
+            upsert_race_entry(db, race, entry_data, scrape_log_id=scrape_log_id, scraped_at=stamp)
 
             if existing_entry:
                 stats["entries_updated"] += 1

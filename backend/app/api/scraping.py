@@ -34,6 +34,7 @@ class ScrapeLogResponse(BaseModel):
     records_updated: int
     error_message: str | None
     started_at: datetime | None
+    heartbeat_at: datetime | None
     completed_at: datetime | None
     model_config = {"from_attributes": True}
 
@@ -45,6 +46,15 @@ class ScrapingStatusResponse(BaseModel):
     total_tracks: int
     last_scrape: ScrapeLogResponse | None
     recent_logs: list[ScrapeLogResponse]
+
+
+class ReapStaleRequest(BaseModel):
+    stale_minutes: int = 15
+
+
+class ReapStaleResponse(BaseModel):
+    reaped: int
+    log_ids: list[int]
 
 
 class TriggerRequest(BaseModel):
@@ -102,6 +112,48 @@ def get_scraping_status(db: Session = Depends(get_db)):
     )
 
 
+@router.post("/reap-stale", response_model=ReapStaleResponse)
+def reap_stale_scrape_logs(
+    req: ReapStaleRequest, db: Session = Depends(get_db)
+):
+    """Mark scrape logs stuck in 'running' as failed.
+
+    A log is considered stale if its heartbeat_at (or started_at, if no
+    heartbeat was ever recorded) is older than `stale_minutes` ago.
+    Worker threads update heartbeat_at while making progress, so a stale
+    log indicates the worker died (process restart, OOM, exception above
+    the cleanup handler).
+    """
+    cutoff = datetime.utcnow() - timedelta(minutes=req.stale_minutes)
+    stale = (
+        db.query(ScrapeLog)
+        .filter(
+            ScrapeLog.status == "running",
+            ScrapeLog.completed_at.is_(None),
+        )
+        .all()
+    )
+    reaped: list[int] = []
+    now = datetime.utcnow()
+    for log in stale:
+        last_alive = log.heartbeat_at or log.started_at
+        if last_alive is None or last_alive < cutoff:
+            log.status = "failed"
+            log.completed_at = now
+            existing_msg = log.error_message or ""
+            reap_note = (
+                f"Reaped as stale: no heartbeat since "
+                f"{last_alive.isoformat() if last_alive else 'never'}"
+            )
+            log.error_message = (
+                f"{existing_msg}; {reap_note}" if existing_msg else reap_note
+            )
+            reaped.append(log.id)
+    if reaped:
+        db.commit()
+    return ReapStaleResponse(reaped=len(reaped), log_ids=reaped)
+
+
 @router.get("/test-scrape")
 async def test_scrape(track_code: str = "TRL", date_str: str = "04-Apr-2026"):
     """Scrape one date with httpx, save to DB, return results."""
@@ -155,6 +207,20 @@ async def test_scrape(track_code: str = "TRL", date_str: str = "04-Apr-2026"):
     return result
 
 
+def _heartbeat(log_id: int) -> None:
+    """Mark a running ScrapeLog as alive. Best-effort — swallows errors."""
+    db_log = SessionLocal()
+    try:
+        log_entry = db_log.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
+        if log_entry:
+            log_entry.heartbeat_at = datetime.utcnow()
+            db_log.commit()
+    except Exception:
+        pass
+    finally:
+        db_log.close()
+
+
 def _run_scrape_in_thread(track_code: str, date_from: date, date_to: date, log_id: int):
     """Run scraping in a background thread using httpx."""
     from scraping.gri_scraper import scrape_results, DEFAULT_HEADERS
@@ -176,11 +242,12 @@ def _run_scrape_in_thread(track_code: str, date_from: date, date_to: date, log_i
                     try:
                         races = await scrape_results(track_code, current, client)
                         if races:
-                            stats = upsert_race_results(db, races)
+                            stats = upsert_race_results(db, races, scrape_log_id=log_id)
                             total_races += stats["races_new"] + stats["races_updated"]
                             total_new += stats["races_new"]
                     except Exception as e:
                         logger.error("Error on %s %s: %s", track_code, current, e)
+                    _heartbeat(log_id)
                     current += timedelta(days=1)
                     if current <= date_to:
                         await _asyncio.sleep(1.0)
@@ -286,7 +353,7 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
                             try:
                                 races = await scrape_results(tc, current, client)
                                 if races:
-                                    stats = upsert_race_results(db_track, races)
+                                    stats = upsert_race_results(db_track, races, scrape_log_id=log_id)
                                     track_races += stats["races_new"] + stats["races_updated"]
                                     track_new += stats["races_new"]
                             except Exception as e:
@@ -296,6 +363,8 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
                             if day_count % 50 == 0:
                                 db_track.commit()
                                 _update_log(total_races + track_races, total_new + track_new)
+                            else:
+                                _heartbeat(log_id)
 
                             current += timedelta(days=1)
                             await _asyncio.sleep(1.0)
@@ -341,13 +410,14 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
         logger.info("Backfill complete: %d races, %d new. Failed: %s", total_races, total_new, failed_tracks or "none")
 
     def _update_log(scraped: int, new: int):
-        """Update the scrape log with current progress."""
+        """Update the scrape log with current progress and heartbeat."""
         db_log = SessionLocal()
         try:
             log_entry = db_log.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
             if log_entry:
                 log_entry.records_scraped = scraped
                 log_entry.records_new = new
+                log_entry.heartbeat_at = datetime.utcnow()
                 db_log.commit()
         except Exception:
             pass
@@ -498,7 +568,7 @@ def _run_scrape_date_in_thread(
 
                     db_local = SessionLocal()
                     try:
-                        stats = upsert_race_results(db_local, races)
+                        stats = upsert_race_results(db_local, races, scrape_log_id=log_id)
                         total_races += stats["races_new"] + stats["races_updated"]
                         total_new += stats["races_new"]
                     except Exception as e:
@@ -514,6 +584,7 @@ def _run_scrape_date_in_thread(
                         if log_entry:
                             log_entry.records_scraped = total_races
                             log_entry.records_new = total_new
+                            log_entry.heartbeat_at = datetime.utcnow()
                             db_log.commit()
                     finally:
                         db_log.close()
@@ -608,22 +679,6 @@ def discover_tracks():
     """Return known GRI track codes."""
     from scraping.gri_scraper import GRI_TRACK_CODES
     return {"tracks": [{"code": k, "name": v} for k, v in GRI_TRACK_CODES.items()]}
-
-
-@router.get("/start-backfill")
-def start_backfill_get(
-    start_date: str = "2021-04-05",
-    end_date: str = "2026-04-05",
-    tracks: str | None = None,
-    db: Session = Depends(get_db),
-):
-    """
-    GET endpoint to start a backfill from browser URL bar.
-    Use tracks param for specific tracks: ?tracks=TRL,SPK,CRK
-    """
-    track_codes = tracks.split(",") if tracks else None
-    req = BackfillRequest(start_date=start_date, end_date=end_date, track_codes=track_codes)
-    return trigger_backfill(req, db)
 
 
 @router.get("/test-track-scrape")

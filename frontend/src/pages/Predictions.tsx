@@ -144,6 +144,7 @@ export default function Predictions() {
     const raceId = selectedRaceId || (manualRaceId ? parseInt(manualRaceId) : null);
     if (!selectedExp || !raceId) return;
     setLoading(true);
+    setByDateResult(null); // single-race result replaces any prior batch result
     try {
       const res = await api.get(
         `/predictions/race/${raceId}?experiment_id=${selectedExp}&bankroll=${bankroll}`
@@ -220,17 +221,21 @@ export default function Predictions() {
     }
   };
 
-  const handlePredictDate = async () => {
+  const handlePredictDate = async (date?: string, track?: string) => {
     if (!selectedExp) return;
+    const targetDate = date || scrapeDate;
+    if (!targetDate) return;
     setByDateLoading(true);
     setByDateResult(null);
+    setPredictions(null); // clear any single-race result so the batch view stands alone
     try {
       const params = new URLSearchParams({
-        race_date: scrapeDate,
+        race_date: targetDate,
         experiment_id: String(selectedExp),
         bankroll: String(bankroll),
         only_scheduled: 'true',
       });
+      if (track) params.set('track_code', track);
       const res = await api.get<ByDateResponse>(`/predictions/by-date?${params}`);
       setByDateResult(res.data);
     } catch (err: any) {
@@ -288,6 +293,118 @@ export default function Predictions() {
     if (!racesByTrack[r.track_name]) racesByTrack[r.track_name] = [];
     racesByTrack[r.track_name].push(r);
   });
+
+  const renderByDateResults = () => {
+    if (!byDateResult) return null;
+    return (
+      <div className="space-y-3">
+        <div className="bg-white rounded-lg shadow p-4 text-sm flex items-center gap-4 flex-wrap">
+          <span className="text-gray-700 font-medium">{byDateResult.race_date}</span>
+          <span className="text-green-700">{byDateResult.races_predicted} predicted</span>
+          {byDateResult.races_failed > 0 && (
+            <span className="text-red-600">{byDateResult.races_failed} failed</span>
+          )}
+        </div>
+
+        {byDateResult.races.length === 0 ? (
+          <div className="bg-white rounded-lg shadow p-6 text-center text-gray-500 text-sm">
+            No scheduled races found for this date. Did you scrape the card first?
+          </div>
+        ) : (
+          Object.entries(
+            byDateResult.races.reduce((acc, r) => {
+              (acc[r.track_name] = acc[r.track_name] || []).push(r);
+              return acc;
+            }, {} as Record<string, RacePrediction[]>)
+          ).map(([trackName, trackRaces]) => (
+            <div key={trackName} className="bg-white rounded-lg shadow overflow-hidden">
+              <div className="px-5 py-3 bg-gray-50 border-b">
+                <h3 className="font-semibold text-sm">{trackName}</h3>
+                <p className="text-xs text-gray-500">{trackRaces.length} race(s)</p>
+              </div>
+              <div className="divide-y">
+                {trackRaces.map(r => {
+                  const top = r.predictions[0];
+                  const expanded = expandedRaceId === r.race_id;
+                  return (
+                    <div key={r.race_id}>
+                      <button
+                        onClick={() => setExpandedRaceId(expanded ? null : r.race_id)}
+                        className="w-full text-left px-5 py-3 hover:bg-gray-50 flex items-center gap-4 text-sm"
+                      >
+                        <span className="font-mono w-10">R{r.race_number}</span>
+                        <span className="text-gray-500 w-20">{r.distance_m}m {r.grade}</span>
+                        {top && (
+                          <>
+                            <span className="font-medium flex-1">{top.dog_name} (T{top.trap})</span>
+                            <span className={`font-mono ${probColor(top.win_probability)}`}>
+                              {top.win_probability ? `${(top.win_probability * 100).toFixed(1)}%` : '-'}
+                            </span>
+                            {tierBadge(top.confidence_tier)}
+                            {top.kelly?.bet && (
+                              <span className="text-green-700 font-medium">
+                                ${top.kelly.stake?.toFixed(2)}
+                              </span>
+                            )}
+                          </>
+                        )}
+                        <span className="text-gray-400">{expanded ? '▾' : '▸'}</span>
+                      </button>
+                      {expanded && (
+                        <div className="px-5 pb-4 bg-gray-50">
+                          <table className="w-full text-xs">
+                            <thead className="text-gray-500 uppercase">
+                              <tr>
+                                <th className="text-left py-1">Rank</th>
+                                <th className="text-left py-1">Trap</th>
+                                <th className="text-left py-1">Dog</th>
+                                <th className="text-left py-1">Win Prob</th>
+                                <th className="text-left py-1">Edge</th>
+                                <th className="text-left py-1">Stake</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y">
+                              {r.predictions.map((p, i) => (
+                                <tr key={i} className={i === 0 ? 'bg-blue-50/50' : ''}>
+                                  <td className="py-1 pr-2">{i + 1}</td>
+                                  <td className="py-1 pr-2">{p.trap}</td>
+                                  <td className="py-1 pr-2 font-medium">{p.dog_name}</td>
+                                  <td className={`py-1 pr-2 font-mono ${probColor(p.win_probability)}`}>
+                                    {p.win_probability ? `${(p.win_probability * 100).toFixed(1)}%` : '-'}
+                                  </td>
+                                  <td className="py-1 pr-2 font-mono">{edgeDisplay(p.edge)}</td>
+                                  <td className="py-1 pr-2 font-mono">
+                                    {p.kelly?.bet ? `$${p.kelly.stake?.toFixed(2)}` : '-'}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))
+        )}
+
+        {byDateResult.errors.length > 0 && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+            <h4 className="font-semibold text-red-800 text-sm mb-2">Errors</h4>
+            <ul className="text-xs text-red-700 space-y-1">
+              {byDateResult.errors.map((e, i) => (
+                <li key={i}>
+                  {e.track_code} R{e.race_number} (race_id={e.race_id}): {e.error}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div>
@@ -388,6 +505,16 @@ export default function Predictions() {
                       ))}
                     </select>
                   </div>
+                  <button
+                    onClick={() => handlePredictDate(raceDate, trackCode)}
+                    disabled={byDateLoading || !selectedExp || !raceDate}
+                    title={trackCode
+                      ? 'Predict every race for this track on the selected date'
+                      : 'Predict every race on the selected date across all tracks'}
+                    className="bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-green-700 disabled:opacity-50"
+                  >
+                    {byDateLoading ? 'Predicting all...' : 'Predict all races on this date'}
+                  </button>
                 </div>
 
                 {loadingRaces ? (
@@ -448,7 +575,11 @@ export default function Predictions() {
                 </div>
               </div>
 
-              {/* Prediction results */}
+              {/* Batch (predict-all-on-date) results.  Renders only when a
+                  batch run is active; cleared by single-race predict. */}
+              {byDateResult && renderByDateResults()}
+
+              {/* Single-race prediction results */}
               {predictions && (
                 <div className="space-y-4">
                   {/* Race header + confidence summary */}
@@ -668,7 +799,7 @@ export default function Predictions() {
                   <span className="text-xs text-gray-400">uses the model selected above</span>
                 </div>
                 <button
-                  onClick={handlePredictDate}
+                  onClick={() => handlePredictDate(scrapeDate)}
                   disabled={byDateLoading || !selectedExp || !scrapeDate}
                   className="bg-green-600 text-white px-5 py-2 rounded-md text-sm font-medium hover:bg-green-700 disabled:opacity-50"
                 >
@@ -677,114 +808,7 @@ export default function Predictions() {
               </div>
 
               {/* Results */}
-              {byDateResult && (
-                <div className="space-y-3">
-                  <div className="bg-white rounded-lg shadow p-4 text-sm flex items-center gap-4 flex-wrap">
-                    <span className="text-gray-700 font-medium">{byDateResult.race_date}</span>
-                    <span className="text-green-700">{byDateResult.races_predicted} predicted</span>
-                    {byDateResult.races_failed > 0 && (
-                      <span className="text-red-600">{byDateResult.races_failed} failed</span>
-                    )}
-                  </div>
-
-                  {byDateResult.races.length === 0 ? (
-                    <div className="bg-white rounded-lg shadow p-6 text-center text-gray-500 text-sm">
-                      No scheduled races found for this date. Did you run Step 1 first?
-                    </div>
-                  ) : (
-                    Object.entries(
-                      byDateResult.races.reduce((acc, r) => {
-                        (acc[r.track_name] = acc[r.track_name] || []).push(r);
-                        return acc;
-                      }, {} as Record<string, RacePrediction[]>)
-                    ).map(([trackName, trackRaces]) => (
-                      <div key={trackName} className="bg-white rounded-lg shadow overflow-hidden">
-                        <div className="px-5 py-3 bg-gray-50 border-b">
-                          <h3 className="font-semibold text-sm">{trackName}</h3>
-                          <p className="text-xs text-gray-500">{trackRaces.length} race(s)</p>
-                        </div>
-                        <div className="divide-y">
-                          {trackRaces.map(r => {
-                            const top = r.predictions[0];
-                            const expanded = expandedRaceId === r.race_id;
-                            return (
-                              <div key={r.race_id}>
-                                <button
-                                  onClick={() => setExpandedRaceId(expanded ? null : r.race_id)}
-                                  className="w-full text-left px-5 py-3 hover:bg-gray-50 flex items-center gap-4 text-sm"
-                                >
-                                  <span className="font-mono w-10">R{r.race_number}</span>
-                                  <span className="text-gray-500 w-20">{r.distance_m}m {r.grade}</span>
-                                  {top && (
-                                    <>
-                                      <span className="font-medium flex-1">{top.dog_name} (T{top.trap})</span>
-                                      <span className={`font-mono ${probColor(top.win_probability)}`}>
-                                        {top.win_probability ? `${(top.win_probability * 100).toFixed(1)}%` : '-'}
-                                      </span>
-                                      {tierBadge(top.confidence_tier)}
-                                      {top.kelly?.bet && (
-                                        <span className="text-green-700 font-medium">
-                                          ${top.kelly.stake?.toFixed(2)}
-                                        </span>
-                                      )}
-                                    </>
-                                  )}
-                                  <span className="text-gray-400">{expanded ? '▾' : '▸'}</span>
-                                </button>
-                                {expanded && (
-                                  <div className="px-5 pb-4 bg-gray-50">
-                                    <table className="w-full text-xs">
-                                      <thead className="text-gray-500 uppercase">
-                                        <tr>
-                                          <th className="text-left py-1">Rank</th>
-                                          <th className="text-left py-1">Trap</th>
-                                          <th className="text-left py-1">Dog</th>
-                                          <th className="text-left py-1">Win Prob</th>
-                                          <th className="text-left py-1">Edge</th>
-                                          <th className="text-left py-1">Stake</th>
-                                        </tr>
-                                      </thead>
-                                      <tbody className="divide-y">
-                                        {r.predictions.map((p, i) => (
-                                          <tr key={i} className={i === 0 ? 'bg-blue-50/50' : ''}>
-                                            <td className="py-1 pr-2">{i + 1}</td>
-                                            <td className="py-1 pr-2">{p.trap}</td>
-                                            <td className="py-1 pr-2 font-medium">{p.dog_name}</td>
-                                            <td className={`py-1 pr-2 font-mono ${probColor(p.win_probability)}`}>
-                                              {p.win_probability ? `${(p.win_probability * 100).toFixed(1)}%` : '-'}
-                                            </td>
-                                            <td className="py-1 pr-2 font-mono">{edgeDisplay(p.edge)}</td>
-                                            <td className="py-1 pr-2 font-mono">
-                                              {p.kelly?.bet ? `$${p.kelly.stake?.toFixed(2)}` : '-'}
-                                            </td>
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ))
-                  )}
-
-                  {byDateResult.errors.length > 0 && (
-                    <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-                      <h4 className="font-semibold text-red-800 text-sm mb-2">Errors</h4>
-                      <ul className="text-xs text-red-700 space-y-1">
-                        {byDateResult.errors.map((e, i) => (
-                          <li key={i}>
-                            {e.track_code} R{e.race_number} (race_id={e.race_id}): {e.error}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              )}
+              {renderByDateResults()}
             </div>
           )}
 

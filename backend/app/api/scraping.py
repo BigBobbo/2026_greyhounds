@@ -662,6 +662,65 @@ async def test_track_scrape(
     }
 
 
+@router.get("/coverage-calendar")
+def coverage_calendar(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    track_code: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Per-day race coverage for a GitHub-style calendar heatmap.
+
+    Returns one entry per date with at least one race in the range. When
+    `track_code` is given, counts only races at that track; otherwise counts
+    races across all tracks and reports which tracks raced that day.
+
+    Defaults to the last 365 days ending today.
+    """
+    from sqlalchemy import func as sqlfunc
+
+    today = date.today()
+    ed = date.fromisoformat(end_date) if end_date else today
+    sd = date.fromisoformat(start_date) if start_date else (ed - timedelta(days=365))
+
+    q = (
+        db.query(Race.race_date, Track.code, sqlfunc.count(Race.id).label("races"))
+        .join(Track, Track.id == Race.track_id)
+        .filter(Race.race_date >= sd, Race.race_date <= ed)
+    )
+    if track_code:
+        q = q.filter(Track.code == track_code)
+    rows = q.group_by(Race.race_date, Track.code).all()
+
+    by_day: dict[str, dict[str, Any]] = {}
+    for rd, code, races in rows:
+        key = str(rd)
+        bucket = by_day.setdefault(
+            key, {"date": key, "tracks": set(), "race_count": 0}
+        )
+        bucket["tracks"].add(code)
+        bucket["race_count"] += races
+
+    days = [
+        {
+            "date": d["date"],
+            "race_count": d["race_count"],
+            "track_count": len(d["tracks"]),
+            "tracks": sorted(d["tracks"]),
+        }
+        for d in by_day.values()
+    ]
+    days.sort(key=lambda x: x["date"])
+
+    return {
+        "start_date": str(sd),
+        "end_date": str(ed),
+        "track_code": track_code,
+        "days": days,
+    }
+
+
 @router.get("/data-summary")
 def data_summary(db: Session = Depends(get_db)):
     """Show how much data we have per track — helps identify gaps."""

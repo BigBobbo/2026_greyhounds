@@ -148,6 +148,89 @@ def get_races_for_date(
     ]
 
 
+@router.get("/by-date")
+def predict_races_by_date(
+    race_date: date,
+    experiment_id: int,
+    track_code: str | None = None,
+    bankroll: float = Query(default=100.0, ge=1),
+    only_scheduled: bool = Query(
+        default=True,
+        description="If true, only predict races with status='scheduled' (skip resulted)",
+    ),
+    db: Session = Depends(get_db),
+):
+    """Generate predictions for every race on a given date.
+
+    Default `only_scheduled=true` matches the future-races flow: scrape via
+    `/scraping/scrape-date` first (step 1), then call this endpoint (step 2).
+    Pass `only_scheduled=false` to also predict already-resulted races (e.g.
+    for back-testing on a historical date).
+    """
+    from app.services.prediction_service import predict_race, save_predictions
+
+    query = (
+        db.query(Race, Track.name.label("track_name"), Track.code.label("track_code"))
+        .join(Track, Race.track_id == Track.id)
+        .filter(Race.race_date == race_date)
+    )
+    if only_scheduled:
+        query = query.filter(Race.status == "scheduled")
+    if track_code:
+        query = query.filter(Track.code == track_code)
+    rows = query.order_by(Track.name, Race.race_number).all()
+
+    if not rows:
+        return {
+            "race_date": str(race_date),
+            "experiment_id": experiment_id,
+            "races_predicted": 0,
+            "races_failed": 0,
+            "races": [],
+            "errors": [],
+        }
+
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    for row in rows:
+        race = row.Race
+        try:
+            preds = predict_race(db, experiment_id, race.id, bankroll=bankroll)
+            if preds:
+                save_predictions(db, preds)
+                results.append({
+                    "race_id": race.id,
+                    "race_date": str(race.race_date),
+                    "race_time": str(race.race_time) if race.race_time else None,
+                    "race_number": race.race_number,
+                    "track_name": row.track_name,
+                    "track_code": row.track_code,
+                    "distance_m": race.distance_m,
+                    "grade": race.grade,
+                    "status": race.status,
+                    "predictions": preds,
+                })
+        except Exception as e:
+            logger.warning("by-date: race %d (%s R%s) failed: %s",
+                           race.id, row.track_code, race.race_number, e)
+            errors.append({
+                "race_id": race.id,
+                "track_code": row.track_code,
+                "race_number": race.race_number,
+                "error": str(e),
+            })
+
+    return {
+        "race_date": str(race_date),
+        "experiment_id": experiment_id,
+        "races_predicted": len(results),
+        "races_failed": len(errors),
+        "races": results,
+        "errors": errors,
+    }
+
+
 @router.get("/upcoming")
 def get_upcoming_predictions(
     experiment_id: int,

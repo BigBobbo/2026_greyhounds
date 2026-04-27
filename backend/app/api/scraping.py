@@ -59,6 +59,12 @@ class BackfillRequest(BaseModel):
     track_codes: list[str] | None = None
 
 
+class ScrapeDateRequest(BaseModel):
+    race_date: str
+    include_form_detail: bool = False
+    track_codes: list[str] | None = None
+
+
 class TriggerResponse(BaseModel):
     message: str
     log_id: int | None = None
@@ -339,6 +345,176 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
 
     return TriggerResponse(
         message=f"Backfill started for {len(tracks)} tracks from {start} to {end}",
+        log_id=log.id,
+    )
+
+
+def _run_scrape_date_in_thread(
+    race_date_val: date,
+    track_codes: list[str],
+    include_form_detail: bool,
+    log_id: int,
+):
+    """Brute-force scrape all upcoming-race-card summaries for a single date.
+
+    Iterates one track at a time. For each track that returns races on the date,
+    optionally fires the per-race form-detail page to enrich dog metadata
+    (trainer/sire/dam/owner/best_time).
+    """
+    from scraping.gri_scraper import (
+        scrape_card,
+        scrape_card_form,
+        merge_card_form_into_race,
+        DEFAULT_HEADERS,
+    )
+    from scraping.db_pipeline import upsert_race_results
+
+    def _run_sync():
+        import asyncio as _asyncio
+
+        total_races = 0
+        total_new = 0
+        tracks_with_races: list[str] = []
+        tracks_failed: list[str] = []
+
+        async def _run():
+            nonlocal total_races, total_new
+            async with httpx.AsyncClient(
+                headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30
+            ) as client:
+                for tc in track_codes:
+                    try:
+                        races = await scrape_card(tc, race_date_val, client)
+                    except Exception as e:
+                        logger.error("Card scrape error %s %s: %s", tc, race_date_val, e)
+                        tracks_failed.append(tc)
+                        await _asyncio.sleep(1.0)
+                        continue
+
+                    if not races:
+                        await _asyncio.sleep(1.0)
+                        continue
+
+                    tracks_with_races.append(tc)
+
+                    if include_form_detail:
+                        for r in races:
+                            try:
+                                form = await scrape_card_form(
+                                    tc, race_date_val, r["race_number"], client
+                                )
+                                if form:
+                                    merge_card_form_into_race(r, form)
+                            except Exception as e:
+                                logger.error(
+                                    "Form scrape %s R%s failed: %s",
+                                    tc, r.get("race_number"), e,
+                                )
+                            await _asyncio.sleep(0.5)
+
+                    db_local = SessionLocal()
+                    try:
+                        stats = upsert_race_results(db_local, races)
+                        total_races += stats["races_new"] + stats["races_updated"]
+                        total_new += stats["races_new"]
+                    except Exception as e:
+                        logger.error("DB upsert failed for %s: %s", tc, e)
+                        db_local.rollback()
+                    finally:
+                        db_local.close()
+
+                    # progress update
+                    db_log = SessionLocal()
+                    try:
+                        log_entry = db_log.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
+                        if log_entry:
+                            log_entry.records_scraped = total_races
+                            log_entry.records_new = total_new
+                            db_log.commit()
+                    finally:
+                        db_log.close()
+
+                    await _asyncio.sleep(1.0)
+
+        try:
+            loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(loop)
+            loop.run_until_complete(_run())
+            loop.close()
+            db_final = SessionLocal()
+            try:
+                log_final = (
+                    db_final.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
+                )
+                if log_final:
+                    log_final.status = "success" if not tracks_failed else "partial"
+                    log_final.records_scraped = total_races
+                    log_final.records_new = total_new
+                    log_final.completed_at = datetime.utcnow()
+                    parts = [
+                        f"tracks_with_races={','.join(tracks_with_races) or 'none'}",
+                    ]
+                    if tracks_failed:
+                        parts.append(f"failed={','.join(tracks_failed)}")
+                    log_final.error_message = "; ".join(parts) if tracks_failed else None
+                    db_final.commit()
+            finally:
+                db_final.close()
+        except Exception as e:
+            logger.error("Scrape-date thread crashed: %s\n%s", e, traceback.format_exc())
+            db_err = SessionLocal()
+            try:
+                log_err = db_err.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
+                if log_err:
+                    log_err.status = "failed"
+                    log_err.error_message = f"{type(e).__name__}: {e}"
+                    log_err.completed_at = datetime.utcnow()
+                    db_err.commit()
+            finally:
+                db_err.close()
+
+    Thread(target=_run_sync, daemon=True).start()
+
+
+@router.post("/scrape-date", response_model=TriggerResponse)
+def trigger_scrape_date(req: ScrapeDateRequest, db: Session = Depends(get_db)):
+    """Brute-force scrape upcoming race cards for every active track on a date.
+
+    Use `include_form_detail=true` to also pull per-race form pages (trainer,
+    sire, dam, owner, best track time). Costs ~8-12 extra requests per meeting.
+    """
+    race_date_val = date.fromisoformat(req.race_date)
+
+    if req.track_codes:
+        tracks = db.query(Track).filter(Track.code.in_(req.track_codes)).all()
+    else:
+        tracks = db.query(Track).filter(Track.active.is_(True)).all()
+
+    if not tracks:
+        return TriggerResponse(message="No tracks found")
+
+    track_codes = [t.code for t in tracks]
+
+    suffix = " (with form detail)" if req.include_form_detail else ""
+    log = ScrapeLog(
+        spider_name="gri-card",
+        source=f"scrape-date {race_date_val} {len(track_codes)} tracks{suffix}",
+        status="running",
+        started_at=datetime.utcnow(),
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+
+    _run_scrape_date_in_thread(
+        race_date_val, track_codes, req.include_form_detail, log.id
+    )
+
+    return TriggerResponse(
+        message=(
+            f"Card scrape started for {race_date_val} across "
+            f"{len(track_codes)} tracks{suffix}"
+        ),
         log_id=log.id,
     )
 

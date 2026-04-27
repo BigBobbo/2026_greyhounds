@@ -3,7 +3,10 @@ GRI (Greyhound Racing Ireland) scraper using httpx + BeautifulSoup.
 
 NO Playwright needed — the race data is server-rendered in the HTML.
 
-URL pattern: https://www.grireland.ie/results/view-results/?track={CODE}&date={DD-Mon-YYYY}
+URL patterns:
+  Results:        /results/view-results/?track={CODE}&date={DD-Mon-YYYY}
+  Card summary:   /racing/upcoming-race-cards/upcoming-race-card-summary/?track={CODE}&date={DD-Mon-YYYY}
+  Card form:      /racing/upcoming-race-cards/upcoming-race-card-summary/view-race-form/?Track={CODE}&Date={DD-Mon-YYYY}&RaceNumber={N}
 
 Trap numbers are encoded as <img alt="Trap N"> tags.
 
@@ -19,7 +22,7 @@ Known GRI track codes (from dropdown):
 import asyncio
 import logging
 import re
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 from typing import Any
 
 import httpx
@@ -29,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 GRI_BASE_URL = "https://www.grireland.ie"
 VIEW_RESULTS_URL = f"{GRI_BASE_URL}/results/view-results/"
+VIEW_CARD_URL = f"{GRI_BASE_URL}/racing/upcoming-race-cards/upcoming-race-card-summary/"
+VIEW_CARD_FORM_URL = f"{GRI_BASE_URL}/racing/upcoming-race-cards/upcoming-race-card-summary/view-race-form/"
 
 DEFAULT_HEADERS = {
     "User-Agent": "Greyhound-Research-Bot/1.0 (race prediction research)",
@@ -369,3 +374,290 @@ async def scrape_date_range(
 async def discover_track_codes() -> list[dict[str, str]]:
     """Return the confirmed GRI track codes."""
     return [{"code": code, "name": name} for code, name in GRI_TRACK_CODES.items()]
+
+
+# ---------------------------------------------------------------------------
+# Upcoming race-card scrapers (Tier 1: summary; Tier 2: per-race form detail)
+# ---------------------------------------------------------------------------
+
+
+def _parse_card_header(text: str) -> dict[str, Any]:
+    """Parse a card summary race header.
+
+    Example: "Race 1 WELCOME TO ENNISCORTHY GREYHOUND STADIUM 20:00 Approx.
+              (525 Yds. Flat) (Race Grade : A3)"
+    """
+    info: dict[str, Any] = {
+        "race_number": None,
+        "race_time": None,
+        "distance_m": None,
+        "grade": None,
+        "race_type": "flat",
+    }
+
+    num_match = re.search(r"Race\s+(\d+)", text, re.IGNORECASE)
+    if num_match:
+        info["race_number"] = int(num_match.group(1))
+
+    time_match = re.search(r"(\d{1,2}):(\d{2})\s*Approx", text, re.IGNORECASE)
+    if time_match:
+        hh, mm = int(time_match.group(1)), int(time_match.group(2))
+        if 0 <= hh <= 23 and 0 <= mm <= 59:
+            info["race_time"] = time(hh, mm)
+
+    grade_match = re.search(r"Grade\s*:\s*([A-Za-z0-9/]+)", text)
+    if grade_match:
+        info["grade"] = grade_match.group(1).strip()
+
+    # Distance: stored in yards on Irish cards but convention here is the raw number.
+    dist_match = re.search(r"\(\s*(\d{3,4})\s*(?:Yds|Yards|m)\b", text, re.IGNORECASE)
+    if dist_match:
+        val = int(dist_match.group(1))
+        if 200 <= val <= 1000:
+            info["distance_m"] = val
+    if info["distance_m"] is None:
+        # Fallback: first 3-4 digit number
+        for d in re.findall(r"\b(\d{3,4})\b", text):
+            v = int(d)
+            if 200 <= v <= 1000:
+                info["distance_m"] = v
+                break
+
+    if re.search(r"hurdle", text, re.IGNORECASE):
+        info["race_type"] = "hurdle"
+
+    return info
+
+
+def parse_card_page(html: str, track_code: str, race_date: date) -> list[dict[str, Any]]:
+    """Parse an upcoming-race-card summary page.
+
+    Each race is a `<table class="igb-tbl">` whose first row's `<th>` carries
+    the race header. Subsequent rows contain trap-img + dog-link pairs.
+
+    Returns the same dict shape as `parse_results_page` but with `entries`
+    containing only `trap` and `dog_name` (no finishing/SP data).
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    races: list[dict[str, Any]] = []
+
+    for table in soup.find_all("table", class_="igb-tbl"):
+        header_th = table.find("th")
+        if not header_th:
+            continue
+        header_text = header_th.get_text(" ", strip=True)
+        if not re.search(r"Race\s+\d+", header_text, re.IGNORECASE):
+            continue
+
+        race_info = _parse_card_header(header_text)
+        if race_info["race_number"] is None:
+            continue
+
+        entries: list[dict[str, Any]] = []
+        for row in table.find_all("tr"):
+            trap_img = row.find("img", alt=re.compile(r"^Trap\s*\d+$", re.IGNORECASE))
+            if not trap_img:
+                continue
+            trap_match = re.search(r"Trap\s*(\d+)", trap_img.get("alt", ""))
+            if not trap_match:
+                continue
+            trap = int(trap_match.group(1))
+
+            dog_link = row.find(
+                "a", href=re.compile(r"greyhound-search/greyhound-details", re.IGNORECASE)
+            )
+            if not dog_link:
+                continue
+            dog_name = dog_link.get_text(strip=True).upper()
+            if not dog_name:
+                continue
+
+            entries.append({"trap": trap, "dog_name": dog_name})
+
+        if not entries:
+            continue
+
+        races.append({
+            "race_number": race_info["race_number"],
+            "race_date": race_date,
+            "race_time": race_info["race_time"],
+            "track_code": track_code,
+            "distance_m": race_info["distance_m"],
+            "grade": race_info["grade"],
+            "race_type": race_info["race_type"],
+            "going": None,
+            "prize_money": None,
+            "status": "scheduled",
+            "entries": entries,
+        })
+
+    logger.info("Parsed %d card races from %s on %s", len(races), track_code, race_date)
+    return races
+
+
+async def scrape_card(
+    track_code: str,
+    race_date: date,
+    client: httpx.AsyncClient | None = None,
+) -> list[dict[str, Any]]:
+    """Scrape the card summary (Tier 1) for a track + future date."""
+    date_str = format_date(race_date)
+    url = f"{VIEW_CARD_URL}?track={track_code}&date={date_str}"
+
+    close_client = False
+    if client is None:
+        client = httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30)
+        close_client = True
+
+    try:
+        resp = await client.get(url)
+        if resp.status_code != 200:
+            logger.warning("Got %d for %s", resp.status_code, url)
+            return []
+        html = resp.text
+    except Exception as e:
+        logger.error("Failed to fetch %s: %s", url, e)
+        return []
+    finally:
+        if close_client:
+            await client.aclose()
+
+    return parse_card_page(html, track_code, race_date)
+
+
+def parse_card_form_page(html: str) -> dict[int, dict[str, Any]]:
+    """Parse a per-race form-detail page.
+
+    Returns `{trap_number: {trainer_name, owner, sire_name, dam_name, best_time}}`.
+    Used to enrich Dog records — the page does NOT carry an intended weight for
+    the upcoming race (dogs are weighed-in on the night).
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    by_trap: dict[int, dict[str, Any]] = {}
+
+    # Each dog block is anchored by an <img alt="Trap N"> with rowspan=8 in the
+    # outer form table. The relevant <a> tags appear as siblings/descendants of
+    # the next ~3 <tr> elements.
+    trap_imgs = soup.find_all("img", alt=re.compile(r"^Trap\s*\d+$", re.IGNORECASE))
+    if not trap_imgs:
+        return {}
+
+    # Find the bounding tr for each trap, plus the following 3 tr siblings
+    # which carry owner/trainer/dog/breeding info.
+    for trap_img in trap_imgs:
+        trap_match = re.search(r"Trap\s*(\d+)", trap_img.get("alt", ""))
+        if not trap_match:
+            continue
+        trap = int(trap_match.group(1))
+        if trap in by_trap:
+            continue  # already captured (some pages render the trap twice)
+
+        anchor_tr = trap_img.find_parent("tr")
+        if not anchor_tr:
+            continue
+
+        # Walk forward over the next 3 sibling rows (header, dog, breeding/late notice)
+        block_rows = [anchor_tr]
+        sib = anchor_tr
+        for _ in range(3):
+            sib = sib.find_next_sibling("tr")
+            if not sib:
+                break
+            block_rows.append(sib)
+
+        info: dict[str, Any] = {
+            "trainer_name": None,
+            "owner_name": None,
+            "sire_name": None,
+            "dam_name": None,
+            "best_time": None,
+        }
+
+        for row in block_rows:
+            # Owner: <a href=/results/greyhound-search/owners-page/?oid=...>Name</a>
+            if info["owner_name"] is None:
+                owner_a = row.find("a", href=re.compile(r"owners-page", re.IGNORECASE))
+                if owner_a:
+                    info["owner_name"] = owner_a.get_text(strip=True) or None
+
+            # Trainer: <a href=/results/trainers-page/?tid=...>Name</a>  (often empty)
+            if info["trainer_name"] is None:
+                trainer_a = row.find("a", href=re.compile(r"trainers-page", re.IGNORECASE))
+                if trainer_a:
+                    name = trainer_a.get_text(strip=True)
+                    if name:
+                        info["trainer_name"] = name
+
+            # Sire/Dam: two greyhound-details links inside breeding cell
+            if info["sire_name"] is None or info["dam_name"] is None:
+                breeding_text = row.get_text(" ", strip=True)
+                if "/" in breeding_text and re.search(r"\.\w{3}-\d{2}", breeding_text):
+                    dog_links = row.find_all(
+                        "a",
+                        href=re.compile(
+                            r"greyhound-search/greyhound-details", re.IGNORECASE
+                        ),
+                    )
+                    # First link in the breeding row is the running dog name itself
+                    # when it appears in the SAME row; sire/dam are the trailing two.
+                    if len(dog_links) >= 2:
+                        info["sire_name"] = dog_links[-2].get_text(strip=True).title()
+                        info["dam_name"] = dog_links[-1].get_text(strip=True).title()
+
+            # Best time: bracketed [29.01-ECY] notation
+            if info["best_time"] is None:
+                bt_match = re.search(r"\[(\d{2}\.\d{2})-([A-Z]{2,4})\]", row.get_text())
+                if bt_match:
+                    info["best_time"] = float(bt_match.group(1))
+
+        by_trap[trap] = info
+
+    return by_trap
+
+
+async def scrape_card_form(
+    track_code: str,
+    race_date: date,
+    race_number: int,
+    client: httpx.AsyncClient | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Scrape per-race form detail (Tier 2) and return enrichment by trap."""
+    date_str = format_date(race_date)
+    url = (
+        f"{VIEW_CARD_FORM_URL}?Track={track_code}&Date={date_str}"
+        f"&RaceNumber={race_number}"
+    )
+
+    close_client = False
+    if client is None:
+        client = httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30)
+        close_client = True
+
+    try:
+        resp = await client.get(url)
+        if resp.status_code != 200:
+            logger.warning("Got %d for %s", resp.status_code, url)
+            return {}
+        html = resp.text
+    except Exception as e:
+        logger.error("Failed to fetch %s: %s", url, e)
+        return {}
+    finally:
+        if close_client:
+            await client.aclose()
+
+    return parse_card_form_page(html)
+
+
+def merge_card_form_into_race(
+    race: dict[str, Any], form_by_trap: dict[int, dict[str, Any]]
+) -> None:
+    """Mutate `race` in place, copying trainer/sire/dam/owner onto each entry."""
+    for entry in race.get("entries", []):
+        trap = entry.get("trap")
+        if trap is None or trap not in form_by_trap:
+            continue
+        form = form_by_trap[trap]
+        for key in ("trainer_name", "owner_name", "sire_name", "dam_name", "best_time"):
+            if form.get(key) and not entry.get(key):
+                entry[key] = form[key]

@@ -90,6 +90,8 @@ def upsert_race(
             existing.going = race_data["going"]
         if race_data.get("prize_money") and not existing.prize_money:
             existing.prize_money = race_data["prize_money"]
+        if race_data.get("race_time") and not existing.race_time:
+            existing.race_time = race_data["race_time"]
         # Mark as resulted if we have finish data
         if any(e.get("finish_position") for e in race_data.get("entries", [])):
             existing.status = "resulted"
@@ -99,6 +101,7 @@ def upsert_race(
         track_id=track.id,
         race_date=race_date_val,
         race_number=race_number,
+        race_time=race_data.get("race_time"),
         distance_m=race_data.get("distance_m") or 0,
         grade=race_data.get("grade"),
         race_type=race_data.get("race_type", "flat"),

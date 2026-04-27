@@ -50,6 +50,26 @@ interface RaceOption {
   track_code: string;
 }
 
+interface ByDateResponse {
+  race_date: string;
+  experiment_id: number;
+  races_predicted: number;
+  races_failed: number;
+  races: RacePrediction[];
+  errors: { race_id: number; track_code: string; race_number: number; error: string }[];
+}
+
+interface ScrapeStatus {
+  log_id: number;
+  spider_name: string;
+  status: string;
+  records_scraped: number;
+  records_new: number;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
 interface ComparisonResult {
   race_date: string;
   race_number: number;
@@ -72,7 +92,7 @@ export default function Predictions() {
   const [predictions, setPredictions] = useState<RacePrediction | null>(null);
   const [comparisons, setComparisons] = useState<ComparisonResult[]>([]);
   const [loading, setLoading] = useState(false);
-  const [tab, setTab] = useState<'predict' | 'compare'>('predict');
+  const [tab, setTab] = useState<'predict' | 'date' | 'compare'>('predict');
 
   // Race picker state
   const [raceDate, setRaceDate] = useState(new Date().toISOString().split('T')[0]);
@@ -84,6 +104,15 @@ export default function Predictions() {
 
   // Manual race ID fallback
   const [manualRaceId, setManualRaceId] = useState('');
+
+  // Date-based scrape + predict flow state
+  const [scrapeDate, setScrapeDate] = useState(new Date().toISOString().split('T')[0]);
+  const [includeFormDetail, setIncludeFormDetail] = useState(false);
+  const [scrapeStatus, setScrapeStatus] = useState<ScrapeStatus | null>(null);
+  const [scrapeRunning, setScrapeRunning] = useState(false);
+  const [byDateResult, setByDateResult] = useState<ByDateResponse | null>(null);
+  const [byDateLoading, setByDateLoading] = useState(false);
+  const [expandedRaceId, setExpandedRaceId] = useState<number | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -124,6 +153,90 @@ export default function Predictions() {
       alert(err.response?.data?.detail || 'Failed to generate predictions');
     }
     setLoading(false);
+  };
+
+  // Poll the scrape log while a card scrape is running
+  useEffect(() => {
+    if (!scrapeStatus || !scrapeRunning) return;
+    interface RawLog {
+      id: number;
+      spider_name: string;
+      status: string;
+      records_scraped: number;
+      records_new: number;
+      error_message: string | null;
+      started_at: string | null;
+      completed_at: string | null;
+    }
+    const interval = setInterval(async () => {
+      try {
+        const res = await api.get<{ recent_logs: RawLog[] }>('/scraping/status');
+        const latest = res.data.recent_logs.find(l => l.id === scrapeStatus.log_id);
+        if (latest) {
+          setScrapeStatus({
+            log_id: latest.id,
+            spider_name: latest.spider_name,
+            status: latest.status,
+            records_scraped: latest.records_scraped,
+            records_new: latest.records_new,
+            error_message: latest.error_message,
+            started_at: latest.started_at,
+            completed_at: latest.completed_at,
+          });
+          if (latest.status !== 'running') setScrapeRunning(false);
+        }
+      } catch {
+        // ignore transient polling failures
+      }
+    }, 2500);
+    return () => clearInterval(interval);
+  }, [scrapeStatus?.log_id, scrapeRunning]);
+
+  const handleStartScrape = async () => {
+    setScrapeStatus(null);
+    setByDateResult(null);
+    try {
+      const res = await api.post<{ message: string; log_id: number | null }>(
+        '/scraping/scrape-date',
+        { race_date: scrapeDate, include_form_detail: includeFormDetail },
+      );
+      if (res.data.log_id == null) {
+        alert(res.data.message);
+        return;
+      }
+      setScrapeStatus({
+        log_id: res.data.log_id,
+        spider_name: 'gri-card',
+        status: 'running',
+        records_scraped: 0,
+        records_new: 0,
+        error_message: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+      });
+      setScrapeRunning(true);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to start scrape');
+    }
+  };
+
+  const handlePredictDate = async () => {
+    if (!selectedExp) return;
+    setByDateLoading(true);
+    setByDateResult(null);
+    try {
+      const params = new URLSearchParams({
+        race_date: scrapeDate,
+        experiment_id: String(selectedExp),
+        bankroll: String(bankroll),
+        only_scheduled: 'true',
+      });
+      const res = await api.get<ByDateResponse>(`/predictions/by-date?${params}`);
+      setByDateResult(res.data);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to predict races for date');
+    }
+    setByDateLoading(false);
   };
 
   const handleCompare = async () => {
@@ -228,6 +341,14 @@ export default function Predictions() {
               }`}
             >
               Predict Race
+            </button>
+            <button
+              onClick={() => setTab('date')}
+              className={`px-5 py-3 text-sm font-medium border-b-2 ${
+                tab === 'date' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500'
+              }`}
+            >
+              Predict by Date
             </button>
             <button
               onClick={() => { setTab('compare'); handleCompare(); }}
@@ -479,6 +600,187 @@ export default function Predictions() {
                         {predictions.predictions[0]?.confidence_tier === 'avoid' &&
                           ' The model has low confidence in this race outcome.'}
                       </p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === 'date' && (
+            <div>
+              {/* Step 1: scrape upcoming cards for the date */}
+              <div className="bg-white rounded-lg shadow p-5 mb-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="font-semibold">Step 1 — Scrape upcoming cards</h2>
+                  <span className="text-xs text-gray-400">brute-forces all active GRI tracks</span>
+                </div>
+                <div className="flex gap-3 items-end flex-wrap">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Race date</label>
+                    <input
+                      type="date"
+                      value={scrapeDate}
+                      onChange={(e) => setScrapeDate(e.target.value)}
+                      className="border rounded-md px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <label className="flex items-center gap-2 text-sm text-gray-600 pb-2">
+                    <input
+                      type="checkbox"
+                      checked={includeFormDetail}
+                      onChange={(e) => setIncludeFormDetail(e.target.checked)}
+                    />
+                    Include form detail (trainer / sire / dam)
+                  </label>
+                  <button
+                    onClick={handleStartScrape}
+                    disabled={scrapeRunning || !scrapeDate}
+                    className="bg-blue-600 text-white px-5 py-2 rounded-md text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {scrapeRunning ? 'Scraping...' : 'Scrape this date'}
+                  </button>
+                </div>
+                {scrapeStatus && (
+                  <div className="mt-3 text-xs">
+                    <span className={`inline-block px-2 py-0.5 rounded-full mr-2 ${
+                      scrapeStatus.status === 'success' ? 'bg-green-100 text-green-700'
+                      : scrapeStatus.status === 'failed' ? 'bg-red-100 text-red-700'
+                      : scrapeStatus.status === 'partial' ? 'bg-yellow-100 text-yellow-800'
+                      : 'bg-blue-100 text-blue-700'
+                    }`}>
+                      {scrapeStatus.status.toUpperCase()}
+                    </span>
+                    <span className="text-gray-600">
+                      {scrapeStatus.records_scraped} race(s) scraped, {scrapeStatus.records_new} new
+                    </span>
+                    {scrapeStatus.error_message && (
+                      <p className="text-gray-500 mt-1">{scrapeStatus.error_message}</p>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Step 2: predict all scheduled races on the date */}
+              <div className="bg-white rounded-lg shadow p-5 mb-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="font-semibold">Step 2 — Predict scheduled races</h2>
+                  <span className="text-xs text-gray-400">uses the model selected above</span>
+                </div>
+                <button
+                  onClick={handlePredictDate}
+                  disabled={byDateLoading || !selectedExp || !scrapeDate}
+                  className="bg-green-600 text-white px-5 py-2 rounded-md text-sm font-medium hover:bg-green-700 disabled:opacity-50"
+                >
+                  {byDateLoading ? 'Predicting...' : 'Predict all races on this date'}
+                </button>
+              </div>
+
+              {/* Results */}
+              {byDateResult && (
+                <div className="space-y-3">
+                  <div className="bg-white rounded-lg shadow p-4 text-sm flex items-center gap-4 flex-wrap">
+                    <span className="text-gray-700 font-medium">{byDateResult.race_date}</span>
+                    <span className="text-green-700">{byDateResult.races_predicted} predicted</span>
+                    {byDateResult.races_failed > 0 && (
+                      <span className="text-red-600">{byDateResult.races_failed} failed</span>
+                    )}
+                  </div>
+
+                  {byDateResult.races.length === 0 ? (
+                    <div className="bg-white rounded-lg shadow p-6 text-center text-gray-500 text-sm">
+                      No scheduled races found for this date. Did you run Step 1 first?
+                    </div>
+                  ) : (
+                    Object.entries(
+                      byDateResult.races.reduce((acc, r) => {
+                        (acc[r.track_name] = acc[r.track_name] || []).push(r);
+                        return acc;
+                      }, {} as Record<string, RacePrediction[]>)
+                    ).map(([trackName, trackRaces]) => (
+                      <div key={trackName} className="bg-white rounded-lg shadow overflow-hidden">
+                        <div className="px-5 py-3 bg-gray-50 border-b">
+                          <h3 className="font-semibold text-sm">{trackName}</h3>
+                          <p className="text-xs text-gray-500">{trackRaces.length} race(s)</p>
+                        </div>
+                        <div className="divide-y">
+                          {trackRaces.map(r => {
+                            const top = r.predictions[0];
+                            const expanded = expandedRaceId === r.race_id;
+                            return (
+                              <div key={r.race_id}>
+                                <button
+                                  onClick={() => setExpandedRaceId(expanded ? null : r.race_id)}
+                                  className="w-full text-left px-5 py-3 hover:bg-gray-50 flex items-center gap-4 text-sm"
+                                >
+                                  <span className="font-mono w-10">R{r.race_number}</span>
+                                  <span className="text-gray-500 w-20">{r.distance_m}m {r.grade}</span>
+                                  {top && (
+                                    <>
+                                      <span className="font-medium flex-1">{top.dog_name} (T{top.trap})</span>
+                                      <span className={`font-mono ${probColor(top.win_probability)}`}>
+                                        {top.win_probability ? `${(top.win_probability * 100).toFixed(1)}%` : '-'}
+                                      </span>
+                                      {tierBadge(top.confidence_tier)}
+                                      {top.kelly?.bet && (
+                                        <span className="text-green-700 font-medium">
+                                          ${top.kelly.stake?.toFixed(2)}
+                                        </span>
+                                      )}
+                                    </>
+                                  )}
+                                  <span className="text-gray-400">{expanded ? '▾' : '▸'}</span>
+                                </button>
+                                {expanded && (
+                                  <div className="px-5 pb-4 bg-gray-50">
+                                    <table className="w-full text-xs">
+                                      <thead className="text-gray-500 uppercase">
+                                        <tr>
+                                          <th className="text-left py-1">Rank</th>
+                                          <th className="text-left py-1">Trap</th>
+                                          <th className="text-left py-1">Dog</th>
+                                          <th className="text-left py-1">Win Prob</th>
+                                          <th className="text-left py-1">Edge</th>
+                                          <th className="text-left py-1">Stake</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody className="divide-y">
+                                        {r.predictions.map((p, i) => (
+                                          <tr key={i} className={i === 0 ? 'bg-blue-50/50' : ''}>
+                                            <td className="py-1 pr-2">{i + 1}</td>
+                                            <td className="py-1 pr-2">{p.trap}</td>
+                                            <td className="py-1 pr-2 font-medium">{p.dog_name}</td>
+                                            <td className={`py-1 pr-2 font-mono ${probColor(p.win_probability)}`}>
+                                              {p.win_probability ? `${(p.win_probability * 100).toFixed(1)}%` : '-'}
+                                            </td>
+                                            <td className="py-1 pr-2 font-mono">{edgeDisplay(p.edge)}</td>
+                                            <td className="py-1 pr-2 font-mono">
+                                              {p.kelly?.bet ? `$${p.kelly.stake?.toFixed(2)}` : '-'}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))
+                  )}
+
+                  {byDateResult.errors.length > 0 && (
+                    <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                      <h4 className="font-semibold text-red-800 text-sm mb-2">Errors</h4>
+                      <ul className="text-xs text-red-700 space-y-1">
+                        {byDateResult.errors.map((e, i) => (
+                          <li key={i}>
+                            {e.track_code} R{e.race_number} (race_id={e.race_id}): {e.error}
+                          </li>
+                        ))}
+                      </ul>
                     </div>
                   )}
                 </div>

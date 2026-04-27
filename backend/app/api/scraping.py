@@ -364,10 +364,11 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
 
 @router.get("/last-scrape-info", response_model=LastScrapeInfoResponse)
 def get_last_scrape_info(db: Session = Depends(get_db)):
-    """Preview info for the 'scrape since last run' action.
+    """Preview info for the 'scrape since last race date' action.
 
-    Returns the most recent resulted race date in the DB, the proposed start
-    date (last + 1), today, and how many days/tracks the scrape would cover.
+    Returns the most recent resulted race date in the DB (NOT the timestamp
+    of the last scrape job), the proposed start date (last + 1), today, and
+    how many days/tracks the scrape would cover.
     """
     from sqlalchemy import func
 
@@ -393,15 +394,16 @@ def get_last_scrape_info(db: Session = Depends(get_db)):
     )
 
 
-@router.post("/scrape-since-last", response_model=TriggerResponse)
-def trigger_scrape_since_last(
+@router.post("/scrape-since-last-race-date", response_model=TriggerResponse)
+def trigger_scrape_since_last_race_date(
     req: ScrapeSinceLastRequest, db: Session = Depends(get_db)
 ):
-    """Discover and scrape all races since the last one in the DB.
+    """Discover and scrape all races since the latest race date in the DB.
 
-    Computes the start date as max(Race.race_date) + 1 and runs a backfill
-    up to `end_date` (default: today) across all active tracks (or selected
-    `track_codes`).
+    Start date is computed as max(Race.race_date) + 1 — i.e. the day after
+    the most recent race already stored, NOT the day of the last scrape job.
+    Runs a backfill up to `end_date` (default: today) across all active
+    tracks (or selected `track_codes`).
     """
     from sqlalchemy import func
 

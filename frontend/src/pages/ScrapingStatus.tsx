@@ -61,11 +61,11 @@ export default function ScrapingStatusPage() {
     setScrapingSinceLast(true);
     setMessage('');
     try {
-      const res = await api.post('/scraping/scrape-since-last', {});
+      const res = await api.post('/scraping/scrape-since-last-race-date', {});
       setMessage(res.data.message);
       setTimeout(fetchStatus, 2000);
     } catch {
-      setMessage('Failed to start scrape since last run');
+      setMessage('Failed to start scrape since last race date');
     }
     setScrapingSinceLast(false);
   };
@@ -130,14 +130,18 @@ export default function ScrapingStatusPage() {
         </div>
       )}
 
-      {/* Scrape since last run */}
+      {/* Scrape since last race date */}
       <div className="bg-white rounded-lg shadow p-5 mb-6">
-        <h2 className="font-semibold mb-3">Scrape Since Last Run</h2>
+        <h2 className="font-semibold mb-3">Scrape Since Last Race Date</h2>
+        <p className="text-xs text-gray-500 mb-3">
+          Picks up from the day after the most recent race already in the database
+          (not the timestamp of the last scrape job).
+        </p>
         {lastInfo ? (
           lastInfo.last_race_date ? (
             <div className="text-sm text-gray-700 mb-3 space-y-1">
               <p>
-                Last scraped race date:{' '}
+                Latest race date in DB:{' '}
                 <span className="font-mono font-semibold">{lastInfo.last_race_date}</span>
               </p>
               {lastInfo.days_to_scrape > 0 ? (
@@ -169,7 +173,7 @@ export default function ScrapingStatusPage() {
           }
           className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm hover:bg-indigo-700 disabled:opacity-50"
         >
-          {scrapingSinceLast ? 'Starting…' : 'Scrape Since Last Run'}
+          {scrapingSinceLast ? 'Starting…' : 'Scrape Since Last Race Date'}
         </button>
       </div>
 

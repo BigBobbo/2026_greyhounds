@@ -23,6 +23,14 @@ interface ScrapingStatus {
   recent_logs: ScrapeLog[];
 }
 
+interface LastScrapeInfo {
+  last_race_date: string | null;
+  proposed_start_date: string | null;
+  today: string;
+  days_to_scrape: number;
+  active_track_count: number;
+}
+
 export default function ScrapingStatusPage() {
   const [status, setStatus] = useState<ScrapingStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -30,12 +38,17 @@ export default function ScrapingStatusPage() {
   const [triggerDate, setTriggerDate] = useState(new Date().toISOString().split('T')[0]);
   const [triggering, setTriggering] = useState(false);
   const [message, setMessage] = useState('');
+  const [lastInfo, setLastInfo] = useState<LastScrapeInfo | null>(null);
+  const [scrapingSinceLast, setScrapingSinceLast] = useState(false);
 
   const fetchStatus = () => {
     api.get<ScrapingStatus>('/scraping/status').then((res) => {
       setStatus(res.data);
       setLoading(false);
     }).catch(() => setLoading(false));
+    api.get<LastScrapeInfo>('/scraping/last-scrape-info').then((res) => {
+      setLastInfo(res.data);
+    }).catch(() => {});
   };
 
   useEffect(() => {
@@ -43,6 +56,19 @@ export default function ScrapingStatusPage() {
     const interval = setInterval(fetchStatus, 10000); // refresh every 10s
     return () => clearInterval(interval);
   }, []);
+
+  const handleScrapeSinceLast = async () => {
+    setScrapingSinceLast(true);
+    setMessage('');
+    try {
+      const res = await api.post('/scraping/scrape-since-last-race-date', {});
+      setMessage(res.data.message);
+      setTimeout(fetchStatus, 2000);
+    } catch {
+      setMessage('Failed to start scrape since last race date');
+    }
+    setScrapingSinceLast(false);
+  };
 
   const handleTrigger = async () => {
     setTriggering(true);
@@ -103,6 +129,53 @@ export default function ScrapingStatusPage() {
           </div>
         </div>
       )}
+
+      {/* Scrape since last race date */}
+      <div className="bg-white rounded-lg shadow p-5 mb-6">
+        <h2 className="font-semibold mb-3">Scrape Since Last Race Date</h2>
+        <p className="text-xs text-gray-500 mb-3">
+          Picks up from the day after the most recent race already in the database
+          (not the timestamp of the last scrape job).
+        </p>
+        {lastInfo ? (
+          lastInfo.last_race_date ? (
+            <div className="text-sm text-gray-700 mb-3 space-y-1">
+              <p>
+                Latest race date in DB:{' '}
+                <span className="font-mono font-semibold">{lastInfo.last_race_date}</span>
+              </p>
+              {lastInfo.days_to_scrape > 0 ? (
+                <p>
+                  Will scrape{' '}
+                  <span className="font-mono">{lastInfo.proposed_start_date}</span> →{' '}
+                  <span className="font-mono">{lastInfo.today}</span>{' '}
+                  ({lastInfo.days_to_scrape} day{lastInfo.days_to_scrape === 1 ? '' : 's'} ×{' '}
+                  {lastInfo.active_track_count} active tracks)
+                </p>
+              ) : (
+                <p className="text-green-700">Already up to date.</p>
+              )}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500 mb-3">
+              No prior scraped races found. Use a backfill with explicit dates first.
+            </p>
+          )
+        ) : (
+          <p className="text-sm text-gray-400 mb-3">Loading…</p>
+        )}
+        <button
+          onClick={handleScrapeSinceLast}
+          disabled={
+            scrapingSinceLast ||
+            !lastInfo?.last_race_date ||
+            (lastInfo?.days_to_scrape ?? 0) === 0
+          }
+          className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm hover:bg-indigo-700 disabled:opacity-50"
+        >
+          {scrapingSinceLast ? 'Starting…' : 'Scrape Since Last Race Date'}
+        </button>
+      </div>
 
       {/* Manual trigger */}
       <div className="bg-white rounded-lg shadow p-5 mb-6">

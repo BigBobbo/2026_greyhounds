@@ -65,6 +65,19 @@ class ScrapeDateRequest(BaseModel):
     track_codes: list[str] | None = None
 
 
+class ScrapeSinceLastRequest(BaseModel):
+    end_date: str | None = None
+    track_codes: list[str] | None = None
+
+
+class LastScrapeInfoResponse(BaseModel):
+    last_race_date: str | None
+    proposed_start_date: str | None
+    today: str
+    days_to_scrape: int
+    active_track_count: int
+
+
 class TriggerResponse(BaseModel):
     message: str
     log_id: int | None = None
@@ -347,6 +360,75 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
         message=f"Backfill started for {len(tracks)} tracks from {start} to {end}",
         log_id=log.id,
     )
+
+
+@router.get("/last-scrape-info", response_model=LastScrapeInfoResponse)
+def get_last_scrape_info(db: Session = Depends(get_db)):
+    """Preview info for the 'scrape since last run' action.
+
+    Returns the most recent resulted race date in the DB, the proposed start
+    date (last + 1), today, and how many days/tracks the scrape would cover.
+    """
+    from sqlalchemy import func
+
+    last_date = (
+        db.query(func.max(Race.race_date))
+        .filter(Race.status == "resulted")
+        .scalar()
+    )
+    today = date.today()
+    proposed_start = (last_date + timedelta(days=1)) if last_date else None
+    if proposed_start and proposed_start <= today:
+        days = (today - proposed_start).days + 1
+    else:
+        days = 0
+    active = db.query(Track).filter(Track.active.is_(True)).count()
+
+    return LastScrapeInfoResponse(
+        last_race_date=str(last_date) if last_date else None,
+        proposed_start_date=str(proposed_start) if proposed_start else None,
+        today=str(today),
+        days_to_scrape=days,
+        active_track_count=active,
+    )
+
+
+@router.post("/scrape-since-last", response_model=TriggerResponse)
+def trigger_scrape_since_last(
+    req: ScrapeSinceLastRequest, db: Session = Depends(get_db)
+):
+    """Discover and scrape all races since the last one in the DB.
+
+    Computes the start date as max(Race.race_date) + 1 and runs a backfill
+    up to `end_date` (default: today) across all active tracks (or selected
+    `track_codes`).
+    """
+    from sqlalchemy import func
+
+    last_date = (
+        db.query(func.max(Race.race_date))
+        .filter(Race.status == "resulted")
+        .scalar()
+    )
+    if not last_date:
+        return TriggerResponse(
+            message="No prior scraped races found. Use /backfill with explicit dates instead."
+        )
+
+    start = last_date + timedelta(days=1)
+    end = date.fromisoformat(req.end_date) if req.end_date else date.today()
+
+    if start > end:
+        return TriggerResponse(
+            message=f"Already up to date — last race date is {last_date}."
+        )
+
+    backfill_req = BackfillRequest(
+        start_date=start.isoformat(),
+        end_date=end.isoformat(),
+        track_codes=req.track_codes,
+    )
+    return trigger_backfill(backfill_req, db)
 
 
 def _run_scrape_date_in_thread(

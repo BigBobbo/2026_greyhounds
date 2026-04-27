@@ -9,6 +9,7 @@ const navItems = [
   { to: '/predictions', label: 'Predictions', icon: '~' },
   { to: '/bankroll', label: 'Bankroll', icon: '~' },
   { to: '/scraping', label: 'Scraping', icon: '~' },
+  { to: '/race-entry', label: 'Race Card Entry', icon: '~' },
 ];
 
 interface SidebarProps {

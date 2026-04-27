@@ -10,7 +10,7 @@ Handles:
 
 import logging
 import re
-from datetime import date
+from datetime import date, time
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -19,6 +19,20 @@ from app.models.dog import Dog
 from app.models.race import Race
 from app.models.race_entry import RaceEntry
 from app.models.track import Track
+
+
+def _parse_race_time(value: Any) -> time | None:
+    """Parse 'HH:MM' / 'H.MM' / time / None into a datetime.time."""
+    if value is None or isinstance(value, time):
+        return value
+    if isinstance(value, str):
+        text = value.strip().replace(".", ":")
+        m = re.match(r"^(\d{1,2}):(\d{2})$", text)
+        if m:
+            h, mn = int(m.group(1)), int(m.group(2))
+            if 0 <= h <= 23 and 0 <= mn <= 59:
+                return time(h, mn)
+    return None
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +94,8 @@ def upsert_race(
         .first()
     )
 
+    parsed_race_time = _parse_race_time(race_data.get("race_time"))
+
     if existing:
         # Update fields if we have better data
         if race_data.get("distance_m") and not existing.distance_m:
@@ -90,6 +106,8 @@ def upsert_race(
             existing.going = race_data["going"]
         if race_data.get("prize_money") and not existing.prize_money:
             existing.prize_money = race_data["prize_money"]
+        if parsed_race_time and not existing.race_time:
+            existing.race_time = parsed_race_time
         # Mark as resulted if we have finish data
         if any(e.get("finish_position") for e in race_data.get("entries", [])):
             existing.status = "resulted"
@@ -98,6 +116,7 @@ def upsert_race(
     race = Race(
         track_id=track.id,
         race_date=race_date_val,
+        race_time=parsed_race_time,
         race_number=race_number,
         distance_m=race_data.get("distance_m") or 0,
         grade=race_data.get("grade"),
@@ -105,7 +124,7 @@ def upsert_race(
         going=race_data.get("going"),
         prize_money=race_data.get("prize_money"),
         num_runners=len(race_data.get("entries", [])),
-        source="gri",
+        source=race_data.get("source", "gri"),
         status="resulted" if any(e.get("finish_position") for e in race_data.get("entries", [])) else "scheduled",
     )
     db.add(race)

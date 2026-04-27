@@ -350,6 +350,186 @@ def discover_tracks():
     return {"tracks": [{"code": k, "name": v} for k, v in GRI_TRACK_CODES.items()]}
 
 
+class UpcomingCardRequest(BaseModel):
+    track_code: str
+    race_date: str
+    save: bool = True  # if False, only preview the parse without writing to DB
+
+
+class UpcomingCardEntry(BaseModel):
+    trap: int
+    dog_name: str
+    trainer_name: str | None = None
+    sire_name: str | None = None
+    dam_name: str | None = None
+    weight_kg: float | None = None
+
+
+class UpcomingCardRace(BaseModel):
+    race_number: int | None = None
+    race_time: str | None = None
+    distance_m: int | None = None
+    grade: str | None = None
+    race_type: str = "flat"
+    entries: list[UpcomingCardEntry] = []
+
+
+class UpcomingCardResponse(BaseModel):
+    track_code: str
+    race_date: str
+    url_used: str | None
+    races_found: int
+    races: list[UpcomingCardRace]
+    saved: bool
+    db_stats: dict[str, int] | None = None
+    message: str | None = None
+
+
+@router.post("/upcoming", response_model=UpcomingCardResponse)
+async def scrape_upcoming_card(req: UpcomingCardRequest, db: Session = Depends(get_db)):
+    """
+    Scrape a published race card (declarations) for a future date and
+    optionally write it to the database with status="scheduled".
+
+    Tries multiple URL patterns to find the card (see
+    scraping/gri_racecard_scraper.py). If the GRI URL is non-standard,
+    set the GRI_RACECARD_URL env var.
+
+    Use save=False to preview the parse without writing to the DB —
+    useful when verifying that the card was scraped correctly before
+    committing.
+    """
+    from scraping.gri_racecard_scraper import scrape_race_card
+    from scraping.db_pipeline import upsert_race_results
+
+    track = db.query(Track).filter(Track.code == req.track_code).first()
+    if not track:
+        return UpcomingCardResponse(
+            track_code=req.track_code,
+            race_date=req.race_date,
+            url_used=None,
+            races_found=0,
+            races=[],
+            saved=False,
+            message=f"Unknown track code: {req.track_code}",
+        )
+
+    try:
+        race_date_val = date.fromisoformat(req.race_date)
+    except ValueError:
+        return UpcomingCardResponse(
+            track_code=req.track_code,
+            race_date=req.race_date,
+            url_used=None,
+            races_found=0,
+            races=[],
+            saved=False,
+            message="race_date must be ISO format (YYYY-MM-DD)",
+        )
+
+    races, url_used = await scrape_race_card(req.track_code, race_date_val)
+
+    races_payload = [
+        UpcomingCardRace(
+            race_number=r.get("race_number"),
+            race_time=r.get("race_time"),
+            distance_m=r.get("distance_m"),
+            grade=r.get("grade"),
+            race_type=r.get("race_type", "flat"),
+            entries=[
+                UpcomingCardEntry(
+                    trap=e["trap"],
+                    dog_name=e.get("dog_name", ""),
+                    trainer_name=e.get("trainer_name"),
+                    sire_name=e.get("sire_name"),
+                    dam_name=e.get("dam_name"),
+                    weight_kg=e.get("weight_kg"),
+                )
+                for e in r.get("entries", [])
+            ],
+        )
+        for r in races
+    ]
+
+    if not races:
+        return UpcomingCardResponse(
+            track_code=req.track_code,
+            race_date=req.race_date,
+            url_used=url_used,
+            races_found=0,
+            races=[],
+            saved=False,
+            message=(
+                "No race card found. The GRI URL may have changed; set "
+                "GRI_RACECARD_URL or use the Manual Race Entry page."
+            ),
+        )
+
+    if not req.save:
+        return UpcomingCardResponse(
+            track_code=req.track_code,
+            race_date=req.race_date,
+            url_used=url_used,
+            races_found=len(races),
+            races=races_payload,
+            saved=False,
+            message="Preview only — no rows written to the database.",
+        )
+
+    # Tag with track_code so upsert_race_results can resolve the track
+    for r in races:
+        r["track_code"] = req.track_code
+
+    log = ScrapeLog(
+        spider_name="gri-racecard",
+        source=f"upcoming {req.track_code} {race_date_val}",
+        status="running",
+        started_at=datetime.utcnow(),
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+
+    try:
+        stats = upsert_race_results(db, races)
+        log.status = "success"
+        log.records_scraped = stats["races_new"] + stats["races_updated"]
+        log.records_new = stats["races_new"]
+        log.records_updated = stats["races_updated"]
+        log.completed_at = datetime.utcnow()
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        log.status = "failed"
+        log.error_message = f"{type(e).__name__}: {e}"
+        log.completed_at = datetime.utcnow()
+        db.commit()
+        return UpcomingCardResponse(
+            track_code=req.track_code,
+            race_date=req.race_date,
+            url_used=url_used,
+            races_found=len(races),
+            races=races_payload,
+            saved=False,
+            message=f"Parse succeeded but DB write failed: {e}",
+        )
+
+    return UpcomingCardResponse(
+        track_code=req.track_code,
+        race_date=req.race_date,
+        url_used=url_used,
+        races_found=len(races),
+        races=races_payload,
+        saved=True,
+        db_stats=stats,
+        message=(
+            f"Saved {stats['races_new']} new race(s), "
+            f"{stats['entries_new']} new entries, "
+            f"{stats['dogs_new']} new dogs."
+        ),
+    )
+
+
 @router.get("/start-backfill")
 def start_backfill_get(
     start_date: str = "2021-04-05",

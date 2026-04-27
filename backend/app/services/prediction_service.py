@@ -337,6 +337,11 @@ def predict_race(
     if X.empty:
         return []
 
+    # Coerce to numeric: when every entry returns None for a feature
+    # (e.g. future-date races where no dog history exists yet), pandas
+    # infers `object` dtype, which XGBoost/LightGBM reject at predict time.
+    X = X.apply(pd.to_numeric, errors="coerce")
+
     # Fill NaN using training set medians (consistent with training)
     if feature_medians:
         X = X.fillna(feature_medians)

@@ -93,6 +93,31 @@ class TriggerResponse(BaseModel):
     log_id: int | None = None
 
 
+class CardsStatusTrack(BaseModel):
+    code: str
+    name: str
+    race_count: int
+    scheduled_count: int
+    resulted_count: int
+    last_scraped_at: datetime | None
+
+
+class CardsStatusLog(BaseModel):
+    id: int
+    status: str
+    records_scraped: int
+    records_new: int
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+class CardsStatusResponse(BaseModel):
+    race_date: str
+    total_races: int
+    tracks: list[CardsStatusTrack]
+    recent_scrape_logs: list[CardsStatusLog]
+
+
 @router.get("/status", response_model=ScrapingStatusResponse)
 def get_scraping_status(db: Session = Depends(get_db)):
     total_races = db.query(Race).count()
@@ -109,6 +134,81 @@ def get_scraping_status(db: Session = Depends(get_db)):
         total_tracks=total_tracks,
         last_scrape=ScrapeLogResponse.model_validate(last_scrape) if last_scrape else None,
         recent_logs=[ScrapeLogResponse.model_validate(log) for log in recent_logs],
+    )
+
+
+@router.get("/cards-status", response_model=CardsStatusResponse)
+def get_cards_status(race_date: str, db: Session = Depends(get_db)):
+    """Show which tracks already have race cards scraped for a given date.
+
+    Used by the predictions UI to indicate which tracks are already scraped
+    so users don't re-scrape the same future race state repeatedly.
+    """
+    rd = date.fromisoformat(race_date)
+
+    rows = (
+        db.query(Race.status, Race.last_scraped_at, Track.code, Track.name)
+        .join(Track, Track.id == Race.track_id)
+        .filter(Race.race_date == rd)
+        .all()
+    )
+
+    by_code: dict[str, dict[str, Any]] = {}
+    for status, last_scraped_at, code, name in rows:
+        bucket = by_code.setdefault(
+            code,
+            {
+                "code": code,
+                "name": name,
+                "race_count": 0,
+                "scheduled_count": 0,
+                "resulted_count": 0,
+                "last_scraped_at": None,
+            },
+        )
+        bucket["race_count"] += 1
+        if status == "scheduled":
+            bucket["scheduled_count"] += 1
+        elif status == "resulted":
+            bucket["resulted_count"] += 1
+        if last_scraped_at and (
+            bucket["last_scraped_at"] is None
+            or last_scraped_at > bucket["last_scraped_at"]
+        ):
+            bucket["last_scraped_at"] = last_scraped_at
+
+    tracks = [
+        CardsStatusTrack(**bucket)
+        for bucket in sorted(by_code.values(), key=lambda b: b["name"])
+    ]
+
+    logs = (
+        db.query(ScrapeLog)
+        .filter(
+            ScrapeLog.spider_name == "gri-card",
+            ScrapeLog.source.like(f"%{rd}%"),
+        )
+        .order_by(ScrapeLog.id.desc())
+        .limit(5)
+        .all()
+    )
+    log_responses = [
+        CardsStatusLog(
+            id=l.id,
+            status=l.status,
+            records_scraped=l.records_scraped or 0,
+            records_new=l.records_new or 0,
+            started_at=l.started_at,
+            completed_at=l.completed_at,
+        )
+        for l in logs
+    ]
+
+    return CardsStatusResponse(
+        race_date=str(rd),
+        total_races=sum(t.race_count for t in tracks),
+        tracks=tracks,
+        recent_scrape_logs=log_responses,
     )
 
 

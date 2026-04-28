@@ -70,6 +70,31 @@ interface ScrapeStatus {
   completed_at: string | null;
 }
 
+interface CardsStatusTrack {
+  code: string;
+  name: string;
+  race_count: number;
+  scheduled_count: number;
+  resulted_count: number;
+  last_scraped_at: string | null;
+}
+
+interface CardsStatusLog {
+  id: number;
+  status: string;
+  records_scraped: number;
+  records_new: number;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+interface CardsStatusResponse {
+  race_date: string;
+  total_races: number;
+  tracks: CardsStatusTrack[];
+  recent_scrape_logs: CardsStatusLog[];
+}
+
 interface ComparisonResult {
   race_date: string;
   race_number: number;
@@ -113,6 +138,7 @@ export default function Predictions() {
   const [byDateResult, setByDateResult] = useState<ByDateResponse | null>(null);
   const [byDateLoading, setByDateLoading] = useState(false);
   const [expandedRaceId, setExpandedRaceId] = useState<number | null>(null);
+  const [cardsStatus, setCardsStatus] = useState<CardsStatusResponse | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -155,6 +181,24 @@ export default function Predictions() {
     setLoading(false);
   };
 
+  // Fetch which tracks already have race cards scraped for the selected date
+  const refreshCardsStatus = async (d: string) => {
+    if (!d) return;
+    try {
+      const res = await api.get<CardsStatusResponse>(
+        `/scraping/cards-status?race_date=${d}`,
+      );
+      setCardsStatus(res.data);
+    } catch {
+      setCardsStatus(null);
+    }
+  };
+
+  useEffect(() => {
+    if (tab !== 'date' || !scrapeDate) return;
+    refreshCardsStatus(scrapeDate);
+  }, [tab, scrapeDate]);
+
   // Poll the scrape log while a card scrape is running
   useEffect(() => {
     if (!scrapeStatus || !scrapeRunning) return;
@@ -183,14 +227,17 @@ export default function Predictions() {
             started_at: latest.started_at,
             completed_at: latest.completed_at,
           });
-          if (latest.status !== 'running') setScrapeRunning(false);
+          if (latest.status !== 'running') {
+            setScrapeRunning(false);
+            refreshCardsStatus(scrapeDate);
+          }
         }
       } catch {
         // ignore transient polling failures
       }
     }, 2500);
     return () => clearInterval(interval);
-  }, [scrapeStatus?.log_id, scrapeRunning]);
+  }, [scrapeStatus?.log_id, scrapeRunning, scrapeDate]);
 
   const handleStartScrape = async () => {
     setScrapeStatus(null);
@@ -659,6 +706,73 @@ export default function Predictions() {
                     )}
                   </div>
                 )}
+
+                {/* Already-scraped tracks for the selected date */}
+                <div className="mt-4 pt-3 border-t">
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+                      Already scraped for {scrapeDate || '—'}
+                    </h3>
+                    {cardsStatus && (
+                      <span className="text-xs text-gray-400">
+                        {cardsStatus.tracks.length} track(s) · {cardsStatus.total_races} race(s)
+                      </span>
+                    )}
+                  </div>
+                  {!cardsStatus || cardsStatus.tracks.length === 0 ? (
+                    <p className="text-xs text-gray-400">
+                      No cards scraped for this date yet — click "Scrape this date" above.
+                    </p>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {cardsStatus.tracks.map(t => {
+                        const fullyResulted = t.resulted_count > 0 && t.scheduled_count === 0;
+                        const partiallyResulted = t.resulted_count > 0 && t.scheduled_count > 0;
+                        const tooltip = [
+                          `${t.race_count} race(s)`,
+                          t.scheduled_count > 0 ? `${t.scheduled_count} scheduled` : null,
+                          t.resulted_count > 0 ? `${t.resulted_count} resulted` : null,
+                          t.last_scraped_at
+                            ? `last scraped ${new Date(t.last_scraped_at).toLocaleString()}`
+                            : null,
+                        ].filter(Boolean).join(' · ');
+                        return (
+                          <span
+                            key={t.code}
+                            title={tooltip}
+                            className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs border ${
+                              fullyResulted
+                                ? 'bg-gray-50 border-gray-200 text-gray-600'
+                                : partiallyResulted
+                                ? 'bg-yellow-50 border-yellow-200 text-yellow-800'
+                                : 'bg-green-50 border-green-200 text-green-800'
+                            }`}
+                          >
+                            <span className="font-medium">{t.name}</span>
+                            <span className="font-mono text-[11px] opacity-70">
+                              {t.race_count}
+                            </span>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {cardsStatus && cardsStatus.recent_scrape_logs.length > 0 && (
+                    <details className="mt-2">
+                      <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
+                        Recent scrape jobs for this date ({cardsStatus.recent_scrape_logs.length})
+                      </summary>
+                      <ul className="mt-1 space-y-1 text-xs text-gray-500">
+                        {cardsStatus.recent_scrape_logs.map(l => (
+                          <li key={l.id} className="font-mono">
+                            #{l.id} {l.status} — {l.records_scraped} scraped, {l.records_new} new
+                            {l.completed_at && ` · ${new Date(l.completed_at).toLocaleString()}`}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                </div>
               </div>
 
               {/* Step 2: predict all scheduled races on the date */}

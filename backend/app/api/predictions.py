@@ -166,8 +166,18 @@ def predict_races_by_date(
     `/scraping/scrape-date` first (step 1), then call this endpoint (step 2).
     Pass `only_scheduled=false` to also predict already-resulted races (e.g.
     for back-testing on a historical date).
+
+    The expensive ELO chronological sweep runs once for *all* entries on the
+    date, not once per race. With a typical Irish card (4-6 tracks × ~10
+    races) this keeps the request well under the gateway timeout.
     """
-    from app.services.prediction_service import predict_race, save_predictions
+    from app.services.prediction_service import (
+        compute_features_for_entries,
+        predict_race,
+        save_predictions,
+    )
+    from app.models.experiment import Experiment
+    from app.models.feature_definition import FeatureDefinition
 
     query = (
         db.query(Race, Track.name.label("track_name"), Track.code.label("track_code"))
@@ -190,13 +200,61 @@ def predict_races_by_date(
             "errors": [],
         }
 
+    # Validate experiment up front so failures here surface as a structured
+    # 4xx instead of dying inside the per-race loop with a generic 500.
+    experiment = (
+        db.query(Experiment).filter(Experiment.id == experiment_id).first()
+    )
+    if not experiment or experiment.status != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Experiment {experiment_id} not found or not completed",
+        )
+
+    # Single batched feature computation across every entry on the card.
+    # The ELO pass walks ~84k historical races regardless of target count,
+    # so doing it once for N races is dramatically cheaper than N times.
+    race_ids = [row.Race.id for row in rows]
+    all_entry_ids = [
+        eid for (eid,) in db.query(RaceEntry.id)
+        .filter(RaceEntry.race_id.in_(race_ids))
+        .all()
+    ]
+
+    precomputed = None
+    if all_entry_ids:
+        try:
+            split_cfg = experiment.split_config or {}
+            include_builtin = split_cfg.get("include_builtin_features", True)
+            feature_defs = (
+                db.query(FeatureDefinition)
+                .filter(FeatureDefinition.id.in_(experiment.feature_set))
+                .all()
+            )
+            logger.info(
+                "by-date: batch-computing features for %d entries across %d races",
+                len(all_entry_ids), len(race_ids),
+            )
+            precomputed = compute_features_for_entries(
+                db, all_entry_ids, feature_defs, include_builtin=include_builtin,
+            )
+        except Exception as e:
+            logger.exception("by-date: batched feature compute failed")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Feature batch computation failed: {e}",
+            )
+
     results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
 
     for row in rows:
         race = row.Race
         try:
-            preds = predict_race(db, experiment_id, race.id, bankroll=bankroll)
+            preds = predict_race(
+                db, experiment_id, race.id, bankroll=bankroll,
+                precomputed_features=precomputed,
+            )
             if preds:
                 save_predictions(db, preds)
                 results.append({

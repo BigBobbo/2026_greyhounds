@@ -14,14 +14,18 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("App starting up")
-    # Scheduler disabled for now — enable once app is stable
-    # try:
-    #     from app.tasks.scheduler import start_scheduler
-    #     start_scheduler()
-    # except Exception as e:
-    #     logger.error("Scheduler failed: %s", e)
+    try:
+        from app.tasks.scheduler import start_scheduler
+        start_scheduler()
+    except Exception as e:
+        logger.error("Scheduler failed: %s", e)
     yield
     logger.info("App shutting down")
+    try:
+        from app.tasks.scheduler import stop_scheduler
+        stop_scheduler()
+    except Exception as e:
+        logger.error("Scheduler stop failed: %s", e)
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)

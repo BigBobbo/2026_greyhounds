@@ -301,6 +301,7 @@ def predict_race(
     experiment_id: int,
     race_id: int,
     bankroll: float = 100.0,
+    precomputed_features: pd.DataFrame | None = None,
 ) -> list[dict[str, Any]]:
     """
     Generate predictions for all entries in a race.
@@ -308,6 +309,11 @@ def predict_race(
     Returns list of prediction dicts with dog info, confidence metrics,
     and Kelly staking recommendations.
     Raises ValueError if the race falls within the training data period.
+
+    `precomputed_features` lets a batch caller (e.g. predict-by-date) supply
+    a feature DataFrame indexed by race_entry_id covering many races at once,
+    so the expensive ELO/builtin pass runs only once per request instead of
+    per race. When provided, this race's slice is taken from it.
     """
     experiment = db.query(Experiment).filter(Experiment.id == experiment_id).first()
     if not experiment or experiment.status != "completed":
@@ -362,10 +368,14 @@ def predict_race(
         .all()
     )
 
-    # Compute features
-    X = compute_features_for_entries(
-        db, entry_ids, feature_defs, include_builtin=include_builtin,
-    )
+    # Compute features (or take a slice of a precomputed batch).
+    if precomputed_features is not None and not precomputed_features.empty:
+        available = [eid for eid in entry_ids if eid in precomputed_features.index]
+        X = precomputed_features.loc[available].copy()
+    else:
+        X = compute_features_for_entries(
+            db, entry_ids, feature_defs, include_builtin=include_builtin,
+        )
 
     if X.empty:
         return []

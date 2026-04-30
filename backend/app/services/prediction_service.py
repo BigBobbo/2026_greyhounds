@@ -360,6 +360,8 @@ def predict_race(
     split_cfg = experiment.split_config or {}
     include_builtin = split_cfg.get("include_builtin_features", True)
     include_relative = split_cfg.get("include_race_relative_features", True)
+    include_pace_shape = split_cfg.get("include_pace_shape_features", True)
+    include_odds_snapshot = split_cfg.get("include_odds_snapshot_features", True)
 
     # Get feature definitions
     feature_defs = (
@@ -399,12 +401,29 @@ def predict_race(
         if col not in X.columns:
             X[col] = 0
 
-    # Add race-relative features (same as training)
-    # All entries belong to one race, so create a constant race_id series
+    # Match the training pipeline order: odds-snapshot → race-relative → pace-shape.
+    # Pace-shape and odds-snapshot were previously training-only, which silently
+    # filled them with the training-set median at predict time — making them
+    # constant across every dog in the race.  With most pace/market signal
+    # collapsed to a constant, the only features that varied within a race
+    # were trap-derived (trap_win_rate_at_track, early_speed_x_trap, …),
+    # producing predictions that lined up with trap order.
+    race_id_series = pd.Series(race_id, index=X.index, name="race_id")
+
+    if include_odds_snapshot:
+        from ml.dataset_builder import _add_odds_snapshot_features
+        # _add_odds_snapshot_features only uses entries_df.index to filter
+        # RaceEntry rows; it fetches race_id/dog_id/sp_decimal itself.
+        entries_df = pd.DataFrame(index=X.index)
+        X = _add_odds_snapshot_features(db, X, entries_df)
+
     if include_relative:
         from ml.dataset_builder import add_race_relative_features
-        race_id_series = pd.Series(race_id, index=X.index, name="race_id")
         X = add_race_relative_features(X, race_id_series)
+
+    if include_pace_shape:
+        from ml.dataset_builder import _add_pace_shape_features
+        X = _add_pace_shape_features(X, race_id_series)
 
     # Final alignment to the exact column set/order the model was trained on.
     # Race-relative / built-in / ELO / H2H features are generated dynamically
@@ -446,9 +465,21 @@ def predict_race(
     # Compute race-level confidence metrics
     race_confidence = _compute_confidence(win_probs) if win_probs is not None else None
 
+    # Key model outputs by entry_id (= X.index) so a partial X — e.g. an
+    # entry was missing from `precomputed_features` and got dropped — can't
+    # silently misalign with the entries list.  Position-based pairing was
+    # safe in the happy path but failed loudly (or, worse, off-by-one
+    # silently) when any row was dropped.
+    eid_to_win_prob: dict[int, float] = {}
+    eid_to_raw_score: dict[int, float] = {}
+    if win_probs is not None:
+        eid_to_win_prob = {int(eid): float(p) for eid, p in zip(X.index, win_probs)}
+    if raw_scores is not None:
+        eid_to_raw_score = {int(eid): float(s) for eid, s in zip(X.index, raw_scores)}
+
     # Build prediction list
     predictions = []
-    for i, (entry_row, entry_id) in enumerate(zip(entries, entry_ids)):
+    for entry_row, entry_id in zip(entries, entry_ids):
         entry = entry_row.RaceEntry
         dog_name = entry_row.dog_name
 
@@ -460,7 +491,7 @@ def predict_race(
         }
 
         if is_ranking or experiment.target == "win_prob":
-            win_prob = float(win_probs[i]) if win_probs is not None else None
+            win_prob = eid_to_win_prob.get(int(entry_id))
             pred_data["win_probability"] = win_prob
             pred_data["predicted_position"] = None
             pred_data["predicted_time"] = None
@@ -491,14 +522,16 @@ def predict_race(
                 pred_data["is_value"] = None
 
         elif experiment.target == "finish_position":
+            score = eid_to_raw_score.get(int(entry_id))
             pred_data["win_probability"] = None
-            pred_data["predicted_position"] = float(raw_scores[i])
+            pred_data["predicted_position"] = score
             pred_data["predicted_time"] = None
             pred_data["confidence"] = None
         elif experiment.target == "finish_time":
+            score = eid_to_raw_score.get(int(entry_id))
             pred_data["win_probability"] = None
             pred_data["predicted_position"] = None
-            pred_data["predicted_time"] = float(raw_scores[i])
+            pred_data["predicted_time"] = score
             pred_data["confidence"] = None
 
         predictions.append(pred_data)

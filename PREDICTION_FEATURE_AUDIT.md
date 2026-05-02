@@ -343,6 +343,47 @@ The endpoint never trains, never imputes, and never raises — it lets the
 UI surface a "this prediction will fail because …" banner before the
 user clicks predict.
 
+### 6.8 Compute the recoverable (category C) features at scrape time ✅
+
+The audit splits missing fields into three buckets:
+
+* **A. Future data** — outcomes that simply don't exist yet (finish time,
+  SP, sectional time, etc.). These remain unavailable; the post-race
+  classifier in §6.1 plus the predict-time guard in §6.2 keeps them out
+  of any model used on scheduled races.
+* **B. Exists pre-race but not on the GRI card page** — `weight_kg`
+  (trackside weigh-in only), `going` (post-race report). These would
+  require a different scrape source; out of scope for this pass.
+* **C. Computable from data we already store** — `days_since_last`,
+  `grade_at_entry`, plus the history-derived features (`grade_movement`,
+  `early_speed_ratio`, `is_front_runner`, ELO, trainer/sire stats, H2H,
+  pace-shape).
+
+The history-derived features were already computed correctly when the
+dog has a non-empty resulted-race history. The two row-level fields
+(`days_since_last`, `grade_at_entry`) were *not* being populated for
+upcoming races because the GRI card page omits them. They are now
+backfilled at scrape time in
+`backend/scraping/db_pipeline.upsert_race_entry`:
+
+* `grade_at_entry` defaults to `race.grade` when the card scrape doesn't
+  carry an entry-level grade slip.
+* `days_since_last` is computed by `_last_resulted_race_date` from the
+  dog's most recent prior resulted race.
+
+Both fields are filled on the new-entry path *and* the existing-entry
+update path, so re-scraping an already-loaded card heals rows that
+predate the fix without a separate migration.
+
+For the C features that depend on a non-empty history (everything that
+reads `dog_history`), genuine debutants still produce NaN at predict
+time. The preflight endpoint surfaces this distinctly in the
+`entries_missing_history` field, and each cell in `missing_features`
+now carries a `reason` tag (`post_race_data` / `dog_has_no_history` /
+`history_field_missing`) so the UI can tell the user whether the gap is
+fixable by re-scraping prior races (`history_field_missing`) or
+fundamental (`dog_has_no_history`, `post_race_data`).
+
 ---
 
 ## 7. Quick-reference: where to look in the code

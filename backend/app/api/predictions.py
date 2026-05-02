@@ -73,11 +73,19 @@ def predict_race_preflight(
 ):
     """Diagnostic: surface missing-feature gaps for a race **without** predicting.
 
-    Computes the feature matrix the model would see at predict time and
-    reports any NaN cells per (entry, feature) plus any post-race-only
-    features the experiment was trained on. Lets the UI warn the user
-    before kicking off a real predict (which now fails loudly on missing
-    data instead of silently imputing).
+    Computes the same feature matrix `predict_race` would build, then
+    classifies each gap so the UI can give the user an actionable answer:
+
+      * `post_race_features_in_use` — features the experiment was trained
+        on that need data only published after the race runs (current SP,
+        weigh-in weight, live odds drift). Fix: retrain without them.
+      * `entries_missing_history` — dogs in this race with zero prior
+        resulted races. History-dependent features will be NaN for these
+        dogs by definition. Fix: wait until the dog has run, or accept a
+        debutant blind spot.
+      * `missing_features` — every NaN cell, with a `reason` field
+        distinguishing post-race-only / debutant / sparse-history. The
+        last category is the one a backfill scrape can fix.
     """
     import pandas as pd
 
@@ -87,7 +95,10 @@ def predict_race_preflight(
     )
     from app.models.experiment import Experiment
     from app.models.feature_definition import FeatureDefinition
-    from ml.feature_availability import post_race_features_in_use
+    from ml.feature_availability import (
+        POST_RACE_FEATURE_NAMES,
+        post_race_features_in_use,
+    )
 
     race = db.query(Race).filter(Race.id == race_id).first()
     if not race:
@@ -115,6 +126,42 @@ def predict_race_preflight(
     entry_ids = [e.RaceEntry.id for e in entries]
     entry_lookup = {e.RaceEntry.id: (e.RaceEntry.trap, e.dog_name) for e in entries}
 
+    # Per-entry prior-race counts (resulted only, strictly before this
+    # race date). Used to label "debutant" missing-feature reasons.
+    history_counts: dict[int, int] = {eid: 0 for eid in entry_ids}
+    if entries:
+        from sqlalchemy import func as sa_func
+        target_dog_ids = {e.RaceEntry.dog_id: e.RaceEntry.id for e in entries}
+        prior_counts_rows = (
+            db.query(
+                RaceEntry.dog_id,
+                sa_func.count(RaceEntry.id).label("prior_count"),
+            )
+            .join(Race, Race.id == RaceEntry.race_id)
+            .filter(
+                RaceEntry.dog_id.in_(list(target_dog_ids.keys())),
+                Race.race_date < race.race_date,
+                Race.status == "resulted",
+            )
+            .group_by(RaceEntry.dog_id)
+            .all()
+        )
+        for dog_id, count in prior_counts_rows:
+            entry_id = target_dog_ids.get(dog_id)
+            if entry_id is not None:
+                history_counts[entry_id] = int(count)
+
+    debutants = [
+        {
+            "entry_id": eid,
+            "trap": entry_lookup[eid][0],
+            "dog_name": entry_lookup[eid][1],
+        }
+        for eid, count in history_counts.items()
+        if count == 0
+    ]
+    debutant_ids = {d["entry_id"] for d in debutants}
+
     split_cfg = experiment.split_config or {}
     include_builtin = split_cfg.get("include_builtin_features", True)
     feature_defs = (
@@ -128,16 +175,47 @@ def predict_race_preflight(
     )
     X = X.apply(pd.to_numeric, errors="coerce") if not X.empty else X
 
+    def _classify(feature_name: str, entry_id: int) -> str:
+        if feature_name in POST_RACE_FEATURE_NAMES:
+            return "post_race_data"
+        if entry_id in debutant_ids:
+            return "dog_has_no_history"
+        return "history_field_missing"
+
     missing_per_feature: list[dict[str, Any]] = []
     if not X.empty:
         for col in X.columns[X.isna().any()]:
             offenders = []
             for eid in X.index[X[col].isna()].tolist():
-                trap, dog_name = entry_lookup.get(int(eid), (None, None))
-                offenders.append({"entry_id": int(eid), "trap": trap, "dog_name": dog_name})
-            missing_per_feature.append({"feature": str(col), "missing_for": offenders})
+                eid_int = int(eid)
+                trap, dog_name = entry_lookup.get(eid_int, (None, None))
+                offenders.append({
+                    "entry_id": eid_int,
+                    "trap": trap,
+                    "dog_name": dog_name,
+                    "reason": _classify(str(col), eid_int),
+                })
+            missing_per_feature.append({
+                "feature": str(col),
+                "missing_for": offenders,
+                # A feature is "irrecoverable for this race" only if every
+                # offender is either a debutant or a post-race column —
+                # the user has no scrape they can run to fix those.
+                "all_offenders_irrecoverable": all(
+                    o["reason"] in ("post_race_data", "dog_has_no_history")
+                    for o in offenders
+                ),
+            })
 
     post_race_used = post_race_features_in_use(trained_feature_names)
+
+    # `would_fail` matches the predict-time strict-mode rules: a scheduled
+    # race fails if (a) the model uses any post-race feature, or (b) any
+    # NaN cell remains in the feature matrix at predict time.
+    would_fail = bool(
+        race.status == "scheduled"
+        and (post_race_used or missing_per_feature)
+    )
 
     return {
         "race_id": race_id,
@@ -148,11 +226,9 @@ def predict_race_preflight(
             {"feature": name, "reason": reason}
             for name, reason in post_race_used.items()
         ],
+        "entries_missing_history": debutants,
         "missing_features": missing_per_feature,
-        "would_fail": bool(
-            race.status == "scheduled"
-            and (post_race_used or missing_per_feature)
-        ),
+        "would_fail": would_fail,
     }
 
 

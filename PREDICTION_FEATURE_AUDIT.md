@@ -224,101 +224,124 @@ prior resulted races, ❌ not available pre-race today.
 
 ---
 
-## 6. Recommended fix plan (loud-failure first)
+## 6. Fix plan (loud-failure first) — **applied**
 
-The user preference is to **fail loudly when prediction-time data is missing**
-rather than to keep silently filling values. The smallest set of changes that
-implements that:
+The fixes below were implemented in commit
+`Fail loudly on missing pre-race features for upcoming race predictions`.
+Each subsection documents the change and the new file/line that owns it.
 
-### 6.1 Classify every feature as `pre_race` vs `post_race`
+### 6.1 Classify every feature as `pre_race` vs `post_race` ✅
 
-Add a column to `feature_definitions` (and the seed in
-`backend/scripts/seed_features.py`):
+Implemented as a single source of truth in
+`backend/ml/feature_availability.py`. The module exports
+`POST_RACE_FEATURE_NAMES` (a dict of feature_name → human-readable reason)
+and a helper `post_race_features_in_use(trained_feature_names)` that the
+prediction service and the new preflight endpoint both consume. The
+covered feature set is `weight_change`, the eleven `current_sp_*` columns
+emitted by `_add_sp_features`, and the three odds-snapshot drift columns
+emitted by `_add_odds_snapshot_features`.
 
-```python
-availability: Literal["pre_race", "post_race", "history_dependent"]
+Stored on the FeatureDefinition row was rejected as overkill: the user
+defines visual/code features that are computed only from dog history, and
+those are pre-race by construction. The post-race set is small, fixed,
+and lives entirely in the built-in feature builders, so a static list is
+the right home for it.
+
+### 6.2 Refuse to use post-race features for scheduled races ✅
+
+`predict_race` (`backend/app/services/prediction_service.py`) now reads
+`Race.status` for the target race. When the race is `scheduled` and the
+trained feature list contains any post-race-only column, the function
+raises `PredictionDataError` (a `ValueError` subclass exported from
+`feature_availability.py`) listing the offending features and their
+human-readable reasons. The check runs **before** any feature
+computation so the failure is fast and the error message tells the user
+exactly which experiment is unsafe to serve on upcoming races.
+
+### 6.3 Stop silent imputation at predict time ✅
+
+The cascade in `prediction_service.predict_race` now branches on
+`is_scheduled`:
+
+* **Scheduled (upcoming) races** call `_raise_for_missing_features` after
+  the `pd.to_numeric` coerce step. The helper builds a per-feature
+  breakdown listing up to six `(trap, dog_name)` offenders and raises
+  `PredictionDataError`. A second copy of the same check runs after the
+  trained-feature alignment step so a NaN introduced by race-relative or
+  pace-shape derivation cannot slip through.
+* **Resulted races** (back-tests, results comparison) keep the existing
+  `fillna(feature_medians)` path, but now log the count of imputed cells
+  at INFO so an unexpected drift in resulted-race coverage is visible.
+
+### 6.4 Drop the `feature_medians` plumbing for serve-time fills ⚠️ partial
+
+For scheduled races the `feature_medians` cascade is now bypassed
+entirely: any NaN raises before alignment. For resulted races the
+medians are still used so historical back-tests do not crash on a single
+debutant with no prior history — that branch is the same code path
+training uses, so the imputation is consistent between fit and score.
+Tightening the training-time fill in `dataset_builder.py:224` was left
+out of scope: shrinking it changes which features survive the
+all-NaN-column drop and would alter every existing experiment's feature
+count. Revisit once the dataset assembly is otherwise stable.
+
+### 6.5 Disable the empty-snapshot odds branch ✅
+
+`include_odds_snapshot_features` is now `False` by default in:
+
+* `backend/ml/dataset_builder.py:build_dataset` (signature default).
+* Both call sites in `backend/app/services/training_service.py`
+  (the `split_cfg.get(...)` defaults).
+* `backend/app/services/prediction_service.predict_race` (the
+  `split_cfg.get(...)` default).
+
+Existing experiments that had it explicitly enabled in their
+`split_config` are unaffected — they continue to set the toggle to
+`True`. A retrain is what flips a model to the new default.
+
+### 6.6 Don't read `entry.weight_kg` from the current race — handled via §6.1
+
+The function in `race_features.py` is intentionally left alone. At
+**training** time `RaceEntry.weight_kg` *is* populated (it's the actual
+weigh-in result for a resulted race), so `weight_change` is a genuine
+signal there. The leakage only appears at **predict** time on a
+scheduled race, where the column is NULL and the silent median fill
+fired. That is now caught by §6.1 + §6.2: any model trained with
+`weight_change` is refused on a scheduled race with a `PredictionDataError`
+that names the feature and explains why. Renaming the function to
+`weight_trend_in_history` would require recomputing every existing
+experiment, which is more disruption than the loud-failure guard.
+
+### 6.7 Pre-flight check API endpoint ✅
+
+`GET /api/predictions/preflight/{race_id}?experiment_id=…` is live in
+`backend/app/api/predictions.py`. It computes the same feature matrix
+`predict_race` would use, then returns:
+
+```jsonc
+{
+  "race_id": 123,
+  "race_status": "scheduled",
+  "experiment_id": 7,
+  "n_entries": 6,
+  "post_race_features_in_use": [
+    { "feature": "weight_change",
+      "reason": "RaceEntry.weight_kg (weigh-in is on the night)" }
+  ],
+  "missing_features": [
+    { "feature": "early_speed_ratio",
+      "missing_for": [
+        { "entry_id": 901, "trap": 4, "dog_name": "BALLINA BLAZE" }
+      ]
+    }
+  ],
+  "would_fail": true
+}
 ```
 
-For built-in features, hard-code the same classification at the top of
-`backend/ml/race_features.py`. The classification matches the table in §5.
-
-### 6.2 Refuse to use post-race features for scheduled races
-
-In `prediction_service.py` (around line 360, where the toggles are read):
-
-```python
-if any(e.Race.status == "scheduled" for e in entries):
-    forbidden = {"current_sp_decimal", "current_sp_implied_prob", ...}
-    used = set(trained_feature_names) & forbidden
-    if used:
-        raise PredictionDataError(
-            f"Experiment {experiment.id} was trained with post-race features "
-            f"{sorted(used)} that are not available for scheduled races. "
-            f"Retrain with include_sp_features=False, or wait for results."
-        )
-```
-
-Keep `include_sp_features=False` as the only supported value for any model
-that will be served on upcoming races. Surface this in the Training Lab UI
-as a warning, not just a docstring.
-
-### 6.3 Stop silent imputation at predict time
-
-Replace the cascade in `prediction_service.py:388-440` with:
-
-```python
-X = X.apply(pd.to_numeric, errors="coerce")
-
-missing = X.columns[X.isna().any()]
-if len(missing) > 0:
-    # Per-feature breakdown so the error names the dogs and features
-    sample = {col: X.index[X[col].isna()].tolist()[:3] for col in missing}
-    raise PredictionDataError(
-        f"Missing feature values for race {race_id}: {sample}. "
-        f"Refusing to silently impute. "
-        f"Run scraping for completed prior races, or exclude these features "
-        f"from the experiment."
-    )
-```
-
-Optionally keep a `strict=False` escape hatch for backtests on resulted races
-where `dataset_builder.py:224` is the source of truth.
-
-### 6.4 Drop the `feature_medians` plumbing for serve-time fills
-
-Remove the `fillna(feature_medians)` call in `prediction_service.py:391-392`
-and the alignment-time fill in `prediction_service.py:432-436`. Keep
-`feature_medians` only for diagnostics. The training-time
-`X.fillna(X.median()).fillna(0.0)` in `dataset_builder.py:224` should also be
-narrowed to the columns we explicitly classify as "fill missing with median",
-and every other column should be excluded from the dataset entirely if it has
-NaN at training time.
-
-### 6.5 Disable the empty-snapshot odds branch
-
-Until the live odds-snapshot scraper is actually populating
-`odds_snapshots` for both training races *and* upcoming races, set
-`include_odds_snapshot_features=False` by default in
-`build_dataset` (`dataset_builder.py:41`) and in the predict-time toggle
-(`prediction_service.py:364`). This eliminates three latent NaN columns that
-will become a real skew the moment partial data appears.
-
-### 6.6 Don't read `entry.weight_kg` from the current race
-
-`weight_change` (`race_features.py:87-89`) should compute against
-`history["weight_kg"].iloc[-1]`, not `entry.weight_kg`. Today's weight is
-never available, so feeding `entry.weight_kg` is structurally dead and just
-causes the function to return `None`. Better behaviour: omit the feature
-entirely, or rename it to `weight_trend_in_history` to make the intent clear.
-
-### 6.7 Pre-flight check API endpoint
-
-Add a small endpoint, e.g. `GET /api/predictions/preflight/{race_id}`, that
-returns the per-feature availability for the upcoming race so the UI can show
-the user which features are about to be missing **before** they hit predict.
-This lets the user catch missing scrapes (e.g. a dog with no prior history,
-or a feature that requires sectional times we haven't backfilled) without
-having to read logs.
+The endpoint never trains, never imputes, and never raises — it lets the
+UI surface a "this prediction will fail because …" banner before the
+user clicks predict.
 
 ---
 

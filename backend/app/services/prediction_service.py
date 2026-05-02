@@ -31,6 +31,10 @@ from app.models.track import Track
 from app.services.feature_engine import get_dog_history, get_race_context, compute_visual_feature
 from app.services.feature_sandbox import execute_feature_code
 from app.models.feature_definition import FeatureDefinition
+from ml.feature_availability import (
+    PredictionDataError,
+    post_race_features_in_use,
+)
 from ml.race_features import compute_race_context_features
 
 logger = logging.getLogger(__name__)
@@ -169,6 +173,47 @@ def compute_features_for_entries(
         df = df.join(h2h_df, how="left")
 
     return df
+
+
+def _raise_for_missing_features(
+    X: pd.DataFrame,
+    race_id: int,
+    entries: list[Any],
+) -> None:
+    """Raise PredictionDataError listing every (entry, feature) NaN cell.
+
+    Used on scheduled (upcoming) races where silent imputation would
+    produce a distribution shift between train and serve. We list up to a
+    handful of (trap, dog_name) pairs per offending feature so the user
+    can see immediately which dogs the scrape didn't cover.
+    """
+    if not X.isna().any().any():
+        return
+
+    # Map entry_id -> (trap, dog_name) for friendly error output.
+    entry_lookup: dict[int, tuple[int | None, str | None]] = {}
+    for row in entries:
+        entry = row.RaceEntry
+        entry_lookup[entry.id] = (entry.trap, getattr(row, "dog_name", None))
+
+    missing_summary: dict[str, list[str]] = {}
+    for col in X.columns[X.isna().any()]:
+        offenders = []
+        for entry_id in X.index[X[col].isna()].tolist()[:6]:
+            trap, dog_name = entry_lookup.get(int(entry_id), (None, None))
+            label = f"trap{trap} {dog_name}" if dog_name else f"entry_id={entry_id}"
+            offenders.append(label)
+        missing_summary[str(col)] = offenders
+
+    pretty = "; ".join(
+        f"{feat} -> {', '.join(rows)}" for feat, rows in missing_summary.items()
+    )
+    raise PredictionDataError(
+        f"Refusing to silently impute missing features for scheduled race "
+        f"{race_id}. Missing cells: {pretty}. Either backfill the upstream "
+        f"data (dog history, sectional times, comments) or retrain without "
+        f"these features."
+    )
 
 
 def _get_train_cutoff(experiment: Experiment) -> date | None:
@@ -328,7 +373,7 @@ def predict_race(
 
     # Get race entries with SP odds
     entries = (
-        db.query(RaceEntry, Dog.name.label("dog_name"), Race.race_date)
+        db.query(RaceEntry, Dog.name.label("dog_name"), Race.race_date, Race.status)
         .join(Dog, RaceEntry.dog_id == Dog.id)
         .join(Race, RaceEntry.race_id == Race.id)
         .filter(RaceEntry.race_id == race_id)
@@ -354,6 +399,26 @@ def predict_race(
         return []
 
     entry_ids = [e.RaceEntry.id for e in entries]
+    race_status = entries[0].status
+    is_scheduled = race_status == "scheduled"
+
+    # If the race hasn't run yet, refuse up-front to use any feature whose
+    # value structurally depends on post-race data (current SP, weigh-in
+    # weight, live odds-snapshot drift). The training pipeline has these
+    # values for every resulted race in the dataset; at predict time they
+    # come back NaN and would silently be filled with the training median,
+    # producing a distribution shift that the user has explicitly asked us
+    # to fail loudly on instead.
+    if is_scheduled:
+        offending = post_race_features_in_use(trained_feature_names)
+        if offending:
+            details = ", ".join(f"{name} ({why})" for name, why in offending.items())
+            raise PredictionDataError(
+                f"Experiment {experiment_id} was trained with post-race-only "
+                f"features that are not available on a scheduled race "
+                f"(race_id={race_id}): {details}. Retrain without these "
+                f"features, or wait until after the race has been resulted."
+            )
 
     # Honour the same feature-group toggles that were used at training time,
     # so predict-time feature columns align with what the model saw.
@@ -361,7 +426,15 @@ def predict_race(
     include_builtin = split_cfg.get("include_builtin_features", True)
     include_relative = split_cfg.get("include_race_relative_features", True)
     include_pace_shape = split_cfg.get("include_pace_shape_features", True)
-    include_odds_snapshot = split_cfg.get("include_odds_snapshot_features", True)
+    # Default OFF: the odds_snapshots table is not currently populated by
+    # the scraper, so leaving this on at training time produces all-NaN
+    # columns that get median-filled to 0 in both train and predict, which
+    # is a no-op today but flips into a real train/serve skew the moment
+    # the snapshot scraper starts running for resulted races but not for
+    # upcoming ones. Experiments that genuinely have a live odds feed can
+    # opt back in by setting include_odds_snapshot_features=True in their
+    # split_config.
+    include_odds_snapshot = split_cfg.get("include_odds_snapshot_features", False)
 
     # Get feature definitions
     feature_defs = (
@@ -387,9 +460,26 @@ def predict_race(
     # infers `object` dtype, which XGBoost/LightGBM reject at predict time.
     X = X.apply(pd.to_numeric, errors="coerce")
 
-    # Fill NaN using training set medians (consistent with training)
+    # On scheduled races we refuse to silently impute. Any NaN here means
+    # an upstream dependency (dog history, sectional times, weigh-in
+    # weight, …) is missing — surface the gap loudly so the user can fix
+    # the scrape rather than getting a quiet train/serve skew.
+    if is_scheduled:
+        _raise_for_missing_features(X, race_id, entries)
+
+    # Fill NaN using training set medians (consistent with training).
+    # Resulted-race backtests still go through this path: those features
+    # are real values that may legitimately be missing for a few entries
+    # (e.g. a debutant), and median imputation matches the training-time
+    # behaviour from dataset_builder.build_dataset.
     if feature_medians:
+        nan_before = X.isna().sum().sum()
         X = X.fillna(feature_medians)
+        if nan_before > 0:
+            logger.info(
+                "predict_race(%s): median-filled %d NaN feature values across resulted entries",
+                race_id, int(nan_before),
+            )
     # Any remaining NaN (new features, etc.) fill with 0
     X = X.fillna(0)
 
@@ -430,14 +520,36 @@ def predict_race(
     # and the resulting column set depends on the data, so without this step
     # the model can see a different shape than it was fit on.
     if trained_feature_names:
-        for col in trained_feature_names:
-            if col not in X.columns:
+        missing_cols = [c for c in trained_feature_names if c not in X.columns]
+        if missing_cols:
+            if is_scheduled:
+                raise PredictionDataError(
+                    f"Predict-time feature matrix for scheduled race "
+                    f"{race_id} is missing columns the model was trained on: "
+                    f"{missing_cols}. This usually means a feature group "
+                    f"toggle (builtin/relative/pace-shape/odds-snapshot) was "
+                    f"on at training time but off at predict time, or a "
+                    f"FeatureDefinition was deleted. Re-enable the toggle in "
+                    f"the experiment's split_config or retrain."
+                )
+            # Resulted-race backtests fall back to the trained median so
+            # accuracy diagnostics still produce a number rather than
+            # crashing on a missing dynamic column.
+            for col in missing_cols:
                 X[col] = feature_medians.get(col, 0.0) if feature_medians else 0.0
         X = X[list(trained_feature_names)]
 
-    # Fill any NaN in new relative features (and any aligned columns that
-    # had no median available).
-    X = X.fillna(0)
+    # Resulted-race backtests: fill any NaN in new relative features (and
+    # any aligned columns that had no median available). Scheduled races
+    # already raised above if anything was missing.
+    if not is_scheduled:
+        X = X.fillna(0)
+    elif X.isna().any().any():
+        # Belt-and-braces: should be unreachable because
+        # _raise_for_missing_features ran before alignment, but if a
+        # downstream step (race-relative, pace-shape) introduced a NaN we
+        # surface it instead of letting it slip through.
+        _raise_for_missing_features(X, race_id, entries)
 
     # Generate predictions
     raw_scores = trainer.predict(X)

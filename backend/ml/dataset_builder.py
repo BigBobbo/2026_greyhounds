@@ -38,7 +38,7 @@ def build_dataset(
     include_pace_shape_features: bool = True,
     include_race_relative_features: bool = True,
     include_elo_features: bool = True,
-    include_odds_snapshot_features: bool = True,
+    include_odds_snapshot_features: bool = False,
     include_h2h_features: bool = True,
     heartbeat_fn: Any | None = None,
 ) -> dict[str, Any]:
@@ -68,6 +68,13 @@ def build_dataset(
             is_sole_front_runner, pace_pressure, early_speed_rank, is_predicted_leader).
         include_race_relative_features: If True, add race-relative features
             (per-feature vs_field and rank-in-field columns, plus num_runners).
+        include_odds_snapshot_features: If True, add live-odds drift features
+            (opening_to_sp_drift, odds_steam_rate, cross_book_disagreement)
+            from the odds_snapshots table. Defaults to False because the
+            scraper does not currently populate that table — leaving it on
+            yields three all-NaN columns at training time and creates a
+            latent train/serve skew the moment the snapshot scraper starts
+            running for resulted races but not for upcoming ones.
 
     Returns:
         {

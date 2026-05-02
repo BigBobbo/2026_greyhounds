@@ -65,6 +65,97 @@ def list_predictions(
     return results
 
 
+@router.get("/preflight/{race_id}")
+def predict_race_preflight(
+    race_id: int,
+    experiment_id: int,
+    db: Session = Depends(get_db),
+):
+    """Diagnostic: surface missing-feature gaps for a race **without** predicting.
+
+    Computes the feature matrix the model would see at predict time and
+    reports any NaN cells per (entry, feature) plus any post-race-only
+    features the experiment was trained on. Lets the UI warn the user
+    before kicking off a real predict (which now fails loudly on missing
+    data instead of silently imputing).
+    """
+    import pandas as pd
+
+    from app.services.prediction_service import (
+        compute_features_for_entries,
+        load_trained_model,
+    )
+    from app.models.experiment import Experiment
+    from app.models.feature_definition import FeatureDefinition
+    from ml.feature_availability import post_race_features_in_use
+
+    race = db.query(Race).filter(Race.id == race_id).first()
+    if not race:
+        raise HTTPException(status_code=404, detail="Race not found")
+
+    experiment = (
+        db.query(Experiment).filter(Experiment.id == experiment_id).first()
+    )
+    if not experiment or experiment.status != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Experiment {experiment_id} not found or not completed",
+        )
+
+    artifact = load_trained_model(experiment)
+    trained_feature_names = artifact.get("feature_names", []) or []
+
+    entries = (
+        db.query(RaceEntry, Dog.name.label("dog_name"))
+        .join(Dog, RaceEntry.dog_id == Dog.id)
+        .filter(RaceEntry.race_id == race_id)
+        .order_by(RaceEntry.trap)
+        .all()
+    )
+    entry_ids = [e.RaceEntry.id for e in entries]
+    entry_lookup = {e.RaceEntry.id: (e.RaceEntry.trap, e.dog_name) for e in entries}
+
+    split_cfg = experiment.split_config or {}
+    include_builtin = split_cfg.get("include_builtin_features", True)
+    feature_defs = (
+        db.query(FeatureDefinition)
+        .filter(FeatureDefinition.id.in_(experiment.feature_set))
+        .all()
+    )
+
+    X = compute_features_for_entries(
+        db, entry_ids, feature_defs, include_builtin=include_builtin,
+    )
+    X = X.apply(pd.to_numeric, errors="coerce") if not X.empty else X
+
+    missing_per_feature: list[dict[str, Any]] = []
+    if not X.empty:
+        for col in X.columns[X.isna().any()]:
+            offenders = []
+            for eid in X.index[X[col].isna()].tolist():
+                trap, dog_name = entry_lookup.get(int(eid), (None, None))
+                offenders.append({"entry_id": int(eid), "trap": trap, "dog_name": dog_name})
+            missing_per_feature.append({"feature": str(col), "missing_for": offenders})
+
+    post_race_used = post_race_features_in_use(trained_feature_names)
+
+    return {
+        "race_id": race_id,
+        "race_status": race.status,
+        "experiment_id": experiment_id,
+        "n_entries": len(entries),
+        "post_race_features_in_use": [
+            {"feature": name, "reason": reason}
+            for name, reason in post_race_used.items()
+        ],
+        "missing_features": missing_per_feature,
+        "would_fail": bool(
+            race.status == "scheduled"
+            and (post_race_used or missing_per_feature)
+        ),
+    }
+
+
 @router.get("/race/{race_id}")
 def predict_single_race(
     race_id: int,

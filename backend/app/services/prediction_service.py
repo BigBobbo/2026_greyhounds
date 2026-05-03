@@ -634,6 +634,8 @@ def predict_race(
             "trap": entry.trap,
             "experiment_id": experiment_id,
             "data_completeness": completeness,
+            "bankroll_used": bankroll,
+            "sp_decimal_at_pred": entry.sp_decimal,
         }
 
         if is_ranking or experiment.target == "win_prob":
@@ -693,10 +695,203 @@ def predict_race(
     return predictions
 
 
+def compute_kelly_stake(
+    win_prob: float,
+    odds_decimal: float | None,
+    bankroll: float = 100.0,
+    kelly_fraction: float = 0.25,
+    min_edge: float = 0.05,
+) -> dict[str, Any]:
+    """Public wrapper around the Kelly calculation. Same math used at
+    prediction time — exposed so endpoints recomputing against
+    user-supplied odds stay consistent with the original recommendation."""
+    return _compute_kelly_stake(
+        win_prob, odds_decimal, bankroll=bankroll,
+        kelly_fraction=kelly_fraction, min_edge=min_edge,
+    )
+
+
+def recompute_kelly_for_saved_predictions(
+    db: Session,
+    experiment_id: int,
+    race_id: int,
+    odds_by_entry: dict[int, float | None],
+    bankroll: float,
+) -> list[dict[str, Any]]:
+    """Recompute Kelly + edge for saved predictions using user-supplied odds.
+
+    Updates the persisted Kelly snapshot in place — the user's odds become
+    the new authoritative bet recommendation for this race + experiment, so
+    the History view reflects what they actually decided to back.
+
+    Returns the updated predictions in the same shape as predict_race.
+    """
+    rows = (
+        db.query(Prediction, Dog.name.label("dog_name"), RaceEntry.trap)
+        .join(RaceEntry, Prediction.race_entry_id == RaceEntry.id)
+        .join(Dog, RaceEntry.dog_id == Dog.id)
+        .filter(
+            Prediction.experiment_id == experiment_id,
+            RaceEntry.race_id == race_id,
+        )
+        .all()
+    )
+    if not rows:
+        return []
+
+    now = datetime.utcnow()
+    updated: list[dict[str, Any]] = []
+    for pred, dog_name, trap in rows:
+        odds = odds_by_entry.get(pred.race_entry_id)
+        wp = pred.win_probability
+
+        if wp is not None:
+            kelly = compute_kelly_stake(wp, odds, bankroll=bankroll)
+        else:
+            kelly = {"bet": False, "reason": "no_probability"}
+
+        # Edge vs market — mirrors predict_race's logic so saved rows stay
+        # internally consistent (kelly.edge and pred.edge agree).
+        if wp is not None and odds is not None and odds > 1:
+            implied = 1.0 / odds
+            edge = round(wp - implied, 4)
+            is_value = wp > implied * 1.05
+        else:
+            edge = None
+            is_value = None
+
+        pred.kelly_bet = kelly.get("bet")
+        pred.kelly_stake = kelly.get("stake")
+        pred.kelly_stake_pct = kelly.get("stake_pct")
+        pred.kelly_full_pct = kelly.get("full_kelly_pct")
+        pred.kelly_expected_value = kelly.get("expected_value")
+        pred.kelly_implied_prob = kelly.get("implied_prob")
+        pred.kelly_reason = kelly.get("reason")
+        pred.edge = edge
+        pred.is_value = is_value
+        pred.bankroll_used = bankroll
+        # Note: sp_decimal_at_pred is the SP snapshot at original predict time;
+        # don't clobber it. The user's odds are recoverable from
+        # kelly_implied_prob (= 1 / odds) when the Kelly compute returns one.
+        pred.updated_at = now
+
+        updated.append(hydrate_saved_prediction(pred, dog_name, trap))
+
+    db.commit()
+    updated.sort(key=lambda p: p.get("win_probability") or 0, reverse=True)
+    return updated
+
+
+def hydrate_saved_prediction(
+    pred: Prediction, dog_name: str | None, trap: int | None,
+) -> dict[str, Any]:
+    """Reconstruct a `predict_race`-shaped dict from a saved Prediction row.
+
+    Lets the API hand back the same JSON shape whether predictions were
+    just computed or fetched from the DB — so the frontend can render
+    cached and live results identically.
+    """
+    kelly: dict[str, Any] = {
+        "bet": bool(pred.kelly_bet) if pred.kelly_bet is not None else False,
+    }
+    if pred.kelly_reason is not None:
+        kelly["reason"] = pred.kelly_reason
+    if pred.kelly_stake is not None:
+        kelly["stake"] = pred.kelly_stake
+    if pred.kelly_stake_pct is not None:
+        kelly["stake_pct"] = pred.kelly_stake_pct
+    if pred.kelly_full_pct is not None:
+        kelly["full_kelly_pct"] = pred.kelly_full_pct
+    if pred.kelly_expected_value is not None:
+        kelly["expected_value"] = pred.kelly_expected_value
+    if pred.kelly_implied_prob is not None:
+        kelly["implied_prob"] = pred.kelly_implied_prob
+    if pred.edge is not None:
+        kelly["edge"] = pred.edge
+
+    return {
+        "race_entry_id": pred.race_entry_id,
+        "dog_name": dog_name,
+        "trap": trap,
+        "experiment_id": pred.experiment_id,
+        "win_probability": pred.win_probability,
+        "predicted_position": pred.predicted_position,
+        "predicted_time": pred.predicted_time,
+        "confidence": pred.confidence,
+        "confidence_tier": pred.confidence_tier,
+        "margin": pred.margin,
+        "entropy": pred.entropy,
+        "edge": pred.edge,
+        "is_value": pred.is_value,
+        "kelly": kelly,
+        "data_completeness": pred.data_completeness,
+        "bankroll_used": pred.bankroll_used,
+        "sp_decimal_at_pred": pred.sp_decimal_at_pred,
+        "created_at": pred.created_at.isoformat() if pred.created_at else None,
+        "updated_at": pred.updated_at.isoformat() if pred.updated_at else None,
+    }
+
+
+def get_saved_predictions_for_race(
+    db: Session, experiment_id: int, race_id: int,
+) -> list[dict[str, Any]]:
+    """Fetch saved predictions for a (experiment, race) pair without recomputing.
+
+    Returns rows in the same shape as `predict_race`, sorted by win
+    probability descending. Empty list if no predictions are saved yet.
+    """
+    rows = (
+        db.query(Prediction, Dog.name.label("dog_name"), RaceEntry.trap)
+        .join(RaceEntry, Prediction.race_entry_id == RaceEntry.id)
+        .join(Dog, RaceEntry.dog_id == Dog.id)
+        .filter(
+            Prediction.experiment_id == experiment_id,
+            RaceEntry.race_id == race_id,
+        )
+        .all()
+    )
+    preds = [hydrate_saved_prediction(p, name, trap) for p, name, trap in rows]
+    preds.sort(key=lambda p: p.get("win_probability") or 0, reverse=True)
+    return preds
+
+
+def _flatten_prediction_for_storage(pred: dict[str, Any]) -> dict[str, Any]:
+    """Map a `predict_race`-shaped dict onto Prediction column kwargs.
+
+    Persists the full betting context (Kelly snapshot, edge, confidence
+    breakdown, bankroll/SP at prediction time) so a saved prediction can
+    be replayed in the UI without re-running the model.
+    """
+    kelly = pred.get("kelly") or {}
+    return {
+        "win_probability": pred.get("win_probability"),
+        "predicted_position": pred.get("predicted_position"),
+        "predicted_time": pred.get("predicted_time"),
+        "confidence": pred.get("confidence"),
+        "confidence_tier": pred.get("confidence_tier"),
+        "margin": pred.get("margin"),
+        "entropy": pred.get("entropy"),
+        "edge": pred.get("edge"),
+        "is_value": pred.get("is_value"),
+        "kelly_bet": kelly.get("bet"),
+        "kelly_stake": kelly.get("stake"),
+        "kelly_stake_pct": kelly.get("stake_pct"),
+        "kelly_full_pct": kelly.get("full_kelly_pct"),
+        "kelly_expected_value": kelly.get("expected_value"),
+        "kelly_implied_prob": kelly.get("implied_prob"),
+        "kelly_reason": kelly.get("reason"),
+        "data_completeness": pred.get("data_completeness"),
+        "bankroll_used": pred.get("bankroll_used"),
+        "sp_decimal_at_pred": pred.get("sp_decimal_at_pred"),
+    }
+
+
 def save_predictions(db: Session, predictions: list[dict[str, Any]]) -> int:
     """Save predictions to DB, upserting on (experiment_id, race_entry_id)."""
     saved = 0
+    now = datetime.utcnow()
     for pred in predictions:
+        fields = _flatten_prediction_for_storage(pred)
         existing = (
             db.query(Prediction)
             .filter(
@@ -707,19 +902,16 @@ def save_predictions(db: Session, predictions: list[dict[str, Any]]) -> int:
         )
 
         if existing:
-            existing.win_probability = pred.get("win_probability")
-            existing.predicted_position = pred.get("predicted_position")
-            existing.predicted_time = pred.get("predicted_time")
-            existing.confidence = pred.get("confidence")
-            existing.created_at = datetime.utcnow()
+            for k, v in fields.items():
+                setattr(existing, k, v)
+            existing.updated_at = now
         else:
             db.add(Prediction(
                 experiment_id=pred["experiment_id"],
                 race_entry_id=pred["race_entry_id"],
-                win_probability=pred.get("win_probability"),
-                predicted_position=pred.get("predicted_position"),
-                predicted_time=pred.get("predicted_time"),
-                confidence=pred.get("confidence"),
+                created_at=now,
+                updated_at=now,
+                **fields,
             ))
         saved += 1
 

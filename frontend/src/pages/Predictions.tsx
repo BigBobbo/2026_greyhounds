@@ -14,6 +14,7 @@ interface KellyInfo {
 }
 
 interface PredictionEntry {
+  race_entry_id?: number;
   dog_name: string;
   trap: number;
   win_probability: number | null;
@@ -26,6 +27,67 @@ interface PredictionEntry {
   edge: number | null;
   is_value: boolean | null;
   kelly: KellyInfo | null;
+  sp_decimal_at_pred?: number | null;
+}
+
+// Mirrors backend `_compute_kelly_stake` so live edits to the market-odds
+// input update the BET/PASS verdict instantly without a server round-trip.
+// Keep these defaults identical to the Python side.
+const KELLY_FRACTION = 0.25;
+const MIN_EDGE = 0.05;
+const MAX_STAKE_PCT = 0.05;
+
+function computeKelly(
+  winProb: number | null | undefined,
+  oddsDecimal: number | null | undefined,
+  bankroll: number,
+): KellyInfo {
+  if (winProb == null) return { bet: false, reason: 'no_probability' };
+  if (oddsDecimal == null || oddsDecimal <= 1.0) {
+    return { bet: false, reason: 'no_odds' };
+  }
+  const impliedProb = 1.0 / oddsDecimal;
+  const edge = winProb - impliedProb;
+  if (edge < MIN_EDGE) {
+    return {
+      bet: false,
+      reason: 'insufficient_edge',
+      edge: round4(edge),
+      implied_prob: round4(impliedProb),
+    };
+  }
+  const b = oddsDecimal - 1;
+  const fStar = (b * winProb - (1 - winProb)) / b;
+  const fractionalKelly = Math.max(0, fStar * KELLY_FRACTION);
+  const stakePct = Math.min(fractionalKelly, MAX_STAKE_PCT);
+  const stake = Math.round(bankroll * stakePct * 100) / 100;
+  return {
+    bet: true,
+    stake,
+    stake_pct: Math.round(stakePct * 10000) / 100,
+    full_kelly_pct: Math.round(fStar * 10000) / 100,
+    edge: round4(edge),
+    implied_prob: round4(impliedProb),
+    expected_value: round4(winProb * (oddsDecimal - 1) - (1 - winProb)),
+  };
+}
+
+function round4(x: number): number {
+  return Math.round(x * 10000) / 10000;
+}
+
+function verdictReason(
+  kelly: KellyInfo,
+  winProb: number | null | undefined,
+  odds: number | null | undefined,
+): string {
+  if (winProb == null) return 'no model probability';
+  if (odds == null || odds <= 1) return 'enter market odds →';
+  if (kelly.reason === 'insufficient_edge' && kelly.edge != null) {
+    const edgePct = (kelly.edge * 100).toFixed(1);
+    return `PASS — only ${edgePct}% edge (need 5%)`;
+  }
+  return 'PASS';
 }
 
 interface RacePrediction {
@@ -37,6 +99,38 @@ interface RacePrediction {
   distance_m: number;
   grade: string;
   predictions: PredictionEntry[];
+  from_cache?: boolean;
+  last_predicted_at?: string | null;
+}
+
+interface HistorySession {
+  experiment_id: number;
+  experiment_name: string | null;
+  experiment_algorithm: string | null;
+  race_id: number;
+  race_date: string | null;
+  race_number: number | null;
+  race_status: string | null;
+  track_name: string | null;
+  track_code: string | null;
+  distance_m: number | null;
+  grade: string | null;
+  n_predictions: number;
+  last_predicted_at: string | null;
+  top_pick: {
+    dog_name: string;
+    trap: number;
+    win_probability: number | null;
+    confidence: number | null;
+    confidence_tier: string | null;
+    edge: number | null;
+    is_value: boolean | null;
+    kelly_bet: boolean | null;
+    kelly_stake: number | null;
+    bankroll_used: number | null;
+    actual_position: number | null;
+    top_pick_won: boolean | null;
+  } | null;
 }
 
 interface RaceOption {
@@ -117,7 +211,70 @@ export default function Predictions() {
   const [predictions, setPredictions] = useState<RacePrediction | null>(null);
   const [comparisons, setComparisons] = useState<ComparisonResult[]>([]);
   const [loading, setLoading] = useState(false);
-  const [tab, setTab] = useState<'predict' | 'date' | 'compare'>('predict');
+  const [tab, setTab] = useState<'predict' | 'date' | 'history' | 'compare'>('predict');
+
+  // History tab state
+  const [history, setHistory] = useState<HistorySession[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyAllModels, setHistoryAllModels] = useState(false);
+  const [historyDateFrom, setHistoryDateFrom] = useState('');
+  const [historyDateTo, setHistoryDateTo] = useState('');
+
+  // User-entered live odds per race_entry_id, used for the on-the-fly
+  // Kelly recompute in the Predict Race results table. Reset whenever a
+  // new race is loaded — values from a previous race shouldn't leak.
+  const [liveOdds, setLiveOdds] = useState<Record<number, string>>({});
+  const [savingOdds, setSavingOdds] = useState(false);
+
+  useEffect(() => {
+    if (!predictions) {
+      setLiveOdds({});
+      return;
+    }
+    const initial: Record<number, string> = {};
+    predictions.predictions.forEach((p) => {
+      if (p.race_entry_id == null) return;
+      // Seed from kelly.implied_prob (= 1/odds) if the saved Kelly already
+      // had a price, falling back to the SP snapshot — so users see the
+      // model's last-known odds and can edit from there.
+      const fromKelly = p.kelly?.implied_prob
+        ? 1 / p.kelly.implied_prob
+        : null;
+      const seed = fromKelly ?? p.sp_decimal_at_pred ?? null;
+      initial[p.race_entry_id] = seed ? seed.toFixed(2) : '';
+    });
+    setLiveOdds(initial);
+  }, [predictions?.race_id, predictions?.last_predicted_at]);
+
+  const handleSaveOdds = async () => {
+    if (!predictions || !selectedExp) return;
+    const oddsPayload = predictions.predictions
+      .filter((p) => p.race_entry_id != null)
+      .map((p) => {
+        const raw = liveOdds[p.race_entry_id!];
+        const parsed = raw ? parseFloat(raw) : null;
+        return {
+          race_entry_id: p.race_entry_id!,
+          decimal_odds: parsed && parsed > 1 ? parsed : null,
+        };
+      });
+    setSavingOdds(true);
+    try {
+      const res = await api.post<RacePrediction>(
+        `/predictions/race/${predictions.race_id}/odds`,
+        {
+          experiment_id: selectedExp,
+          bankroll,
+          odds: oddsPayload,
+        },
+      );
+      setPredictions(res.data);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to save odds');
+    } finally {
+      setSavingOdds(false);
+    }
+  };
 
   // Race picker state
   const [raceDate, setRaceDate] = useState(new Date().toISOString().split('T')[0]);
@@ -166,19 +323,62 @@ export default function Predictions() {
       .finally(() => setLoadingRaces(false));
   }, [raceDate, trackCode]);
 
-  const handlePredict = async () => {
+  const handlePredict = async (forceRefresh: boolean = false) => {
     const raceId = selectedRaceId || (manualRaceId ? parseInt(manualRaceId) : null);
     if (!selectedExp || !raceId) return;
     setLoading(true);
     try {
-      const res = await api.get(
-        `/predictions/race/${raceId}?experiment_id=${selectedExp}&bankroll=${bankroll}`
-      );
+      const params = new URLSearchParams({
+        experiment_id: String(selectedExp),
+        bankroll: String(bankroll),
+      });
+      if (forceRefresh) params.set('refresh', 'true');
+      const res = await api.get(`/predictions/race/${raceId}?${params}`);
       setPredictions(res.data);
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to generate predictions');
     }
     setLoading(false);
+  };
+
+  const loadHistory = async () => {
+    setHistoryLoading(true);
+    try {
+      const params = new URLSearchParams({ limit: '200' });
+      if (!historyAllModels && selectedExp) {
+        params.set('experiment_id', String(selectedExp));
+      }
+      if (historyDateFrom) params.set('race_date_from', historyDateFrom);
+      if (historyDateTo) params.set('race_date_to', historyDateTo);
+      const res = await api.get<{ sessions: HistorySession[]; total: number }>(
+        `/predictions/history?${params}`,
+      );
+      setHistory(res.data.sessions);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to load history');
+      setHistory([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const openHistoryEntry = async (s: HistorySession) => {
+    if (!s.race_id || !s.experiment_id) return;
+    setSelectedExp(s.experiment_id);
+    setSelectedRaceId(s.race_id);
+    setManualRaceId('');
+    setLoading(true);
+    setTab('predict');
+    try {
+      const res = await api.get<RacePrediction>(
+        `/predictions/race/${s.race_id}/saved?experiment_id=${s.experiment_id}`,
+      );
+      setPredictions(res.data);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to load saved prediction');
+    } finally {
+      setLoading(false);
+    }
   };
 
   // Fetch which tracks already have race cards scraped for the selected date
@@ -398,6 +598,14 @@ export default function Predictions() {
               Predict by Date
             </button>
             <button
+              onClick={() => { setTab('history'); loadHistory(); }}
+              className={`px-5 py-3 text-sm font-medium border-b-2 ${
+                tab === 'history' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500'
+              }`}
+            >
+              History
+            </button>
+            <button
               onClick={() => { setTab('compare'); handleCompare(); }}
               className={`px-5 py-3 text-sm font-medium border-b-2 ${
                 tab === 'compare' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500'
@@ -485,7 +693,7 @@ export default function Predictions() {
                       />
                     </div>
                     <button
-                      onClick={handlePredict}
+                      onClick={() => handlePredict(false)}
                       disabled={loading || (!selectedRaceId && !manualRaceId)}
                       className="bg-blue-600 text-white px-5 py-2 rounded-md text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
                     >
@@ -508,6 +716,30 @@ export default function Predictions() {
                         <p className="text-sm text-gray-500">
                           {predictions.race_date} | {predictions.distance_m}m | {predictions.grade}
                         </p>
+                        <div className="flex items-center gap-2 mt-1 flex-wrap">
+                          {predictions.from_cache ? (
+                            <span className="inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full">
+                              Saved prediction
+                              {predictions.last_predicted_at && (
+                                <span className="text-blue-500">
+                                  · {new Date(predictions.last_predicted_at).toLocaleString()}
+                                </span>
+                              )}
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded-full">
+                              Fresh prediction
+                            </span>
+                          )}
+                          <button
+                            onClick={() => handlePredict(true)}
+                            disabled={loading}
+                            className="text-xs text-blue-600 hover:text-blue-800 underline disabled:opacity-50"
+                            title="Recompute from the model (e.g. new bankroll or after retraining)"
+                          >
+                            {loading ? 'Refreshing...' : 'Refresh prediction'}
+                          </button>
+                        </div>
                       </div>
                       {predictions.predictions[0]?.confidence_tier && (
                         <div className="flex items-center gap-3">
@@ -538,31 +770,54 @@ export default function Predictions() {
 
                   {/* Predictions table */}
                   <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
-                    <table className="w-full text-sm text-left min-w-[560px]">
+                    <div className="px-4 pt-3 pb-2 border-b text-xs text-gray-500 flex items-center justify-between gap-2 flex-wrap">
+                      <span>
+                        Type the current market odds for each dog and the
+                        verdict updates instantly. Save to persist them.
+                      </span>
+                      <button
+                        onClick={handleSaveOdds}
+                        disabled={savingOdds}
+                        className="bg-blue-600 text-white px-3 py-1.5 rounded-md text-xs font-medium hover:bg-blue-700 disabled:opacity-50"
+                      >
+                        {savingOdds ? 'Saving...' : 'Save odds & bet plan'}
+                      </button>
+                    </div>
+                    <table className="w-full text-sm text-left min-w-[760px]">
                       <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
                         <tr>
                           <th className="px-3 sm:px-4 py-3">Rank</th>
                           <th className="px-3 sm:px-4 py-3">Trap</th>
                           <th className="px-3 sm:px-4 py-3">Dog</th>
                           <th className="px-3 sm:px-4 py-3">Win Prob</th>
+                          <th className="px-3 sm:px-4 py-3">Market Odds</th>
                           <th className="px-3 sm:px-4 py-3">Edge</th>
-                          <th className="px-3 sm:px-4 py-3">Bet?</th>
-                          <th className="px-3 sm:px-4 py-3">Stake</th>
+                          <th className="px-3 sm:px-4 py-3">Verdict</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y">
                         {predictions.predictions.map((p, i) => {
                           const isTopPick = i === 0;
-                          const kellyBet = p.kelly?.bet;
+                          const oddsStr = p.race_entry_id != null
+                            ? liveOdds[p.race_entry_id] ?? ''
+                            : '';
+                          const oddsNum = oddsStr ? parseFloat(oddsStr) : null;
+                          const liveKelly = computeKelly(
+                            p.win_probability,
+                            oddsNum && oddsNum > 1 ? oddsNum : null,
+                            bankroll,
+                          );
+                          const verdictBet = liveKelly.bet;
+                          const liveEdge = liveKelly.edge ?? null;
                           return (
                             <tr
                               key={i}
                               className={
-                                isTopPick && kellyBet
+                                isTopPick && verdictBet
                                   ? 'bg-green-50'
                                   : isTopPick
                                   ? 'bg-blue-50'
-                                  : kellyBet
+                                  : verdictBet
                                   ? 'bg-green-50/50'
                                   : 'hover:bg-gray-50'
                               }
@@ -573,26 +828,41 @@ export default function Predictions() {
                               <td className={`px-4 py-3 font-mono ${probColor(p.win_probability)}`}>
                                 {p.win_probability ? `${(p.win_probability * 100).toFixed(1)}%` : '-'}
                               </td>
-                              <td className="px-4 py-3 font-mono text-sm">
-                                {edgeDisplay(p.edge)}
-                              </td>
                               <td className="px-4 py-3">
-                                {p.is_value ? (
-                                  <span className="text-green-600 font-bold text-xs">VALUE</span>
-                                ) : (
-                                  <span className="text-gray-300 text-xs">-</span>
-                                )}
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  min="1.01"
+                                  inputMode="decimal"
+                                  value={oddsStr}
+                                  onChange={(e) => {
+                                    if (p.race_entry_id == null) return;
+                                    setLiveOdds((prev) => ({
+                                      ...prev,
+                                      [p.race_entry_id!]: e.target.value,
+                                    }));
+                                  }}
+                                  placeholder="e.g. 4.50"
+                                  className="w-20 border rounded-md px-2 py-1 text-sm font-mono"
+                                />
                               </td>
                               <td className="px-4 py-3 font-mono text-sm">
-                                {p.kelly?.bet ? (
-                                  <span className="text-green-700 font-medium">
-                                    ${p.kelly.stake?.toFixed(2)}
-                                    <span className="text-gray-400 text-xs ml-1">
-                                      ({p.kelly.stake_pct}%)
+                                {edgeDisplay(liveEdge)}
+                              </td>
+                              <td className="px-4 py-3 text-sm">
+                                {verdictBet ? (
+                                  <div>
+                                    <span className="inline-block bg-green-600 text-white px-2 py-0.5 rounded font-bold text-xs">
+                                      BET ${liveKelly.stake?.toFixed(2)}
                                     </span>
-                                  </span>
+                                    <span className="text-gray-400 text-xs ml-1">
+                                      ({liveKelly.stake_pct}% of bank)
+                                    </span>
+                                  </div>
                                 ) : (
-                                  <span className="text-gray-300">-</span>
+                                  <span className="text-gray-500 text-xs">
+                                    {verdictReason(liveKelly, p.win_probability, oddsNum)}
+                                  </span>
                                 )}
                               </td>
                             </tr>
@@ -602,53 +872,87 @@ export default function Predictions() {
                     </table>
                   </div>
 
-                  {/* Betting recommendation card */}
-                  {predictions.predictions[0]?.kelly?.bet && (
-                    <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-                      <h3 className="font-semibold text-green-800 mb-2">Betting Recommendation</h3>
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-                        <div>
-                          <p className="text-green-600 text-xs">Top Pick</p>
-                          <p className="font-semibold text-green-900">
-                            {predictions.predictions[0].dog_name} (Trap {predictions.predictions[0].trap})
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-green-600 text-xs">Suggested Stake</p>
-                          <p className="font-mono font-semibold text-green-900">
-                            ${predictions.predictions[0].kelly.stake?.toFixed(2)}
-                          </p>
-                          <p className="text-green-600 text-xs">
-                            {predictions.predictions[0].kelly.stake_pct}% of ${bankroll} bankroll
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-green-600 text-xs">Edge Over Market</p>
-                          <p className="font-mono font-semibold text-green-900">
-                            {((predictions.predictions[0].edge || 0) * 100).toFixed(1)}%
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-green-600 text-xs">Expected Value</p>
-                          <p className="font-mono font-semibold text-green-900">
-                            {predictions.predictions[0].kelly.expected_value != null
-                              ? `$${(predictions.predictions[0].kelly.expected_value * (predictions.predictions[0].kelly.stake || 1)).toFixed(2)}`
-                              : '-'}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  )}
+                  {/* Live betting recommendation — recomputes against
+                      whatever odds the user has typed in. */}
+                  {(() => {
+                    const liveBets = predictions.predictions
+                      .map((p) => {
+                        const oddsStr = p.race_entry_id != null
+                          ? liveOdds[p.race_entry_id]
+                          : '';
+                        const odds = oddsStr ? parseFloat(oddsStr) : null;
+                        const kelly = computeKelly(
+                          p.win_probability,
+                          odds && odds > 1 ? odds : null,
+                          bankroll,
+                        );
+                        return { p, kelly, odds };
+                      })
+                      .filter((x) => x.kelly.bet);
 
-                  {predictions.predictions[0] && !predictions.predictions[0]?.kelly?.bet && (
-                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                      <p className="text-gray-500 text-sm">
-                        No recommended bets for this race — insufficient edge over market odds.
-                        {predictions.predictions[0]?.confidence_tier === 'avoid' &&
-                          ' The model has low confidence in this race outcome.'}
-                      </p>
-                    </div>
-                  )}
+                    if (liveBets.length > 0) {
+                      const totalStake = liveBets.reduce(
+                        (sum, x) => sum + (x.kelly.stake || 0), 0,
+                      );
+                      const totalEv = liveBets.reduce(
+                        (sum, x) => sum + ((x.kelly.expected_value || 0) * (x.kelly.stake || 0)), 0,
+                      );
+                      return (
+                        <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                          <h3 className="font-semibold text-green-800 mb-2">
+                            Recommended Bets ({liveBets.length})
+                          </h3>
+                          <div className="space-y-2">
+                            {liveBets.map(({ p, kelly, odds }, idx) => (
+                              <div key={idx} className="flex items-center justify-between text-sm border-b border-green-100 last:border-0 pb-2 last:pb-0">
+                                <div>
+                                  <span className="font-semibold text-green-900">
+                                    {p.dog_name}
+                                  </span>
+                                  <span className="text-green-700 text-xs ml-2">
+                                    Trap {p.trap} · win {((p.win_probability || 0) * 100).toFixed(1)}% @ {odds?.toFixed(2)}
+                                  </span>
+                                </div>
+                                <div className="text-right">
+                                  <p className="font-mono font-semibold text-green-900">
+                                    ${kelly.stake?.toFixed(2)}
+                                  </p>
+                                  <p className="text-green-600 text-xs">
+                                    edge {((kelly.edge || 0) * 100).toFixed(1)}% · EV ${((kelly.expected_value || 0) * (kelly.stake || 0)).toFixed(2)}
+                                  </p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="mt-3 pt-2 border-t border-green-200 flex justify-between text-xs text-green-700">
+                            <span>
+                              Total stake: <span className="font-mono font-semibold">${totalStake.toFixed(2)}</span>
+                              {' '}({((totalStake / bankroll) * 100).toFixed(1)}% of ${bankroll} bankroll)
+                            </span>
+                            <span>
+                              Total EV: <span className="font-mono font-semibold">${totalEv.toFixed(2)}</span>
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    const anyOdds = predictions.predictions.some((p) => {
+                      const o = p.race_entry_id != null ? liveOdds[p.race_entry_id] : '';
+                      return o && parseFloat(o) > 1;
+                    });
+                    return (
+                      <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                        <p className="text-gray-600 text-sm">
+                          {anyOdds
+                            ? 'No recommended bets at the current odds — none clear the 5% edge threshold.'
+                            : 'Enter the market odds for each dog above to get a bet recommendation.'}
+                          {predictions.predictions[0]?.confidence_tier === 'avoid' &&
+                            ' The model also has low confidence in this race overall.'}
+                        </p>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>
@@ -897,6 +1201,142 @@ export default function Predictions() {
                       </ul>
                     </div>
                   )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === 'history' && (
+            <div>
+              <div className="bg-white rounded-lg shadow p-5 mb-4">
+                <div className="flex items-end gap-3 flex-wrap">
+                  <label className="flex items-center gap-2 text-sm text-gray-600 pb-2">
+                    <input
+                      type="checkbox"
+                      checked={historyAllModels}
+                      onChange={(e) => setHistoryAllModels(e.target.checked)}
+                    />
+                    Show all models
+                  </label>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">From date</label>
+                    <input
+                      type="date"
+                      value={historyDateFrom}
+                      onChange={(e) => setHistoryDateFrom(e.target.value)}
+                      className="border rounded-md px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">To date</label>
+                    <input
+                      type="date"
+                      value={historyDateTo}
+                      onChange={(e) => setHistoryDateTo(e.target.value)}
+                      className="border rounded-md px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <button
+                    onClick={loadHistory}
+                    disabled={historyLoading}
+                    className="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {historyLoading ? 'Loading...' : 'Apply filters'}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-400 mt-3">
+                  Past predictions are saved automatically. Click any row to reopen the saved prediction without re-running the model.
+                </p>
+              </div>
+
+              {historyLoading ? (
+                <p className="text-gray-500">Loading history...</p>
+              ) : history.length === 0 ? (
+                <div className="bg-white rounded-lg shadow p-8 text-center">
+                  <p className="text-gray-500">No prediction history yet</p>
+                  <p className="text-gray-400 text-sm mt-1">
+                    Run a prediction in the "Predict Race" or "Predict by Date" tab — they'll show up here automatically.
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
+                  <table className="w-full text-sm text-left min-w-[820px]">
+                    <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
+                      <tr>
+                        <th className="px-3 sm:px-4 py-3">Predicted at</th>
+                        <th className="px-3 sm:px-4 py-3">Race</th>
+                        <th className="px-3 sm:px-4 py-3">Track</th>
+                        <th className="px-3 sm:px-4 py-3">Model</th>
+                        <th className="px-3 sm:px-4 py-3">Top Pick</th>
+                        <th className="px-3 sm:px-4 py-3">Win Prob</th>
+                        <th className="px-3 sm:px-4 py-3">Confidence</th>
+                        <th className="px-3 sm:px-4 py-3">Edge</th>
+                        <th className="px-3 sm:px-4 py-3">Bet?</th>
+                        <th className="px-3 sm:px-4 py-3">Result</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {history.map((s) => {
+                        const tp = s.top_pick;
+                        return (
+                          <tr
+                            key={`${s.experiment_id}-${s.race_id}`}
+                            onClick={() => openHistoryEntry(s)}
+                            className="cursor-pointer hover:bg-blue-50"
+                          >
+                            <td className="px-4 py-3 text-xs text-gray-600">
+                              {s.last_predicted_at
+                                ? new Date(s.last_predicted_at).toLocaleString()
+                                : '-'}
+                            </td>
+                            <td className="px-4 py-3 text-xs">
+                              <div className="font-medium">
+                                R{s.race_number ?? '-'} {s.distance_m ? `· ${s.distance_m}m` : ''}
+                              </div>
+                              <div className="text-gray-400">{s.race_date}</div>
+                            </td>
+                            <td className="px-4 py-3">{s.track_name || s.track_code || '-'}</td>
+                            <td className="px-4 py-3 text-xs">
+                              <div className="font-medium">{s.experiment_name || `#${s.experiment_id}`}</div>
+                              <div className="text-gray-400">{s.experiment_algorithm}</div>
+                            </td>
+                            <td className="px-4 py-3 font-medium">
+                              {tp ? `${tp.dog_name} (T${tp.trap})` : '-'}
+                            </td>
+                            <td className={`px-4 py-3 font-mono ${probColor(tp?.win_probability ?? null)}`}>
+                              {tp?.win_probability != null
+                                ? `${(tp.win_probability * 100).toFixed(1)}%`
+                                : '-'}
+                            </td>
+                            <td className="px-4 py-3">{tierBadge(tp?.confidence_tier ?? null) || '-'}</td>
+                            <td className="px-4 py-3 font-mono text-xs">
+                              {edgeDisplay(tp?.edge ?? null)}
+                            </td>
+                            <td className="px-4 py-3 text-xs">
+                              {tp?.kelly_bet ? (
+                                <span className="text-green-700 font-bold">
+                                  ${tp.kelly_stake?.toFixed(2)}
+                                </span>
+                              ) : (
+                                <span className="text-gray-300">-</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 text-xs">
+                              {tp?.top_pick_won === true ? (
+                                <span className="text-green-700 font-bold">WON</span>
+                              ) : tp?.actual_position != null ? (
+                                <span className="text-gray-500">{tp.actual_position}{tp.actual_position === 2 ? 'nd' : tp.actual_position === 3 ? 'rd' : 'th'}</span>
+                              ) : s.race_status === 'scheduled' ? (
+                                <span className="text-gray-400">scheduled</span>
+                              ) : (
+                                <span className="text-gray-300">-</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </div>

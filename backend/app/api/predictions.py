@@ -33,6 +33,17 @@ class PredictRaceResponse(BaseModel):
     saved: int
 
 
+class OddsEntry(BaseModel):
+    race_entry_id: int
+    decimal_odds: float | None = None
+
+
+class UpdateOddsRequest(BaseModel):
+    experiment_id: int
+    bankroll: float = 100.0
+    odds: list[OddsEntry]
+
+
 @router.get("/", response_model=list[PredictionResponse])
 def list_predictions(
     experiment_id: int | None = None,
@@ -255,27 +266,55 @@ def predict_single_race(
     race_id: int,
     experiment_id: int,
     bankroll: float = Query(default=100.0, ge=1),
+    refresh: bool = Query(
+        default=False,
+        description="If true, recompute even if saved predictions exist",
+    ),
     db: Session = Depends(get_db),
 ):
-    """Generate predictions for a specific race using a trained model."""
-    from app.services.prediction_service import predict_race, save_predictions
+    """Generate or fetch saved predictions for a specific race.
+
+    Default behaviour: if saved predictions exist for this (experiment, race)
+    pair, return them directly without re-running the model. Pass
+    `refresh=true` to force recomputation (e.g. after retraining or to
+    re-stake against a new bankroll).
+    """
+    from app.services.prediction_service import (
+        get_saved_predictions_for_race,
+        predict_race,
+        save_predictions,
+    )
 
     race = db.query(Race).filter(Race.id == race_id).first()
     if not race:
         raise HTTPException(status_code=404, detail="Race not found")
 
-    try:
-        preds = predict_race(db, experiment_id, race_id, bankroll=bankroll)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    cached: list[dict[str, Any]] = []
+    if not refresh:
+        cached = get_saved_predictions_for_race(db, experiment_id, race_id)
 
-    if preds:
-        saved = save_predictions(db, preds)
-    else:
+    if cached:
+        preds = cached
         saved = 0
+        from_cache = True
+    else:
+        try:
+            preds = predict_race(db, experiment_id, race_id, bankroll=bankroll)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        saved = save_predictions(db, preds) if preds else 0
+        from_cache = False
 
-    # Add race info
     track = db.query(Track).filter(Track.id == race.track_id).first()
+
+    last_predicted_at: str | None = None
+    if preds:
+        timestamps = [
+            p.get("updated_at") or p.get("created_at") for p in preds
+        ]
+        timestamps = [t for t in timestamps if t]
+        if timestamps:
+            last_predicted_at = max(timestamps)
 
     return {
         "race_id": race_id,
@@ -286,7 +325,285 @@ def predict_single_race(
         "grade": race.grade,
         "predictions": preds,
         "saved": saved,
+        "from_cache": from_cache,
+        "last_predicted_at": last_predicted_at,
     }
+
+
+@router.get("/race/{race_id}/saved")
+def get_saved_race_predictions(
+    race_id: int,
+    experiment_id: int,
+    db: Session = Depends(get_db),
+):
+    """Return saved predictions for a race without ever recomputing.
+
+    Returns 404 if no predictions have been saved for this (race, experiment).
+    """
+    from app.services.prediction_service import get_saved_predictions_for_race
+
+    race = db.query(Race).filter(Race.id == race_id).first()
+    if not race:
+        raise HTTPException(status_code=404, detail="Race not found")
+
+    preds = get_saved_predictions_for_race(db, experiment_id, race_id)
+    if not preds:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No saved predictions for race {race_id} with experiment "
+                f"{experiment_id}. Run a prediction first."
+            ),
+        )
+
+    track = db.query(Track).filter(Track.id == race.track_id).first()
+    timestamps = [p.get("updated_at") or p.get("created_at") for p in preds]
+    timestamps = [t for t in timestamps if t]
+    last_predicted_at = max(timestamps) if timestamps else None
+
+    return {
+        "race_id": race_id,
+        "race_date": str(race.race_date),
+        "race_number": race.race_number,
+        "track_name": track.name if track else None,
+        "distance_m": race.distance_m,
+        "grade": race.grade,
+        "predictions": preds,
+        "from_cache": True,
+        "last_predicted_at": last_predicted_at,
+    }
+
+
+@router.post("/race/{race_id}/odds")
+def update_predictions_with_odds(
+    race_id: int,
+    payload: UpdateOddsRequest,
+    db: Session = Depends(get_db),
+):
+    """Recompute Kelly + edge for saved predictions using user-supplied
+    market odds, then persist the updated bet recommendation.
+
+    Doesn't re-run the model — only the staking math changes. Useful when
+    the SP scraped at prediction time is stale or missing and the user has
+    a live price from the bookmaker.
+
+    Returns 404 if no predictions are saved for this (race, experiment).
+    """
+    from app.services.prediction_service import (
+        recompute_kelly_for_saved_predictions,
+    )
+
+    race = db.query(Race).filter(Race.id == race_id).first()
+    if not race:
+        raise HTTPException(status_code=404, detail="Race not found")
+
+    if payload.bankroll < 1:
+        raise HTTPException(status_code=422, detail="bankroll must be >= 1")
+
+    odds_by_entry: dict[int, float | None] = {}
+    for entry in payload.odds:
+        if entry.decimal_odds is not None and entry.decimal_odds <= 1.0:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"decimal_odds for entry {entry.race_entry_id} must be > 1.0"
+                ),
+            )
+        odds_by_entry[entry.race_entry_id] = entry.decimal_odds
+
+    updated = recompute_kelly_for_saved_predictions(
+        db=db,
+        experiment_id=payload.experiment_id,
+        race_id=race_id,
+        odds_by_entry=odds_by_entry,
+        bankroll=payload.bankroll,
+    )
+    if not updated:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No saved predictions for race {race_id} with experiment "
+                f"{payload.experiment_id}. Run a prediction first."
+            ),
+        )
+
+    track = db.query(Track).filter(Track.id == race.track_id).first()
+    timestamps = [p.get("updated_at") for p in updated if p.get("updated_at")]
+    last_predicted_at = max(timestamps) if timestamps else None
+
+    return {
+        "race_id": race_id,
+        "race_date": str(race.race_date),
+        "race_number": race.race_number,
+        "track_name": track.name if track else None,
+        "distance_m": race.distance_m,
+        "grade": race.grade,
+        "predictions": updated,
+        "from_cache": True,
+        "last_predicted_at": last_predicted_at,
+    }
+
+
+@router.get("/history")
+def prediction_history(
+    experiment_id: int | None = Query(
+        default=None,
+        description="Filter by experiment. Omit to see history across all models.",
+    ),
+    race_date_from: date | None = None,
+    race_date_to: date | None = None,
+    track_code: str | None = None,
+    limit: int = Query(default=200, le=1000),
+    db: Session = Depends(get_db),
+):
+    """List past prediction sessions grouped by (experiment, race).
+
+    One row per race that has saved predictions, with the model's top pick,
+    when it was predicted, the bankroll context, and (if the race has
+    resulted) whether the top pick won. Lets the user browse past
+    predictions without re-running anything.
+    """
+    from sqlalchemy import func as sa_func
+
+    from app.models.experiment import Experiment
+
+    # Aggregate at the (experiment, race) level: how many entries were
+    # predicted and the most recent prediction timestamp per race.
+    agg_query = (
+        db.query(
+            Prediction.experiment_id,
+            RaceEntry.race_id.label("race_id"),
+            sa_func.count(Prediction.id).label("n_predictions"),
+            sa_func.max(
+                sa_func.coalesce(Prediction.updated_at, Prediction.created_at)
+            ).label("last_predicted_at"),
+        )
+        .join(RaceEntry, Prediction.race_entry_id == RaceEntry.id)
+        .join(Race, RaceEntry.race_id == Race.id)
+        .group_by(Prediction.experiment_id, RaceEntry.race_id)
+    )
+
+    if experiment_id is not None:
+        agg_query = agg_query.filter(Prediction.experiment_id == experiment_id)
+    if race_date_from is not None:
+        agg_query = agg_query.filter(Race.race_date >= race_date_from)
+    if race_date_to is not None:
+        agg_query = agg_query.filter(Race.race_date <= race_date_to)
+    if track_code is not None:
+        agg_query = (
+            agg_query.join(Track, Race.track_id == Track.id)
+            .filter(Track.code == track_code)
+        )
+
+    agg_query = agg_query.order_by(sa_func.max(
+        sa_func.coalesce(Prediction.updated_at, Prediction.created_at)
+    ).desc()).limit(limit)
+
+    agg_rows = agg_query.all()
+
+    if not agg_rows:
+        return {"sessions": [], "total": 0}
+
+    # Build lookup of race + track + experiment metadata in batch.
+    race_ids = list({row.race_id for row in agg_rows})
+    exp_ids = list({row.experiment_id for row in agg_rows})
+
+    races_meta = {
+        r.id: r for r in (
+            db.query(Race).filter(Race.id.in_(race_ids)).all()
+        )
+    }
+    tracks_meta = {
+        t.id: t for t in (
+            db.query(Track)
+            .filter(Track.id.in_({r.track_id for r in races_meta.values()}))
+            .all()
+        )
+    }
+    experiments_meta = {
+        e.id: e for e in (
+            db.query(Experiment).filter(Experiment.id.in_(exp_ids)).all()
+        )
+    }
+
+    # For each (experiment, race) fetch the top pick — single batched query.
+    pairs = [(row.experiment_id, row.race_id) for row in agg_rows]
+    top_picks: dict[tuple[int, int], dict[str, Any]] = {}
+    if pairs:
+        top_rows = (
+            db.query(
+                Prediction.experiment_id,
+                RaceEntry.race_id.label("race_id"),
+                Prediction.win_probability,
+                Prediction.confidence,
+                Prediction.confidence_tier,
+                Prediction.edge,
+                Prediction.is_value,
+                Prediction.kelly_bet,
+                Prediction.kelly_stake,
+                Prediction.bankroll_used,
+                RaceEntry.trap,
+                RaceEntry.finish_position,
+                Dog.name.label("dog_name"),
+            )
+            .join(RaceEntry, Prediction.race_entry_id == RaceEntry.id)
+            .join(Dog, RaceEntry.dog_id == Dog.id)
+            .filter(RaceEntry.race_id.in_(race_ids))
+            .filter(Prediction.experiment_id.in_(exp_ids))
+            .order_by(
+                Prediction.experiment_id,
+                RaceEntry.race_id,
+                Prediction.win_probability.desc().nullslast(),
+            )
+            .all()
+        )
+        # Keep the first row per (exp, race) — the highest-prob pick.
+        for r in top_rows:
+            key = (r.experiment_id, r.race_id)
+            if key not in top_picks:
+                top_picks[key] = {
+                    "dog_name": r.dog_name,
+                    "trap": r.trap,
+                    "win_probability": r.win_probability,
+                    "confidence": r.confidence,
+                    "confidence_tier": r.confidence_tier,
+                    "edge": r.edge,
+                    "is_value": r.is_value,
+                    "kelly_bet": bool(r.kelly_bet) if r.kelly_bet is not None else None,
+                    "kelly_stake": r.kelly_stake,
+                    "bankroll_used": r.bankroll_used,
+                    "actual_position": r.finish_position,
+                    "top_pick_won": (
+                        r.finish_position == 1 if r.finish_position is not None else None
+                    ),
+                }
+
+    sessions = []
+    for row in agg_rows:
+        race = races_meta.get(row.race_id)
+        track = tracks_meta.get(race.track_id) if race else None
+        exp = experiments_meta.get(row.experiment_id)
+        sessions.append({
+            "experiment_id": row.experiment_id,
+            "experiment_name": exp.name if exp else None,
+            "experiment_algorithm": exp.algorithm if exp else None,
+            "race_id": row.race_id,
+            "race_date": str(race.race_date) if race else None,
+            "race_number": race.race_number if race else None,
+            "race_status": race.status if race else None,
+            "track_name": track.name if track else None,
+            "track_code": track.code if track else None,
+            "distance_m": race.distance_m if race else None,
+            "grade": race.grade if race else None,
+            "n_predictions": row.n_predictions,
+            "last_predicted_at": (
+                row.last_predicted_at.isoformat()
+                if row.last_predicted_at else None
+            ),
+            "top_pick": top_picks.get((row.experiment_id, row.race_id)),
+        })
+
+    return {"sessions": sessions, "total": len(sessions)}
 
 
 @router.get("/races-for-date")

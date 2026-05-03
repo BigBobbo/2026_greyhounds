@@ -42,6 +42,7 @@ def build_dataset(
     include_odds_snapshot_features: bool = False,
     include_h2h_features: bool = True,
     exclude_post_race_features: bool = True,
+    impute_missing: bool = True,
     heartbeat_fn: Any | None = None,
 ) -> dict[str, Any]:
     """
@@ -254,11 +255,36 @@ def build_dataset(
         logger.info("Dropping %d all-NaN feature columns: %s", len(nan_cols), list(nan_cols))
         X = X.drop(columns=nan_cols)
 
-    # Fill remaining NaN with column median; columns where ALL values are NaN
-    # get median=NaN, so fill those with 0.0 as a safe default
-    X = X.fillna(X.median()).fillna(0.0)
+    # Capture training-set medians BEFORE any imputation so the saved
+    # value reflects the real distribution (pandas median ignores NaN by
+    # default, so this is correct whether or not we go on to fill below).
+    feature_medians = X.median().to_dict()
 
-    logger.info("Final dataset: %d entries, %d features", len(X), X.shape[1])
+    if impute_missing:
+        # Median-fill remaining NaN; columns where ALL values are NaN get
+        # median=NaN, so fall back to 0.0. This is the legacy path used by
+        # sklearn trainers (LogReg, RandomForest pre-1.4) that can't
+        # ingest NaN.
+        X = X.fillna(X.median()).fillna(0.0)
+        logger.info(
+            "Final dataset: %d entries, %d features (imputed)",
+            len(X), X.shape[1],
+        )
+    else:
+        # NaN passthrough — for XGBoost / LightGBM / LambdaRank /
+        # HistGradientBoosting, which learn an optimal default split
+        # direction per node from the training data. This preserves
+        # missingness as an informative signal (a debutant's missing
+        # mean_finish_time_last5 is real information, not noise) and is
+        # strictly better than median imputation for these models per
+        # Chen & Guestrin 2016. The matching predict-time path skips its
+        # own fillna when the artifact's nan_policy is "passthrough".
+        nan_total = int(X.isna().sum().sum())
+        logger.info(
+            "Final dataset: %d entries, %d features "
+            "(NaN passthrough; %d NaN cells preserved)",
+            len(X), X.shape[1], nan_total,
+        )
 
     # Split
     X_train, y_train, X_val, y_val, X_test, y_test = _time_based_split(
@@ -272,8 +298,8 @@ def build_dataset(
 
     feature_names = list(X.columns)
 
-    # Save column medians from training set for consistent imputation at prediction time
-    feature_medians = X.median().to_dict()
+    # `feature_medians` was already captured above (before any imputation
+    # so it reflects the real distribution).
 
     # Recompute cutoff dates so they can be persisted by the training service
     test_after = split_config.get("test_after")

@@ -63,7 +63,7 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
         ))}
       </nav>
       <div className="px-5 py-3 border-t border-gray-700 text-xs text-gray-500">
-        v0.1.02
+        v0.1.03
       </div>
     </aside>
   );

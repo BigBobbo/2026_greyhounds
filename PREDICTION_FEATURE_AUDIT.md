@@ -450,38 +450,46 @@ The split is now implemented in `prediction_service.predict_race`:
   entry under `data_completeness[]`, alongside the existing
   `entries_missing_history` and `missing_features` lists.
 
-### Phase 2: switch GBM trainers to native NaN passthrough (deferred)
+### Phase 2: native NaN passthrough for GBM trainers ✅
 
-Research review (XGBoost paper, LightGBM advanced topics, sklearn
-HistGradientBoosting docs, Benter and Bolton & Chapman racing
+Research (Chen & Guestrin 2016 / XGBoost paper, LightGBM advanced topics,
+sklearn HistGradientBoosting docs, Benter and Bolton & Chapman racing
 literature) is unambiguous that median-imputing before fitting a
-gradient-boosted tree model is strictly worse than passing NaN through
-and letting the model learn an optimal default split direction. The
-reason: the missingness itself is an informative feature (a debutant's
-missing `mean_finish_time_last5` is a real signal, not noise), and
-median-fill collapses it into "this dog ran the average time."
+gradient-boosted tree model is strictly worse than passing NaN through.
+The trees learn an optimal default split direction at each node, which
+preserves the missingness signal (a debutant's missing
+`mean_finish_time_last5` is real information, not noise). Median-fill
+collapses it into "this dog ran the average time."
 
-The current Phase-1 code keeps median-filling because that's what the
-already-trained model expects — XGBoost has a known footgun where a
-model trained without NaN will silently route NaN to the right branch
-at predict time, which was never optimised. Train and serve must use
-the same NaN policy.
+The clean fix shipped in this PR. Implementation:
 
-Phase 2 is the clean fix:
+1. `dataset_builder.build_dataset` gains `impute_missing: bool = True`.
+   When `False`, the `X.fillna(X.median()).fillna(0.0)` step is
+   skipped and the trainer sees NaN directly.
+2. `training_service._nan_policy_for(algorithm)` classifies the trainer
+   family — `xgboost` / `lightgbm` / `lambdarank` get `"passthrough"`;
+   `logistic_regression` / `random_forest` get `"median_fill"`. The
+   training service flips `impute_missing` accordingly and persists
+   `nan_policy` in the saved model artifact.
+3. `prediction_service.predict_race` reads `artifact["nan_policy"]`
+   (defaulting to `"median_fill"` for legacy artifacts that pre-date
+   this field) and mirrors the policy. Under passthrough it skips the
+   median fill, the alignment-time fill *and* the final
+   `.fillna(0)` sweep, so NaN reaches the trainer the same way it
+   did at fit time. The XGBoost footgun (NaN silently routed right
+   when the model never saw NaN) is exactly what the symmetry between
+   train and serve prevents.
+4. Resulted-race back-tests follow the same artifact-driven policy.
 
-1. Add `impute_missing: bool` to `dataset_builder.build_dataset`.
-   Default to `False` (NaN passthrough) for new experiments.
-2. For sklearn-style trainers that don't natively handle NaN, do the
-   imputation *inside* the trainer's `fit` and persist the imputer in
-   the model artifact so predict can reuse it.
-3. Use `SimpleImputer(add_indicator=True)` for the sklearn path so the
-   missingness signal isn't lost.
-4. Mirror the policy at predict time: if the artifact says "trained
-   with NaN passthrough", skip the median fill; otherwise apply it.
+The legacy sklearn path is unchanged — `SimpleImputer(add_indicator=True)`
+inside the SklearnTrainer is left as future work; for now the
+median-fill code path with the saved `feature_medians` is identical to
+what those trainers were already doing.
 
-Phase 2 requires a one-time retrain across every active experiment, so
-it's gated on a follow-up PR rather than rolled into the loud-failure
-fix.
+**Migration:** every active experiment needs a one-time retrain to
+re-fit on the un-imputed data and pick up `nan_policy="passthrough"`.
+Existing artifacts without the field continue to work via the
+median-fill default but won't see the accuracy improvement.
 
 ### Key citations
 

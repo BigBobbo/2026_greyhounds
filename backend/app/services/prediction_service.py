@@ -369,6 +369,9 @@ def predict_race(
     trainer = artifact["trainer"]
     feature_medians = artifact.get("feature_medians", {})
     trained_feature_names = artifact.get("feature_names", []) or []
+    # Default to "median_fill" for any artifact saved before this field
+    # was added — preserves legacy behaviour for older models.
+    nan_policy = artifact.get("nan_policy", "median_fill")
     is_ranking = artifact.get("is_ranking", False)
 
     # Get race entries with SP odds
@@ -471,40 +474,47 @@ def predict_race(
     else:
         completeness_per_entry = {}
 
-    # Fill NaN using training set medians, exactly as dataset_builder did
-    # at fit time. Three things are happening here:
-    #  - Post-race-only features (current_sp_*, weight_change, odds-snapshot
-    #    drift) were already refused above when the race is scheduled, so
-    #    none of those columns reach this point on a serveable path.
-    #  - History-dependent features (mean_finish_time_last5, ELO, …)
-    #    legitimately come back NaN for debutants and lightly-raced dogs.
-    #    Median-filling them matches the training pipeline's
-    #    `X.fillna(X.median()).fillna(0.0)` so we don't introduce a
-    #    train/serve mismatch (XGBoost in particular silently sends NaN
-    #    down the right branch when it never saw NaN at fit time, which is
-    #    a known footgun — see the Phase-2 plan in
-    #    PREDICTION_FEATURE_AUDIT.md for the eventual switch to native
-    #    NaN passthrough).
-    #  - Any remaining NaN (newly added feature without a saved median)
-    #    falls back to 0 the same way training did.
-    if feature_medians:
-        nan_before = int(X.isna().sum().sum())
-        X = X.fillna(feature_medians)
-        if nan_before > 0:
+    # NaN handling mirrors the training pipeline. Two policies:
+    #
+    #  - "passthrough" (GBM trainers): the model was fit on data with
+    #    NaN in it and learned an optimal default split direction at each
+    #    node, so we send NaN through here too. Median-filling at predict
+    #    time would erase the missingness signal the model relies on.
+    #    Critical: XGBoost trained without NaN routes NaN to the right
+    #    branch by default, so train and serve must use the same policy.
+    #
+    #  - "median_fill" (sklearn trainers, plus every legacy artifact):
+    #    fill with the training-set medians captured at fit time.
+    #    Post-race-only features were already refused above on scheduled
+    #    races, so this path only sees history-dependent NaN.
+    if nan_policy == "passthrough":
+        nan_count = int(X.isna().sum().sum())
+        if nan_count > 0:
             logger.info(
-                "predict_race(%s): median-filled %d NaN feature values "
-                "(scheduled=%s) — matches training-time imputation",
-                race_id, nan_before, is_scheduled,
+                "predict_race(%s): NaN passthrough — preserving %d NaN "
+                "cells (scheduled=%s)",
+                race_id, nan_count, is_scheduled,
             )
-    X = X.fillna(0)
+    else:
+        if feature_medians:
+            nan_before = int(X.isna().sum().sum())
+            X = X.fillna(feature_medians)
+            if nan_before > 0:
+                logger.info(
+                    "predict_race(%s): median-filled %d NaN feature values "
+                    "(scheduled=%s) — matches training-time imputation",
+                    race_id, nan_before, is_scheduled,
+                )
+        X = X.fillna(0)
 
-    # Ensure base feature columns from the FeatureDefinition set are present
-    # (so race-relative derivatives can be computed on them).  Do NOT drop
-    # other columns here — built-in / ELO / H2H features were also part of
-    # the training matrix and must be preserved for the final alignment.
+    # Ensure base feature columns from the FeatureDefinition set are
+    # present so race-relative derivatives can be computed on them. Use
+    # NaN as the sentinel under passthrough so the model sees genuine
+    # missingness; use 0 under median_fill to match the legacy path.
+    sentinel = float("nan") if nan_policy == "passthrough" else 0
     for col in (f.name for f in feature_defs):
         if col not in X.columns:
-            X[col] = 0
+            X[col] = sentinel
 
     # Match the training pipeline order: odds-snapshot → race-relative → pace-shape.
     # Pace-shape and odds-snapshot were previously training-only, which silently
@@ -547,19 +557,23 @@ def predict_race(
                     f"FeatureDefinition was deleted. Re-enable the toggle in "
                     f"the experiment's split_config or retrain."
                 )
-            # Resulted-race backtests fall back to the trained median so
-            # accuracy diagnostics still produce a number rather than
-            # crashing on a missing dynamic column.
+            # Resulted-race backtests get the trained median (or NaN
+            # under passthrough) so accuracy diagnostics still produce a
+            # number rather than crashing on a missing dynamic column.
             for col in missing_cols:
-                X[col] = feature_medians.get(col, 0.0) if feature_medians else 0.0
+                if nan_policy == "passthrough":
+                    X[col] = float("nan")
+                else:
+                    X[col] = feature_medians.get(col, 0.0) if feature_medians else 0.0
         X = X[list(trained_feature_names)]
 
-    # Final NaN sweep — race-relative and pace-shape derivations can
-    # introduce NaN columns when a feature was constant within the race
-    # (denominator zero, etc.). Match training's `.fillna(0.0)` final
-    # step so the trainer never sees NaN in columns it wasn't trained on
-    # to expect them.
-    X = X.fillna(0)
+    # Final NaN sweep for the median_fill path — race-relative and
+    # pace-shape derivations can introduce NaN when a feature was
+    # constant within the race (denominator zero, etc.). Under
+    # passthrough we leave them as NaN so the trainer's learned default
+    # direction handles them.
+    if nan_policy != "passthrough":
+        X = X.fillna(0)
 
     # Generate predictions
     raw_scores = trainer.predict(X)

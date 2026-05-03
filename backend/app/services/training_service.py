@@ -132,6 +132,22 @@ def create_trainer(
         raise ValueError(f"Unknown algorithm: {algorithm}")
 
 
+# Trainer-family classification for NaN handling. GBM-based trainers
+# (xgboost, lightgbm, lambdarank) implement sparsity-aware split finding
+# and learn an optimal default direction at each node, so they should
+# see NaN at fit time rather than median-imputed values. The sklearn
+# legacy trainers (logistic_regression, random_forest) cannot ingest
+# NaN, so they fall back to the legacy median-fill path.
+_NAN_PASSTHROUGH_ALGORITHMS = {"xgboost", "lightgbm", "lambdarank"}
+
+
+def _nan_policy_for(algorithm: str) -> str:
+    """Return "passthrough" or "median_fill" for the given trainer family."""
+    if algorithm in _NAN_PASSTHROUGH_ALGORITHMS:
+        return "passthrough"
+    return "median_fill"
+
+
 def run_training(db: Session, experiment_id: int) -> None:
     """Run the full training pipeline for an experiment."""
     experiment = db.query(Experiment).filter(Experiment.id == experiment_id).first()
@@ -160,6 +176,16 @@ def run_training(db: Session, experiment_id: int) -> None:
         # LambdaRank always uses finish_position internally
         build_target = "finish_position" if experiment.algorithm == "lambdarank" else experiment.target
 
+        # Pick the NaN policy from the trainer family. GBM-based trainers
+        # (xgboost, lightgbm, lambdarank) handle NaN natively by learning
+        # an optimal default split direction, which preserves missingness
+        # as signal — strictly better than median imputation per Chen &
+        # Guestrin 2016 / LightGBM advanced topics. sklearn trainers
+        # (logistic regression, random forest) cannot ingest NaN, so we
+        # keep the legacy median-fill path for them.
+        nan_policy = _nan_policy_for(experiment.algorithm)
+        impute_missing = nan_policy == "median_fill"
+
         def _dataset_heartbeat():
             _heartbeat(db, experiment, "building_dataset", log_handler)
 
@@ -177,6 +203,7 @@ def run_training(db: Session, experiment_id: int) -> None:
             include_elo_features=split_cfg.get("include_elo_features", True),
             include_odds_snapshot_features=split_cfg.get("include_odds_snapshot_features", False),
             include_h2h_features=split_cfg.get("include_h2h_features", True),
+            impute_missing=impute_missing,
             exclude_post_race_features=split_cfg.get("exclude_post_race_features", True),
             heartbeat_fn=_dataset_heartbeat,
         )
@@ -355,6 +382,10 @@ def run_training(db: Session, experiment_id: int) -> None:
             "feature_medians": dataset.get("feature_medians", {}),
             "feature_names": dataset.get("feature_names", []),
             "is_ranking": is_ranking,
+            # nan_policy is mirrored at predict time. Artifacts saved
+            # before this field existed default to "median_fill" to keep
+            # legacy models working unchanged.
+            "nan_policy": nan_policy,
         }
         joblib.dump(artifact, model_path)
 
@@ -462,6 +493,9 @@ def run_optuna_optimization(
         split_cfg = experiment.split_config or {}
         build_target = "finish_position" if experiment.algorithm == "lambdarank" else experiment.target
 
+        nan_policy = _nan_policy_for(experiment.algorithm)
+        impute_missing = nan_policy == "median_fill"
+
         def _dataset_heartbeat():
             _heartbeat(db, experiment, "building_dataset", log_handler)
 
@@ -480,6 +514,7 @@ def run_optuna_optimization(
             include_odds_snapshot_features=split_cfg.get("include_odds_snapshot_features", False),
             include_h2h_features=split_cfg.get("include_h2h_features", True),
             exclude_post_race_features=split_cfg.get("exclude_post_race_features", True),
+            impute_missing=impute_missing,
             heartbeat_fn=_dataset_heartbeat,
         )
 
@@ -761,7 +796,9 @@ def run_optuna_optimization(
         artifact = {
             "trainer": trainer,
             "feature_medians": dataset.get("feature_medians", {}),
+            "feature_names": dataset.get("feature_names", []),
             "is_ranking": is_ranking,
+            "nan_policy": nan_policy,
         }
         joblib.dump(artifact, model_path)
 

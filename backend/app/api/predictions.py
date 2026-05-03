@@ -209,13 +209,30 @@ def predict_race_preflight(
 
     post_race_used = post_race_features_in_use(trained_feature_names)
 
-    # `would_fail` matches the predict-time strict-mode rules: a scheduled
-    # race fails if (a) the model uses any post-race feature, or (b) any
-    # NaN cell remains in the feature matrix at predict time.
-    would_fail = bool(
-        race.status == "scheduled"
-        and (post_race_used or missing_per_feature)
-    )
+    # Per-entry data-completeness: fraction of the feature matrix that
+    # was non-NaN before imputation. Mirrors what the prediction pipeline
+    # now attaches to each prediction so the UI can flag thinly-raced
+    # dogs visually instead of refusing the whole race.
+    data_completeness: list[dict[str, Any]] = []
+    if not X.empty:
+        for eid, frac in X.notna().mean(axis=1).to_dict().items():
+            eid_int = int(eid)
+            trap, dog_name = entry_lookup.get(eid_int, (None, None))
+            data_completeness.append({
+                "entry_id": eid_int,
+                "trap": trap,
+                "dog_name": dog_name,
+                "completeness": round(float(frac), 4),
+            })
+
+    # `would_fail` now only matches the predict-time hard-refuse rule:
+    # a scheduled race fails iff the trained feature list contains any
+    # post-race-only column. Sparse-history NaN cells are no longer a
+    # blocker — they're median-filled by the prediction pipeline (same
+    # as training) and reflected in the per-entry completeness score
+    # above. Bet sizing on those dogs should be downweighted by the
+    # caller, not refused outright.
+    would_fail = bool(race.status == "scheduled" and post_race_used)
 
     return {
         "race_id": race_id,
@@ -228,6 +245,7 @@ def predict_race_preflight(
         ],
         "entries_missing_history": debutants,
         "missing_features": missing_per_feature,
+        "data_completeness": data_completeness,
         "would_fail": would_fail,
     }
 

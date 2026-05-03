@@ -423,7 +423,77 @@ on in production.
 
 ---
 
-## 8. Quick-reference: where to look in the code
+## 8. Two kinds of missingness, two different fixes
+
+The original strict mode treated every NaN cell at predict time as a
+hard error. That was correct for one class of feature and wrong for
+another, and refusing the whole race when one dog had thin history
+turned out to be a worse user experience than silently imputing.
+
+| Class | Examples | Train-time behaviour | Predict-time behaviour | Right answer |
+|---|---|---|---|---|
+| Post-race-only | `weight_change`, `current_sp_*`, odds-snapshot drift | Always populated (resulted races have all post-race fields) | Always NaN on a scheduled race | **Hard refuse**: the model learned to use a signal that cannot exist live. |
+| History-dependent | `mean_finish_time_last5`, `early_speed_ratio`, ELO, trainer/sire stats | NaN for debutants and lightly-raced dogs; median-filled by `dataset_builder.py`'s `X.fillna(X.median()).fillna(0.0)` | NaN for debutants and lightly-raced dogs | **Match training**: median-fill at predict time too, then surface a per-entry `data_completeness` score so Kelly staking can downweight bets on thin-history dogs. |
+
+The split is now implemented in `prediction_service.predict_race`:
+
+* The up-front guard keeps refusing scheduled races when the trained
+  feature list contains any post-race-only column.
+* The per-(entry, feature) NaN error has been removed for the
+  history-dependent class. NaN cells are median-filled exactly the way
+  `dataset_builder.build_dataset` did at fit time.
+* Each prediction now carries a `data_completeness` field (0.0–1.0)
+  measured on the raw feature matrix before imputation. A debutant
+  whose features were entirely median-filled gets ~0.0; a veteran
+  with full coverage gets ~1.0.
+* `/predictions/preflight/{race_id}` reports the same number per
+  entry under `data_completeness[]`, alongside the existing
+  `entries_missing_history` and `missing_features` lists.
+
+### Phase 2: switch GBM trainers to native NaN passthrough (deferred)
+
+Research review (XGBoost paper, LightGBM advanced topics, sklearn
+HistGradientBoosting docs, Benter and Bolton & Chapman racing
+literature) is unambiguous that median-imputing before fitting a
+gradient-boosted tree model is strictly worse than passing NaN through
+and letting the model learn an optimal default split direction. The
+reason: the missingness itself is an informative feature (a debutant's
+missing `mean_finish_time_last5` is a real signal, not noise), and
+median-fill collapses it into "this dog ran the average time."
+
+The current Phase-1 code keeps median-filling because that's what the
+already-trained model expects — XGBoost has a known footgun where a
+model trained without NaN will silently route NaN to the right branch
+at predict time, which was never optimised. Train and serve must use
+the same NaN policy.
+
+Phase 2 is the clean fix:
+
+1. Add `impute_missing: bool` to `dataset_builder.build_dataset`.
+   Default to `False` (NaN passthrough) for new experiments.
+2. For sklearn-style trainers that don't natively handle NaN, do the
+   imputation *inside* the trainer's `fit` and persist the imputer in
+   the model artifact so predict can reuse it.
+3. Use `SimpleImputer(add_indicator=True)` for the sklearn path so the
+   missingness signal isn't lost.
+4. Mirror the policy at predict time: if the artifact says "trained
+   with NaN passthrough", skip the median fill; otherwise apply it.
+
+Phase 2 requires a one-time retrain across every active experiment, so
+it's gated on a follow-up PR rather than rolled into the loud-failure
+fix.
+
+### Key citations
+
+* Chen & Guestrin, *XGBoost: A Scalable Tree Boosting System*, sparsity-aware split finding — <https://arxiv.org/abs/1603.02754>
+* LightGBM advanced topics, missing-value handling — <https://lightgbm.readthedocs.io/en/latest/Advanced-Topics.html>
+* sklearn `SimpleImputer(add_indicator=True)` — <https://scikit-learn.org/stable/modules/impute.html>
+* Benter (1994), annotated Hong Kong syndicate paper — <https://actamachina.com/posts/annotated-benter-paper>
+* Baker & McHale (2017) on Kelly under probability uncertainty — <https://arxiv.org/pdf/1701.02814>
+
+---
+
+## 9. Quick-reference: where to look in the code
 
 - **Scraper card vs results split:** `backend/scraping/gri_scraper.py:75-126`
   (results), `:432-495` (cards), `:528-615` (form pages).

@@ -460,27 +460,42 @@ def predict_race(
     # infers `object` dtype, which XGBoost/LightGBM reject at predict time.
     X = X.apply(pd.to_numeric, errors="coerce")
 
-    # On scheduled races we refuse to silently impute. Any NaN here means
-    # an upstream dependency (dog history, sectional times, weigh-in
-    # weight, …) is missing — surface the gap loudly so the user can fix
-    # the scrape rather than getting a quiet train/serve skew.
-    if is_scheduled:
-        _raise_for_missing_features(X, race_id, entries)
+    # Per-entry data-completeness score, computed BEFORE any imputation:
+    # the fraction of feature cells that came back with a real value.
+    # Surfaced on each prediction so downstream Kelly staking can shrink
+    # bet size when a dog's history is sparse rather than refusing the
+    # whole race. Driver of the post-research design change away from
+    # hard-refuse-on-any-NaN.
+    if not X.empty:
+        completeness_per_entry = X.notna().mean(axis=1).to_dict()
+    else:
+        completeness_per_entry = {}
 
-    # Fill NaN using training set medians (consistent with training).
-    # Resulted-race backtests still go through this path: those features
-    # are real values that may legitimately be missing for a few entries
-    # (e.g. a debutant), and median imputation matches the training-time
-    # behaviour from dataset_builder.build_dataset.
+    # Fill NaN using training set medians, exactly as dataset_builder did
+    # at fit time. Three things are happening here:
+    #  - Post-race-only features (current_sp_*, weight_change, odds-snapshot
+    #    drift) were already refused above when the race is scheduled, so
+    #    none of those columns reach this point on a serveable path.
+    #  - History-dependent features (mean_finish_time_last5, ELO, …)
+    #    legitimately come back NaN for debutants and lightly-raced dogs.
+    #    Median-filling them matches the training pipeline's
+    #    `X.fillna(X.median()).fillna(0.0)` so we don't introduce a
+    #    train/serve mismatch (XGBoost in particular silently sends NaN
+    #    down the right branch when it never saw NaN at fit time, which is
+    #    a known footgun — see the Phase-2 plan in
+    #    PREDICTION_FEATURE_AUDIT.md for the eventual switch to native
+    #    NaN passthrough).
+    #  - Any remaining NaN (newly added feature without a saved median)
+    #    falls back to 0 the same way training did.
     if feature_medians:
-        nan_before = X.isna().sum().sum()
+        nan_before = int(X.isna().sum().sum())
         X = X.fillna(feature_medians)
         if nan_before > 0:
             logger.info(
-                "predict_race(%s): median-filled %d NaN feature values across resulted entries",
-                race_id, int(nan_before),
+                "predict_race(%s): median-filled %d NaN feature values "
+                "(scheduled=%s) — matches training-time imputation",
+                race_id, nan_before, is_scheduled,
             )
-    # Any remaining NaN (new features, etc.) fill with 0
     X = X.fillna(0)
 
     # Ensure base feature columns from the FeatureDefinition set are present
@@ -539,17 +554,12 @@ def predict_race(
                 X[col] = feature_medians.get(col, 0.0) if feature_medians else 0.0
         X = X[list(trained_feature_names)]
 
-    # Resulted-race backtests: fill any NaN in new relative features (and
-    # any aligned columns that had no median available). Scheduled races
-    # already raised above if anything was missing.
-    if not is_scheduled:
-        X = X.fillna(0)
-    elif X.isna().any().any():
-        # Belt-and-braces: should be unreachable because
-        # _raise_for_missing_features ran before alignment, but if a
-        # downstream step (race-relative, pace-shape) introduced a NaN we
-        # surface it instead of letting it slip through.
-        _raise_for_missing_features(X, race_id, entries)
+    # Final NaN sweep — race-relative and pace-shape derivations can
+    # introduce NaN columns when a feature was constant within the race
+    # (denominator zero, etc.). Match training's `.fillna(0.0)` final
+    # step so the trainer never sees NaN in columns it wasn't trained on
+    # to expect them.
+    X = X.fillna(0)
 
     # Generate predictions
     raw_scores = trainer.predict(X)
@@ -595,11 +605,21 @@ def predict_race(
         entry = entry_row.RaceEntry
         dog_name = entry_row.dog_name
 
+        # Data completeness for this entry — fraction of the feature
+        # matrix that came back populated before any imputation. 1.0 = a
+        # veteran with full history; 0.0 = a debutant whose features
+        # were entirely median-filled. Surfaced for downstream Kelly
+        # staking and UI confidence display.
+        completeness = completeness_per_entry.get(entry_id)
+        if completeness is not None:
+            completeness = round(float(completeness), 4)
+
         pred_data = {
             "race_entry_id": entry_id,
             "dog_name": dog_name,
             "trap": entry.trap,
             "experiment_id": experiment_id,
+            "data_completeness": completeness,
         }
 
         if is_ranking or experiment.target == "win_prob":

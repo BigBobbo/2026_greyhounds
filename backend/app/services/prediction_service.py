@@ -634,6 +634,8 @@ def predict_race(
             "trap": entry.trap,
             "experiment_id": experiment_id,
             "data_completeness": completeness,
+            "bankroll_used": bankroll,
+            "sp_decimal_at_pred": entry.sp_decimal,
         }
 
         if is_ranking or experiment.target == "win_prob":
@@ -693,10 +695,116 @@ def predict_race(
     return predictions
 
 
+def hydrate_saved_prediction(
+    pred: Prediction, dog_name: str | None, trap: int | None,
+) -> dict[str, Any]:
+    """Reconstruct a `predict_race`-shaped dict from a saved Prediction row.
+
+    Lets the API hand back the same JSON shape whether predictions were
+    just computed or fetched from the DB — so the frontend can render
+    cached and live results identically.
+    """
+    kelly: dict[str, Any] = {
+        "bet": bool(pred.kelly_bet) if pred.kelly_bet is not None else False,
+    }
+    if pred.kelly_reason is not None:
+        kelly["reason"] = pred.kelly_reason
+    if pred.kelly_stake is not None:
+        kelly["stake"] = pred.kelly_stake
+    if pred.kelly_stake_pct is not None:
+        kelly["stake_pct"] = pred.kelly_stake_pct
+    if pred.kelly_full_pct is not None:
+        kelly["full_kelly_pct"] = pred.kelly_full_pct
+    if pred.kelly_expected_value is not None:
+        kelly["expected_value"] = pred.kelly_expected_value
+    if pred.kelly_implied_prob is not None:
+        kelly["implied_prob"] = pred.kelly_implied_prob
+    if pred.edge is not None:
+        kelly["edge"] = pred.edge
+
+    return {
+        "race_entry_id": pred.race_entry_id,
+        "dog_name": dog_name,
+        "trap": trap,
+        "experiment_id": pred.experiment_id,
+        "win_probability": pred.win_probability,
+        "predicted_position": pred.predicted_position,
+        "predicted_time": pred.predicted_time,
+        "confidence": pred.confidence,
+        "confidence_tier": pred.confidence_tier,
+        "margin": pred.margin,
+        "entropy": pred.entropy,
+        "edge": pred.edge,
+        "is_value": pred.is_value,
+        "kelly": kelly,
+        "data_completeness": pred.data_completeness,
+        "bankroll_used": pred.bankroll_used,
+        "sp_decimal_at_pred": pred.sp_decimal_at_pred,
+        "created_at": pred.created_at.isoformat() if pred.created_at else None,
+        "updated_at": pred.updated_at.isoformat() if pred.updated_at else None,
+    }
+
+
+def get_saved_predictions_for_race(
+    db: Session, experiment_id: int, race_id: int,
+) -> list[dict[str, Any]]:
+    """Fetch saved predictions for a (experiment, race) pair without recomputing.
+
+    Returns rows in the same shape as `predict_race`, sorted by win
+    probability descending. Empty list if no predictions are saved yet.
+    """
+    rows = (
+        db.query(Prediction, Dog.name.label("dog_name"), RaceEntry.trap)
+        .join(RaceEntry, Prediction.race_entry_id == RaceEntry.id)
+        .join(Dog, RaceEntry.dog_id == Dog.id)
+        .filter(
+            Prediction.experiment_id == experiment_id,
+            RaceEntry.race_id == race_id,
+        )
+        .all()
+    )
+    preds = [hydrate_saved_prediction(p, name, trap) for p, name, trap in rows]
+    preds.sort(key=lambda p: p.get("win_probability") or 0, reverse=True)
+    return preds
+
+
+def _flatten_prediction_for_storage(pred: dict[str, Any]) -> dict[str, Any]:
+    """Map a `predict_race`-shaped dict onto Prediction column kwargs.
+
+    Persists the full betting context (Kelly snapshot, edge, confidence
+    breakdown, bankroll/SP at prediction time) so a saved prediction can
+    be replayed in the UI without re-running the model.
+    """
+    kelly = pred.get("kelly") or {}
+    return {
+        "win_probability": pred.get("win_probability"),
+        "predicted_position": pred.get("predicted_position"),
+        "predicted_time": pred.get("predicted_time"),
+        "confidence": pred.get("confidence"),
+        "confidence_tier": pred.get("confidence_tier"),
+        "margin": pred.get("margin"),
+        "entropy": pred.get("entropy"),
+        "edge": pred.get("edge"),
+        "is_value": pred.get("is_value"),
+        "kelly_bet": kelly.get("bet"),
+        "kelly_stake": kelly.get("stake"),
+        "kelly_stake_pct": kelly.get("stake_pct"),
+        "kelly_full_pct": kelly.get("full_kelly_pct"),
+        "kelly_expected_value": kelly.get("expected_value"),
+        "kelly_implied_prob": kelly.get("implied_prob"),
+        "kelly_reason": kelly.get("reason"),
+        "data_completeness": pred.get("data_completeness"),
+        "bankroll_used": pred.get("bankroll_used"),
+        "sp_decimal_at_pred": pred.get("sp_decimal_at_pred"),
+    }
+
+
 def save_predictions(db: Session, predictions: list[dict[str, Any]]) -> int:
     """Save predictions to DB, upserting on (experiment_id, race_entry_id)."""
     saved = 0
+    now = datetime.utcnow()
     for pred in predictions:
+        fields = _flatten_prediction_for_storage(pred)
         existing = (
             db.query(Prediction)
             .filter(
@@ -707,19 +815,16 @@ def save_predictions(db: Session, predictions: list[dict[str, Any]]) -> int:
         )
 
         if existing:
-            existing.win_probability = pred.get("win_probability")
-            existing.predicted_position = pred.get("predicted_position")
-            existing.predicted_time = pred.get("predicted_time")
-            existing.confidence = pred.get("confidence")
-            existing.created_at = datetime.utcnow()
+            for k, v in fields.items():
+                setattr(existing, k, v)
+            existing.updated_at = now
         else:
             db.add(Prediction(
                 experiment_id=pred["experiment_id"],
                 race_entry_id=pred["race_entry_id"],
-                win_probability=pred.get("win_probability"),
-                predicted_position=pred.get("predicted_position"),
-                predicted_time=pred.get("predicted_time"),
-                confidence=pred.get("confidence"),
+                created_at=now,
+                updated_at=now,
+                **fields,
             ))
         saved += 1
 

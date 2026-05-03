@@ -73,6 +73,23 @@ class PredictionResponse(BaseModel):
     predicted_position: float | None = None
     predicted_time: float | None = None
     confidence: float | None = None
+    confidence_tier: str | None = None
+    margin: float | None = None
+    entropy: float | None = None
+    edge: float | None = None
+    is_value: bool | None = None
+    kelly_bet: bool | None = None
+    kelly_stake: float | None = None
+    kelly_stake_pct: float | None = None
+    kelly_full_pct: float | None = None
+    kelly_expected_value: float | None = None
+    kelly_implied_prob: float | None = None
+    kelly_reason: str | None = None
+    data_completeness: float | None = None
+    bankroll_used: float | None = None
+    sp_decimal_at_pred: float | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
     dog_name: str | None = None
     trap: int | None = None
 

@@ -37,6 +37,38 @@ interface RacePrediction {
   distance_m: number;
   grade: string;
   predictions: PredictionEntry[];
+  from_cache?: boolean;
+  last_predicted_at?: string | null;
+}
+
+interface HistorySession {
+  experiment_id: number;
+  experiment_name: string | null;
+  experiment_algorithm: string | null;
+  race_id: number;
+  race_date: string | null;
+  race_number: number | null;
+  race_status: string | null;
+  track_name: string | null;
+  track_code: string | null;
+  distance_m: number | null;
+  grade: string | null;
+  n_predictions: number;
+  last_predicted_at: string | null;
+  top_pick: {
+    dog_name: string;
+    trap: number;
+    win_probability: number | null;
+    confidence: number | null;
+    confidence_tier: string | null;
+    edge: number | null;
+    is_value: boolean | null;
+    kelly_bet: boolean | null;
+    kelly_stake: number | null;
+    bankroll_used: number | null;
+    actual_position: number | null;
+    top_pick_won: boolean | null;
+  } | null;
 }
 
 interface RaceOption {
@@ -117,7 +149,14 @@ export default function Predictions() {
   const [predictions, setPredictions] = useState<RacePrediction | null>(null);
   const [comparisons, setComparisons] = useState<ComparisonResult[]>([]);
   const [loading, setLoading] = useState(false);
-  const [tab, setTab] = useState<'predict' | 'date' | 'compare'>('predict');
+  const [tab, setTab] = useState<'predict' | 'date' | 'history' | 'compare'>('predict');
+
+  // History tab state
+  const [history, setHistory] = useState<HistorySession[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyAllModels, setHistoryAllModels] = useState(false);
+  const [historyDateFrom, setHistoryDateFrom] = useState('');
+  const [historyDateTo, setHistoryDateTo] = useState('');
 
   // Race picker state
   const [raceDate, setRaceDate] = useState(new Date().toISOString().split('T')[0]);
@@ -166,19 +205,62 @@ export default function Predictions() {
       .finally(() => setLoadingRaces(false));
   }, [raceDate, trackCode]);
 
-  const handlePredict = async () => {
+  const handlePredict = async (forceRefresh: boolean = false) => {
     const raceId = selectedRaceId || (manualRaceId ? parseInt(manualRaceId) : null);
     if (!selectedExp || !raceId) return;
     setLoading(true);
     try {
-      const res = await api.get(
-        `/predictions/race/${raceId}?experiment_id=${selectedExp}&bankroll=${bankroll}`
-      );
+      const params = new URLSearchParams({
+        experiment_id: String(selectedExp),
+        bankroll: String(bankroll),
+      });
+      if (forceRefresh) params.set('refresh', 'true');
+      const res = await api.get(`/predictions/race/${raceId}?${params}`);
       setPredictions(res.data);
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to generate predictions');
     }
     setLoading(false);
+  };
+
+  const loadHistory = async () => {
+    setHistoryLoading(true);
+    try {
+      const params = new URLSearchParams({ limit: '200' });
+      if (!historyAllModels && selectedExp) {
+        params.set('experiment_id', String(selectedExp));
+      }
+      if (historyDateFrom) params.set('race_date_from', historyDateFrom);
+      if (historyDateTo) params.set('race_date_to', historyDateTo);
+      const res = await api.get<{ sessions: HistorySession[]; total: number }>(
+        `/predictions/history?${params}`,
+      );
+      setHistory(res.data.sessions);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to load history');
+      setHistory([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const openHistoryEntry = async (s: HistorySession) => {
+    if (!s.race_id || !s.experiment_id) return;
+    setSelectedExp(s.experiment_id);
+    setSelectedRaceId(s.race_id);
+    setManualRaceId('');
+    setLoading(true);
+    setTab('predict');
+    try {
+      const res = await api.get<RacePrediction>(
+        `/predictions/race/${s.race_id}/saved?experiment_id=${s.experiment_id}`,
+      );
+      setPredictions(res.data);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to load saved prediction');
+    } finally {
+      setLoading(false);
+    }
   };
 
   // Fetch which tracks already have race cards scraped for the selected date
@@ -398,6 +480,14 @@ export default function Predictions() {
               Predict by Date
             </button>
             <button
+              onClick={() => { setTab('history'); loadHistory(); }}
+              className={`px-5 py-3 text-sm font-medium border-b-2 ${
+                tab === 'history' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500'
+              }`}
+            >
+              History
+            </button>
+            <button
               onClick={() => { setTab('compare'); handleCompare(); }}
               className={`px-5 py-3 text-sm font-medium border-b-2 ${
                 tab === 'compare' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500'
@@ -485,7 +575,7 @@ export default function Predictions() {
                       />
                     </div>
                     <button
-                      onClick={handlePredict}
+                      onClick={() => handlePredict(false)}
                       disabled={loading || (!selectedRaceId && !manualRaceId)}
                       className="bg-blue-600 text-white px-5 py-2 rounded-md text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
                     >
@@ -508,6 +598,30 @@ export default function Predictions() {
                         <p className="text-sm text-gray-500">
                           {predictions.race_date} | {predictions.distance_m}m | {predictions.grade}
                         </p>
+                        <div className="flex items-center gap-2 mt-1 flex-wrap">
+                          {predictions.from_cache ? (
+                            <span className="inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full">
+                              Saved prediction
+                              {predictions.last_predicted_at && (
+                                <span className="text-blue-500">
+                                  · {new Date(predictions.last_predicted_at).toLocaleString()}
+                                </span>
+                              )}
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded-full">
+                              Fresh prediction
+                            </span>
+                          )}
+                          <button
+                            onClick={() => handlePredict(true)}
+                            disabled={loading}
+                            className="text-xs text-blue-600 hover:text-blue-800 underline disabled:opacity-50"
+                            title="Recompute from the model (e.g. new bankroll or after retraining)"
+                          >
+                            {loading ? 'Refreshing...' : 'Refresh prediction'}
+                          </button>
+                        </div>
                       </div>
                       {predictions.predictions[0]?.confidence_tier && (
                         <div className="flex items-center gap-3">
@@ -897,6 +1011,142 @@ export default function Predictions() {
                       </ul>
                     </div>
                   )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === 'history' && (
+            <div>
+              <div className="bg-white rounded-lg shadow p-5 mb-4">
+                <div className="flex items-end gap-3 flex-wrap">
+                  <label className="flex items-center gap-2 text-sm text-gray-600 pb-2">
+                    <input
+                      type="checkbox"
+                      checked={historyAllModels}
+                      onChange={(e) => setHistoryAllModels(e.target.checked)}
+                    />
+                    Show all models
+                  </label>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">From date</label>
+                    <input
+                      type="date"
+                      value={historyDateFrom}
+                      onChange={(e) => setHistoryDateFrom(e.target.value)}
+                      className="border rounded-md px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">To date</label>
+                    <input
+                      type="date"
+                      value={historyDateTo}
+                      onChange={(e) => setHistoryDateTo(e.target.value)}
+                      className="border rounded-md px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <button
+                    onClick={loadHistory}
+                    disabled={historyLoading}
+                    className="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {historyLoading ? 'Loading...' : 'Apply filters'}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-400 mt-3">
+                  Past predictions are saved automatically. Click any row to reopen the saved prediction without re-running the model.
+                </p>
+              </div>
+
+              {historyLoading ? (
+                <p className="text-gray-500">Loading history...</p>
+              ) : history.length === 0 ? (
+                <div className="bg-white rounded-lg shadow p-8 text-center">
+                  <p className="text-gray-500">No prediction history yet</p>
+                  <p className="text-gray-400 text-sm mt-1">
+                    Run a prediction in the "Predict Race" or "Predict by Date" tab — they'll show up here automatically.
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
+                  <table className="w-full text-sm text-left min-w-[820px]">
+                    <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
+                      <tr>
+                        <th className="px-3 sm:px-4 py-3">Predicted at</th>
+                        <th className="px-3 sm:px-4 py-3">Race</th>
+                        <th className="px-3 sm:px-4 py-3">Track</th>
+                        <th className="px-3 sm:px-4 py-3">Model</th>
+                        <th className="px-3 sm:px-4 py-3">Top Pick</th>
+                        <th className="px-3 sm:px-4 py-3">Win Prob</th>
+                        <th className="px-3 sm:px-4 py-3">Confidence</th>
+                        <th className="px-3 sm:px-4 py-3">Edge</th>
+                        <th className="px-3 sm:px-4 py-3">Bet?</th>
+                        <th className="px-3 sm:px-4 py-3">Result</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {history.map((s) => {
+                        const tp = s.top_pick;
+                        return (
+                          <tr
+                            key={`${s.experiment_id}-${s.race_id}`}
+                            onClick={() => openHistoryEntry(s)}
+                            className="cursor-pointer hover:bg-blue-50"
+                          >
+                            <td className="px-4 py-3 text-xs text-gray-600">
+                              {s.last_predicted_at
+                                ? new Date(s.last_predicted_at).toLocaleString()
+                                : '-'}
+                            </td>
+                            <td className="px-4 py-3 text-xs">
+                              <div className="font-medium">
+                                R{s.race_number ?? '-'} {s.distance_m ? `· ${s.distance_m}m` : ''}
+                              </div>
+                              <div className="text-gray-400">{s.race_date}</div>
+                            </td>
+                            <td className="px-4 py-3">{s.track_name || s.track_code || '-'}</td>
+                            <td className="px-4 py-3 text-xs">
+                              <div className="font-medium">{s.experiment_name || `#${s.experiment_id}`}</div>
+                              <div className="text-gray-400">{s.experiment_algorithm}</div>
+                            </td>
+                            <td className="px-4 py-3 font-medium">
+                              {tp ? `${tp.dog_name} (T${tp.trap})` : '-'}
+                            </td>
+                            <td className={`px-4 py-3 font-mono ${probColor(tp?.win_probability ?? null)}`}>
+                              {tp?.win_probability != null
+                                ? `${(tp.win_probability * 100).toFixed(1)}%`
+                                : '-'}
+                            </td>
+                            <td className="px-4 py-3">{tierBadge(tp?.confidence_tier ?? null) || '-'}</td>
+                            <td className="px-4 py-3 font-mono text-xs">
+                              {edgeDisplay(tp?.edge ?? null)}
+                            </td>
+                            <td className="px-4 py-3 text-xs">
+                              {tp?.kelly_bet ? (
+                                <span className="text-green-700 font-bold">
+                                  ${tp.kelly_stake?.toFixed(2)}
+                                </span>
+                              ) : (
+                                <span className="text-gray-300">-</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 text-xs">
+                              {tp?.top_pick_won === true ? (
+                                <span className="text-green-700 font-bold">WON</span>
+                              ) : tp?.actual_position != null ? (
+                                <span className="text-gray-500">{tp.actual_position}{tp.actual_position === 2 ? 'nd' : tp.actual_position === 3 ? 'rd' : 'th'}</span>
+                              ) : s.race_status === 'scheduled' ? (
+                                <span className="text-gray-400">scheduled</span>
+                              ) : (
+                                <span className="text-gray-300">-</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </div>

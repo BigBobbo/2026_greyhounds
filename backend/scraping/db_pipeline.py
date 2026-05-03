@@ -13,6 +13,7 @@ import re
 from datetime import date, datetime
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.dog import Dog
@@ -29,6 +30,29 @@ def normalize_name(name: str) -> str:
     name = re.sub(r"\s+", " ", name)
     name = re.sub(r"[''`]", "'", name)
     return name
+
+
+def _last_resulted_race_date(
+    db: Session, dog_id: int, before_date: date,
+) -> date | None:
+    """Most recent resulted-race date for a dog strictly before `before_date`.
+
+    Used at scrape time to populate `RaceEntry.days_since_last` for upcoming
+    cards: GRI doesn't print this on the card page but it's trivially
+    derivable from the dog's prior resulted races. Pre-filling the column
+    keeps the row dense for analytics/UI/feature code that reads the
+    entry directly, instead of relying on every consumer to recompute.
+    """
+    return (
+        db.query(func.max(Race.race_date))
+        .join(RaceEntry, RaceEntry.race_id == Race.id)
+        .filter(
+            RaceEntry.dog_id == dog_id,
+            Race.race_date < before_date,
+            Race.status == "resulted",
+        )
+        .scalar()
+    )
 
 
 def find_or_create_dog(
@@ -153,6 +177,19 @@ def upsert_race_entry(
         .first()
     )
 
+    # Backfill derivable fields the card page doesn't carry but we already
+    # know from the race row / dog history. Both are computable pre-race
+    # and have to be re-derived at predict time otherwise — populating
+    # them at scrape time keeps the row dense and the predict-time strict
+    # mode stops misclassifying these as missing.
+    grade_at_entry = entry_data.get("grade_at_entry") or race.grade
+
+    days_since_last = entry_data.get("days_since_last")
+    if days_since_last is None and race.race_date is not None:
+        last_date = _last_resulted_race_date(db, dog.id, race.race_date)
+        if last_date is not None:
+            days_since_last = (race.race_date - last_date).days
+
     if existing:
         # Update with new data if available
         if entry_data.get("finish_position") is not None:
@@ -166,6 +203,11 @@ def upsert_race_entry(
             existing.weight_kg = entry_data["weight_kg"]
         if entry_data.get("comment") and not existing.comment:
             existing.comment = entry_data["comment"]
+        # Backfill derivable fields if they were left NULL at first scrape.
+        if grade_at_entry and not existing.grade_at_entry:
+            existing.grade_at_entry = grade_at_entry
+        if days_since_last is not None and existing.days_since_last is None:
+            existing.days_since_last = days_since_last
         existing.last_scraped_at = stamp
         if scrape_log_id is not None:
             existing.last_scrape_log_id = scrape_log_id
@@ -183,7 +225,8 @@ def upsert_race_entry(
         starting_price=entry_data.get("starting_price"),
         sp_decimal=entry_data.get("sp_decimal"),
         comment=entry_data.get("comment"),
-        grade_at_entry=entry_data.get("grade_at_entry"),
+        grade_at_entry=grade_at_entry,
+        days_since_last=days_since_last,
         last_scraped_at=stamp,
         last_scrape_log_id=scrape_log_id,
     )

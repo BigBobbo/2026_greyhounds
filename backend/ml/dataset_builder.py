@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.models.race import Race
 from app.models.race_entry import RaceEntry
+from ml.feature_availability import POST_RACE_FEATURE_NAMES
 from ml.feature_store import build_feature_matrix
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ def build_dataset(
     include_elo_features: bool = True,
     include_odds_snapshot_features: bool = False,
     include_h2h_features: bool = True,
+    exclude_post_race_features: bool = True,
     heartbeat_fn: Any | None = None,
 ) -> dict[str, Any]:
     """
@@ -75,6 +77,15 @@ def build_dataset(
             yields three all-NaN columns at training time and creates a
             latent train/serve skew the moment the snapshot scraper starts
             running for resulted races but not for upcoming ones.
+        exclude_post_race_features: If True (default), drop every column in
+            ml.feature_availability.POST_RACE_FEATURE_NAMES from the
+            training matrix before fit. These features (weight_change,
+            current_sp_*, opening_to_sp_drift, …) carry signal at train
+            time but cannot be reproduced when serving an upcoming race,
+            so leaving them in inflates CV scores relative to live
+            performance. Set False only for back-test-only experiments
+            where you accept the trained model cannot serve scheduled
+            races (predict_race will raise PredictionDataError).
 
     Returns:
         {
@@ -219,6 +230,23 @@ def build_dataset(
     X = X[valid_mask]
     y = y[valid_mask]
     entries_df = entries_df[valid_mask]
+
+    # Drop post-race-only feature columns. These (weight_change, current_sp_*,
+    # opening_to_sp_drift, …) carry real signal at training time because the
+    # post-race fields are populated for every resulted race in the dataset,
+    # but they cannot be reproduced at predict time on a scheduled race.
+    # Including them here makes CV scores look better than the served model
+    # can ever achieve and is the leakage the audit was tracking. Keep the
+    # toggle so back-test-only experiments can opt back in for diagnostics.
+    if exclude_post_race_features:
+        post_race_cols = [c for c in X.columns if c in POST_RACE_FEATURE_NAMES]
+        if post_race_cols:
+            logger.info(
+                "Dropping %d post-race-only feature column(s) per "
+                "exclude_post_race_features=True: %s",
+                len(post_race_cols), post_race_cols,
+            )
+            X = X.drop(columns=post_race_cols)
 
     # Drop feature columns that are all NaN
     nan_cols = X.columns[X.isna().all()]

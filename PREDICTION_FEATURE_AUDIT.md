@@ -384,9 +384,46 @@ now carries a `reason` tag (`post_race_data` / `dog_has_no_history` /
 fixable by re-scraping prior races (`history_field_missing`) or
 fundamental (`dog_has_no_history`, `post_race_data`).
 
+### 6.9 Exclude post-race features at training time ✅
+
+`build_dataset` accepts `exclude_post_race_features` (defaults to
+`True`). With the flag on, every column listed in
+`POST_RACE_FEATURE_NAMES` is dropped from the training matrix before
+the trainer ever sees it, with the dropped names logged at INFO. The
+toggle threads through both `training_service.run_experiment` call
+sites via `split_cfg.get("exclude_post_race_features", True)`, so any
+new experiment is built without them by default. Setting it to `False`
+is reserved for back-test-only experiments where you accept that
+`predict_race` will refuse to serve the resulting model on a scheduled
+race.
+
+`backend/scripts/audit_experiments_for_post_race_features.py` walks
+every completed experiment, loads its model artifact, intersects the
+trained `feature_names` with `POST_RACE_FEATURE_NAMES`, and prints a
+`BLOCKED` / `ok` line per experiment plus the offending features. Use
+it to size the retrain blast radius before flipping the strict guard
+on in production.
+
+## 7. Retrain workflow
+
+1. `python backend/scripts/audit_experiments_for_post_race_features.py`
+   to list the experiments the strict guard will refuse to serve.
+2. Re-scrape today's upcoming cards so `grade_at_entry` and
+   `days_since_last` get backfilled on the existing rows (the
+   db_pipeline backfill only fires on new scrapes).
+3. Retrain the affected experiments. The default
+   `exclude_post_race_features=True` is enough; no explicit override is
+   needed unless you want a back-test-only model.
+4. Compare the new CV scores against the old ones. A drop is expected
+   and is the corrected baseline — the old number was inflated by
+   features the live system can never see.
+5. Hit `/predictions/preflight/{race_id}?experiment_id=NEW_ID` for a
+   couple of upcoming races and confirm `would_fail: false`.
+6. Repoint live prediction to the new experiment.
+
 ---
 
-## 7. Quick-reference: where to look in the code
+## 8. Quick-reference: where to look in the code
 
 - **Scraper card vs results split:** `backend/scraping/gri_scraper.py:75-126`
   (results), `:432-495` (cards), `:528-615` (form pages).

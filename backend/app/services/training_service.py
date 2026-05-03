@@ -177,6 +177,7 @@ def run_training(db: Session, experiment_id: int) -> None:
             include_elo_features=split_cfg.get("include_elo_features", True),
             include_odds_snapshot_features=split_cfg.get("include_odds_snapshot_features", False),
             include_h2h_features=split_cfg.get("include_h2h_features", True),
+            exclude_post_race_features=split_cfg.get("exclude_post_race_features", True),
             heartbeat_fn=_dataset_heartbeat,
         )
 
@@ -478,6 +479,7 @@ def run_optuna_optimization(
             include_elo_features=split_cfg.get("include_elo_features", True),
             include_odds_snapshot_features=split_cfg.get("include_odds_snapshot_features", False),
             include_h2h_features=split_cfg.get("include_h2h_features", True),
+            exclude_post_race_features=split_cfg.get("exclude_post_race_features", True),
             heartbeat_fn=_dataset_heartbeat,
         )
 

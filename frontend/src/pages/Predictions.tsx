@@ -14,6 +14,7 @@ interface KellyInfo {
 }
 
 interface PredictionEntry {
+  race_entry_id?: number;
   dog_name: string;
   trap: number;
   win_probability: number | null;
@@ -26,6 +27,67 @@ interface PredictionEntry {
   edge: number | null;
   is_value: boolean | null;
   kelly: KellyInfo | null;
+  sp_decimal_at_pred?: number | null;
+}
+
+// Mirrors backend `_compute_kelly_stake` so live edits to the market-odds
+// input update the BET/PASS verdict instantly without a server round-trip.
+// Keep these defaults identical to the Python side.
+const KELLY_FRACTION = 0.25;
+const MIN_EDGE = 0.05;
+const MAX_STAKE_PCT = 0.05;
+
+function computeKelly(
+  winProb: number | null | undefined,
+  oddsDecimal: number | null | undefined,
+  bankroll: number,
+): KellyInfo {
+  if (winProb == null) return { bet: false, reason: 'no_probability' };
+  if (oddsDecimal == null || oddsDecimal <= 1.0) {
+    return { bet: false, reason: 'no_odds' };
+  }
+  const impliedProb = 1.0 / oddsDecimal;
+  const edge = winProb - impliedProb;
+  if (edge < MIN_EDGE) {
+    return {
+      bet: false,
+      reason: 'insufficient_edge',
+      edge: round4(edge),
+      implied_prob: round4(impliedProb),
+    };
+  }
+  const b = oddsDecimal - 1;
+  const fStar = (b * winProb - (1 - winProb)) / b;
+  const fractionalKelly = Math.max(0, fStar * KELLY_FRACTION);
+  const stakePct = Math.min(fractionalKelly, MAX_STAKE_PCT);
+  const stake = Math.round(bankroll * stakePct * 100) / 100;
+  return {
+    bet: true,
+    stake,
+    stake_pct: Math.round(stakePct * 10000) / 100,
+    full_kelly_pct: Math.round(fStar * 10000) / 100,
+    edge: round4(edge),
+    implied_prob: round4(impliedProb),
+    expected_value: round4(winProb * (oddsDecimal - 1) - (1 - winProb)),
+  };
+}
+
+function round4(x: number): number {
+  return Math.round(x * 10000) / 10000;
+}
+
+function verdictReason(
+  kelly: KellyInfo,
+  winProb: number | null | undefined,
+  odds: number | null | undefined,
+): string {
+  if (winProb == null) return 'no model probability';
+  if (odds == null || odds <= 1) return 'enter market odds →';
+  if (kelly.reason === 'insufficient_edge' && kelly.edge != null) {
+    const edgePct = (kelly.edge * 100).toFixed(1);
+    return `PASS — only ${edgePct}% edge (need 5%)`;
+  }
+  return 'PASS';
 }
 
 interface RacePrediction {
@@ -157,6 +219,62 @@ export default function Predictions() {
   const [historyAllModels, setHistoryAllModels] = useState(false);
   const [historyDateFrom, setHistoryDateFrom] = useState('');
   const [historyDateTo, setHistoryDateTo] = useState('');
+
+  // User-entered live odds per race_entry_id, used for the on-the-fly
+  // Kelly recompute in the Predict Race results table. Reset whenever a
+  // new race is loaded — values from a previous race shouldn't leak.
+  const [liveOdds, setLiveOdds] = useState<Record<number, string>>({});
+  const [savingOdds, setSavingOdds] = useState(false);
+
+  useEffect(() => {
+    if (!predictions) {
+      setLiveOdds({});
+      return;
+    }
+    const initial: Record<number, string> = {};
+    predictions.predictions.forEach((p) => {
+      if (p.race_entry_id == null) return;
+      // Seed from kelly.implied_prob (= 1/odds) if the saved Kelly already
+      // had a price, falling back to the SP snapshot — so users see the
+      // model's last-known odds and can edit from there.
+      const fromKelly = p.kelly?.implied_prob
+        ? 1 / p.kelly.implied_prob
+        : null;
+      const seed = fromKelly ?? p.sp_decimal_at_pred ?? null;
+      initial[p.race_entry_id] = seed ? seed.toFixed(2) : '';
+    });
+    setLiveOdds(initial);
+  }, [predictions?.race_id, predictions?.last_predicted_at]);
+
+  const handleSaveOdds = async () => {
+    if (!predictions || !selectedExp) return;
+    const oddsPayload = predictions.predictions
+      .filter((p) => p.race_entry_id != null)
+      .map((p) => {
+        const raw = liveOdds[p.race_entry_id!];
+        const parsed = raw ? parseFloat(raw) : null;
+        return {
+          race_entry_id: p.race_entry_id!,
+          decimal_odds: parsed && parsed > 1 ? parsed : null,
+        };
+      });
+    setSavingOdds(true);
+    try {
+      const res = await api.post<RacePrediction>(
+        `/predictions/race/${predictions.race_id}/odds`,
+        {
+          experiment_id: selectedExp,
+          bankroll,
+          odds: oddsPayload,
+        },
+      );
+      setPredictions(res.data);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to save odds');
+    } finally {
+      setSavingOdds(false);
+    }
+  };
 
   // Race picker state
   const [raceDate, setRaceDate] = useState(new Date().toISOString().split('T')[0]);
@@ -652,31 +770,54 @@ export default function Predictions() {
 
                   {/* Predictions table */}
                   <div className="bg-white rounded-lg shadow overflow-hidden overflow-x-auto">
-                    <table className="w-full text-sm text-left min-w-[560px]">
+                    <div className="px-4 pt-3 pb-2 border-b text-xs text-gray-500 flex items-center justify-between gap-2 flex-wrap">
+                      <span>
+                        Type the current market odds for each dog and the
+                        verdict updates instantly. Save to persist them.
+                      </span>
+                      <button
+                        onClick={handleSaveOdds}
+                        disabled={savingOdds}
+                        className="bg-blue-600 text-white px-3 py-1.5 rounded-md text-xs font-medium hover:bg-blue-700 disabled:opacity-50"
+                      >
+                        {savingOdds ? 'Saving...' : 'Save odds & bet plan'}
+                      </button>
+                    </div>
+                    <table className="w-full text-sm text-left min-w-[760px]">
                       <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
                         <tr>
                           <th className="px-3 sm:px-4 py-3">Rank</th>
                           <th className="px-3 sm:px-4 py-3">Trap</th>
                           <th className="px-3 sm:px-4 py-3">Dog</th>
                           <th className="px-3 sm:px-4 py-3">Win Prob</th>
+                          <th className="px-3 sm:px-4 py-3">Market Odds</th>
                           <th className="px-3 sm:px-4 py-3">Edge</th>
-                          <th className="px-3 sm:px-4 py-3">Bet?</th>
-                          <th className="px-3 sm:px-4 py-3">Stake</th>
+                          <th className="px-3 sm:px-4 py-3">Verdict</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y">
                         {predictions.predictions.map((p, i) => {
                           const isTopPick = i === 0;
-                          const kellyBet = p.kelly?.bet;
+                          const oddsStr = p.race_entry_id != null
+                            ? liveOdds[p.race_entry_id] ?? ''
+                            : '';
+                          const oddsNum = oddsStr ? parseFloat(oddsStr) : null;
+                          const liveKelly = computeKelly(
+                            p.win_probability,
+                            oddsNum && oddsNum > 1 ? oddsNum : null,
+                            bankroll,
+                          );
+                          const verdictBet = liveKelly.bet;
+                          const liveEdge = liveKelly.edge ?? null;
                           return (
                             <tr
                               key={i}
                               className={
-                                isTopPick && kellyBet
+                                isTopPick && verdictBet
                                   ? 'bg-green-50'
                                   : isTopPick
                                   ? 'bg-blue-50'
-                                  : kellyBet
+                                  : verdictBet
                                   ? 'bg-green-50/50'
                                   : 'hover:bg-gray-50'
                               }
@@ -687,26 +828,41 @@ export default function Predictions() {
                               <td className={`px-4 py-3 font-mono ${probColor(p.win_probability)}`}>
                                 {p.win_probability ? `${(p.win_probability * 100).toFixed(1)}%` : '-'}
                               </td>
-                              <td className="px-4 py-3 font-mono text-sm">
-                                {edgeDisplay(p.edge)}
-                              </td>
                               <td className="px-4 py-3">
-                                {p.is_value ? (
-                                  <span className="text-green-600 font-bold text-xs">VALUE</span>
-                                ) : (
-                                  <span className="text-gray-300 text-xs">-</span>
-                                )}
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  min="1.01"
+                                  inputMode="decimal"
+                                  value={oddsStr}
+                                  onChange={(e) => {
+                                    if (p.race_entry_id == null) return;
+                                    setLiveOdds((prev) => ({
+                                      ...prev,
+                                      [p.race_entry_id!]: e.target.value,
+                                    }));
+                                  }}
+                                  placeholder="e.g. 4.50"
+                                  className="w-20 border rounded-md px-2 py-1 text-sm font-mono"
+                                />
                               </td>
                               <td className="px-4 py-3 font-mono text-sm">
-                                {p.kelly?.bet ? (
-                                  <span className="text-green-700 font-medium">
-                                    ${p.kelly.stake?.toFixed(2)}
-                                    <span className="text-gray-400 text-xs ml-1">
-                                      ({p.kelly.stake_pct}%)
+                                {edgeDisplay(liveEdge)}
+                              </td>
+                              <td className="px-4 py-3 text-sm">
+                                {verdictBet ? (
+                                  <div>
+                                    <span className="inline-block bg-green-600 text-white px-2 py-0.5 rounded font-bold text-xs">
+                                      BET ${liveKelly.stake?.toFixed(2)}
                                     </span>
-                                  </span>
+                                    <span className="text-gray-400 text-xs ml-1">
+                                      ({liveKelly.stake_pct}% of bank)
+                                    </span>
+                                  </div>
                                 ) : (
-                                  <span className="text-gray-300">-</span>
+                                  <span className="text-gray-500 text-xs">
+                                    {verdictReason(liveKelly, p.win_probability, oddsNum)}
+                                  </span>
                                 )}
                               </td>
                             </tr>
@@ -716,53 +872,87 @@ export default function Predictions() {
                     </table>
                   </div>
 
-                  {/* Betting recommendation card */}
-                  {predictions.predictions[0]?.kelly?.bet && (
-                    <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-                      <h3 className="font-semibold text-green-800 mb-2">Betting Recommendation</h3>
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-                        <div>
-                          <p className="text-green-600 text-xs">Top Pick</p>
-                          <p className="font-semibold text-green-900">
-                            {predictions.predictions[0].dog_name} (Trap {predictions.predictions[0].trap})
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-green-600 text-xs">Suggested Stake</p>
-                          <p className="font-mono font-semibold text-green-900">
-                            ${predictions.predictions[0].kelly.stake?.toFixed(2)}
-                          </p>
-                          <p className="text-green-600 text-xs">
-                            {predictions.predictions[0].kelly.stake_pct}% of ${bankroll} bankroll
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-green-600 text-xs">Edge Over Market</p>
-                          <p className="font-mono font-semibold text-green-900">
-                            {((predictions.predictions[0].edge || 0) * 100).toFixed(1)}%
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-green-600 text-xs">Expected Value</p>
-                          <p className="font-mono font-semibold text-green-900">
-                            {predictions.predictions[0].kelly.expected_value != null
-                              ? `$${(predictions.predictions[0].kelly.expected_value * (predictions.predictions[0].kelly.stake || 1)).toFixed(2)}`
-                              : '-'}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  )}
+                  {/* Live betting recommendation — recomputes against
+                      whatever odds the user has typed in. */}
+                  {(() => {
+                    const liveBets = predictions.predictions
+                      .map((p) => {
+                        const oddsStr = p.race_entry_id != null
+                          ? liveOdds[p.race_entry_id]
+                          : '';
+                        const odds = oddsStr ? parseFloat(oddsStr) : null;
+                        const kelly = computeKelly(
+                          p.win_probability,
+                          odds && odds > 1 ? odds : null,
+                          bankroll,
+                        );
+                        return { p, kelly, odds };
+                      })
+                      .filter((x) => x.kelly.bet);
 
-                  {predictions.predictions[0] && !predictions.predictions[0]?.kelly?.bet && (
-                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                      <p className="text-gray-500 text-sm">
-                        No recommended bets for this race — insufficient edge over market odds.
-                        {predictions.predictions[0]?.confidence_tier === 'avoid' &&
-                          ' The model has low confidence in this race outcome.'}
-                      </p>
-                    </div>
-                  )}
+                    if (liveBets.length > 0) {
+                      const totalStake = liveBets.reduce(
+                        (sum, x) => sum + (x.kelly.stake || 0), 0,
+                      );
+                      const totalEv = liveBets.reduce(
+                        (sum, x) => sum + ((x.kelly.expected_value || 0) * (x.kelly.stake || 0)), 0,
+                      );
+                      return (
+                        <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                          <h3 className="font-semibold text-green-800 mb-2">
+                            Recommended Bets ({liveBets.length})
+                          </h3>
+                          <div className="space-y-2">
+                            {liveBets.map(({ p, kelly, odds }, idx) => (
+                              <div key={idx} className="flex items-center justify-between text-sm border-b border-green-100 last:border-0 pb-2 last:pb-0">
+                                <div>
+                                  <span className="font-semibold text-green-900">
+                                    {p.dog_name}
+                                  </span>
+                                  <span className="text-green-700 text-xs ml-2">
+                                    Trap {p.trap} · win {((p.win_probability || 0) * 100).toFixed(1)}% @ {odds?.toFixed(2)}
+                                  </span>
+                                </div>
+                                <div className="text-right">
+                                  <p className="font-mono font-semibold text-green-900">
+                                    ${kelly.stake?.toFixed(2)}
+                                  </p>
+                                  <p className="text-green-600 text-xs">
+                                    edge {((kelly.edge || 0) * 100).toFixed(1)}% · EV ${((kelly.expected_value || 0) * (kelly.stake || 0)).toFixed(2)}
+                                  </p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="mt-3 pt-2 border-t border-green-200 flex justify-between text-xs text-green-700">
+                            <span>
+                              Total stake: <span className="font-mono font-semibold">${totalStake.toFixed(2)}</span>
+                              {' '}({((totalStake / bankroll) * 100).toFixed(1)}% of ${bankroll} bankroll)
+                            </span>
+                            <span>
+                              Total EV: <span className="font-mono font-semibold">${totalEv.toFixed(2)}</span>
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    const anyOdds = predictions.predictions.some((p) => {
+                      const o = p.race_entry_id != null ? liveOdds[p.race_entry_id] : '';
+                      return o && parseFloat(o) > 1;
+                    });
+                    return (
+                      <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                        <p className="text-gray-600 text-sm">
+                          {anyOdds
+                            ? 'No recommended bets at the current odds — none clear the 5% edge threshold.'
+                            : 'Enter the market odds for each dog above to get a bet recommendation.'}
+                          {predictions.predictions[0]?.confidence_tier === 'avoid' &&
+                            ' The model also has low confidence in this race overall.'}
+                        </p>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>

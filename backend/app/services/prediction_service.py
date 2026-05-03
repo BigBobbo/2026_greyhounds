@@ -695,6 +695,93 @@ def predict_race(
     return predictions
 
 
+def compute_kelly_stake(
+    win_prob: float,
+    odds_decimal: float | None,
+    bankroll: float = 100.0,
+    kelly_fraction: float = 0.25,
+    min_edge: float = 0.05,
+) -> dict[str, Any]:
+    """Public wrapper around the Kelly calculation. Same math used at
+    prediction time — exposed so endpoints recomputing against
+    user-supplied odds stay consistent with the original recommendation."""
+    return _compute_kelly_stake(
+        win_prob, odds_decimal, bankroll=bankroll,
+        kelly_fraction=kelly_fraction, min_edge=min_edge,
+    )
+
+
+def recompute_kelly_for_saved_predictions(
+    db: Session,
+    experiment_id: int,
+    race_id: int,
+    odds_by_entry: dict[int, float | None],
+    bankroll: float,
+) -> list[dict[str, Any]]:
+    """Recompute Kelly + edge for saved predictions using user-supplied odds.
+
+    Updates the persisted Kelly snapshot in place — the user's odds become
+    the new authoritative bet recommendation for this race + experiment, so
+    the History view reflects what they actually decided to back.
+
+    Returns the updated predictions in the same shape as predict_race.
+    """
+    rows = (
+        db.query(Prediction, Dog.name.label("dog_name"), RaceEntry.trap)
+        .join(RaceEntry, Prediction.race_entry_id == RaceEntry.id)
+        .join(Dog, RaceEntry.dog_id == Dog.id)
+        .filter(
+            Prediction.experiment_id == experiment_id,
+            RaceEntry.race_id == race_id,
+        )
+        .all()
+    )
+    if not rows:
+        return []
+
+    now = datetime.utcnow()
+    updated: list[dict[str, Any]] = []
+    for pred, dog_name, trap in rows:
+        odds = odds_by_entry.get(pred.race_entry_id)
+        wp = pred.win_probability
+
+        if wp is not None:
+            kelly = compute_kelly_stake(wp, odds, bankroll=bankroll)
+        else:
+            kelly = {"bet": False, "reason": "no_probability"}
+
+        # Edge vs market — mirrors predict_race's logic so saved rows stay
+        # internally consistent (kelly.edge and pred.edge agree).
+        if wp is not None and odds is not None and odds > 1:
+            implied = 1.0 / odds
+            edge = round(wp - implied, 4)
+            is_value = wp > implied * 1.05
+        else:
+            edge = None
+            is_value = None
+
+        pred.kelly_bet = kelly.get("bet")
+        pred.kelly_stake = kelly.get("stake")
+        pred.kelly_stake_pct = kelly.get("stake_pct")
+        pred.kelly_full_pct = kelly.get("full_kelly_pct")
+        pred.kelly_expected_value = kelly.get("expected_value")
+        pred.kelly_implied_prob = kelly.get("implied_prob")
+        pred.kelly_reason = kelly.get("reason")
+        pred.edge = edge
+        pred.is_value = is_value
+        pred.bankroll_used = bankroll
+        # Note: sp_decimal_at_pred is the SP snapshot at original predict time;
+        # don't clobber it. The user's odds are recoverable from
+        # kelly_implied_prob (= 1 / odds) when the Kelly compute returns one.
+        pred.updated_at = now
+
+        updated.append(hydrate_saved_prediction(pred, dog_name, trap))
+
+    db.commit()
+    updated.sort(key=lambda p: p.get("win_probability") or 0, reverse=True)
+    return updated
+
+
 def hydrate_saved_prediction(
     pred: Prediction, dog_name: str | None, trap: int | None,
 ) -> dict[str, Any]:

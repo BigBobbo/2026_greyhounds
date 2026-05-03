@@ -33,6 +33,17 @@ class PredictRaceResponse(BaseModel):
     saved: int
 
 
+class OddsEntry(BaseModel):
+    race_entry_id: int
+    decimal_odds: float | None = None
+
+
+class UpdateOddsRequest(BaseModel):
+    experiment_id: int
+    bankroll: float = 100.0
+    odds: list[OddsEntry]
+
+
 @router.get("/", response_model=list[PredictionResponse])
 def list_predictions(
     experiment_id: int | None = None,
@@ -358,6 +369,76 @@ def get_saved_race_predictions(
         "distance_m": race.distance_m,
         "grade": race.grade,
         "predictions": preds,
+        "from_cache": True,
+        "last_predicted_at": last_predicted_at,
+    }
+
+
+@router.post("/race/{race_id}/odds")
+def update_predictions_with_odds(
+    race_id: int,
+    payload: UpdateOddsRequest,
+    db: Session = Depends(get_db),
+):
+    """Recompute Kelly + edge for saved predictions using user-supplied
+    market odds, then persist the updated bet recommendation.
+
+    Doesn't re-run the model — only the staking math changes. Useful when
+    the SP scraped at prediction time is stale or missing and the user has
+    a live price from the bookmaker.
+
+    Returns 404 if no predictions are saved for this (race, experiment).
+    """
+    from app.services.prediction_service import (
+        recompute_kelly_for_saved_predictions,
+    )
+
+    race = db.query(Race).filter(Race.id == race_id).first()
+    if not race:
+        raise HTTPException(status_code=404, detail="Race not found")
+
+    if payload.bankroll < 1:
+        raise HTTPException(status_code=422, detail="bankroll must be >= 1")
+
+    odds_by_entry: dict[int, float | None] = {}
+    for entry in payload.odds:
+        if entry.decimal_odds is not None and entry.decimal_odds <= 1.0:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"decimal_odds for entry {entry.race_entry_id} must be > 1.0"
+                ),
+            )
+        odds_by_entry[entry.race_entry_id] = entry.decimal_odds
+
+    updated = recompute_kelly_for_saved_predictions(
+        db=db,
+        experiment_id=payload.experiment_id,
+        race_id=race_id,
+        odds_by_entry=odds_by_entry,
+        bankroll=payload.bankroll,
+    )
+    if not updated:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No saved predictions for race {race_id} with experiment "
+                f"{payload.experiment_id}. Run a prediction first."
+            ),
+        )
+
+    track = db.query(Track).filter(Track.id == race.track_id).first()
+    timestamps = [p.get("updated_at") for p in updated if p.get("updated_at")]
+    last_predicted_at = max(timestamps) if timestamps else None
+
+    return {
+        "race_id": race_id,
+        "race_date": str(race.race_date),
+        "race_number": race.race_number,
+        "track_name": track.name if track else None,
+        "distance_m": race.distance_m,
+        "grade": race.grade,
+        "predictions": updated,
         "from_cache": True,
         "last_predicted_at": last_predicted_at,
     }

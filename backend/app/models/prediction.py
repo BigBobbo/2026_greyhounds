@@ -8,6 +8,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
 )
 from app.database import Base
@@ -25,6 +26,17 @@ class Prediction(Base):
     predicted_position = Column(Float)
     predicted_time = Column(Float)
     confidence = Column(Float)
+
+    # Multi-position probabilities derived from the ordering service.
+    # place = P(finish 1st or 2nd), show = P(finish 1st, 2nd, or 3rd).
+    place_probability = Column(Float, nullable=True)
+    show_probability = Column(Float, nullable=True)
+
+    # JSON-encoded cached top forecast/trio combos for this race. Stored
+    # on every prediction row in the race so a single-row API fetch can
+    # render the combos panel without a separate per-race query.
+    forecast_combos_json = Column(Text, nullable=True)
+    trio_combos_json = Column(Text, nullable=True)
 
     # Race-level confidence breakdown (replicates what predict_race returns
     # so saved predictions can be replayed without recomputing the model).

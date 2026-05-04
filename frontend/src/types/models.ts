@@ -102,9 +102,53 @@ export interface Prediction {
   experiment_id: number;
   race_entry_id: number;
   win_probability: number | null;
+  place_probability: number | null;
+  show_probability: number | null;
   predicted_position: number | null;
   predicted_time: number | null;
   confidence: number | null;
   dog_name: string | null;
   trap: number | null;
+}
+
+export interface ForecastCombo {
+  first_entry_id: number;
+  second_entry_id: number;
+  probability: number;
+  first_dog?: string | null;
+  first_trap?: number | null;
+  second_dog?: string | null;
+  second_trap?: number | null;
+}
+
+export interface TrioCombo {
+  first_entry_id: number;
+  second_entry_id: number;
+  third_entry_id: number;
+  probability: number;
+  first_dog?: string | null;
+  first_trap?: number | null;
+  second_dog?: string | null;
+  second_trap?: number | null;
+  third_dog?: string | null;
+  third_trap?: number | null;
+}
+
+export interface RaceCombosResponse {
+  race_id: number;
+  race_date: string;
+  race_number: number | null;
+  track_name: string | null;
+  distance_m: number | null;
+  grade: string | null;
+  experiment_id: number;
+  place_show: Array<{
+    race_entry_id: number;
+    dog_name: string | null;
+    trap: number | null;
+    place_probability: number | null;
+    show_probability: number | null;
+  }>;
+  forecast_combos: ForecastCombo[];
+  trio_combos: TrioCombo[];
 }

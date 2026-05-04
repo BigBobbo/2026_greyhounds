@@ -70,6 +70,8 @@ class PredictionResponse(BaseModel):
     experiment_id: int
     race_entry_id: int
     win_probability: float | None = None
+    place_probability: float | None = None
+    show_probability: float | None = None
     predicted_position: float | None = None
     predicted_time: float | None = None
     confidence: float | None = None

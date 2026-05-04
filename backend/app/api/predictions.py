@@ -44,6 +44,22 @@ class UpdateOddsRequest(BaseModel):
     odds: list[OddsEntry]
 
 
+class ComboKellyRequest(BaseModel):
+    """Score a forecast/trio combo bet against a user-supplied dividend.
+
+    The model's combo probability is taken from the saved prediction
+    cache (or recomputed from the win-prob layer if `refresh=true`); the
+    user supplies the bookmaker/Tote dividend they're being offered.
+    """
+
+    experiment_id: int
+    race_id: int
+    bet_type: str  # "forecast" or "trio"
+    legs: list[int]  # ordered race_entry_ids: [1st, 2nd] or [1st, 2nd, 3rd]
+    dividend_decimal: float
+    bankroll: float = 100.0
+
+
 @router.get("/", response_model=list[PredictionResponse])
 def list_predictions(
     experiment_id: int | None = None,
@@ -371,6 +387,307 @@ def get_saved_race_predictions(
         "predictions": preds,
         "from_cache": True,
         "last_predicted_at": last_predicted_at,
+    }
+
+
+@router.get("/race/{race_id}/combos")
+def get_race_combos(
+    race_id: int,
+    experiment_id: int,
+    bankroll: float = Query(default=100.0, ge=1),
+    refresh: bool = Query(
+        default=False,
+        description="If true, recompute the ordering layer even if predictions are cached",
+    ),
+    forecast_limit: int = Query(default=10, ge=1, le=60),
+    trio_limit: int = Query(default=10, ge=1, le=120),
+    db: Session = Depends(get_db),
+):
+    """Return ranked forecast (1st+2nd) and trio (1st+2nd+3rd) combos for a race.
+
+    Pulls per-dog place / show probabilities and the top forecast / trio
+    combinations from the cached predictions row when available; falls
+    back to recomputing the ordering layer from the saved win
+    probabilities when the cache is empty or the caller wants a fresh
+    Monte Carlo run.
+
+    The endpoint deliberately does NOT re-run the full feature pipeline
+    or the model — it only re-samples the ordering layer on top of the
+    already-stored win probabilities, so it's fast (millisecond range)
+    and cannot drift from the saved win-bet recommendations.
+    """
+    import json
+
+    from app.services.prediction_service import (
+        get_saved_predictions_for_race,
+        predict_race,
+        save_predictions,
+    )
+    from app.services.race_ordering import compute_ordering
+
+    race = db.query(Race).filter(Race.id == race_id).first()
+    if not race:
+        raise HTTPException(status_code=404, detail="Race not found")
+
+    cached = (
+        []
+        if refresh
+        else get_saved_predictions_for_race(db, experiment_id, race_id)
+    )
+
+    if not cached:
+        # No saved predictions for this race+experiment yet — generate
+        # them now so the combos layer has win probabilities to work
+        # from. Mirrors the lazy behaviour of `/race/{id}` so the UI can
+        # call combos directly without first hitting predict.
+        try:
+            preds = predict_race(db, experiment_id, race_id, bankroll=bankroll)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not preds:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No predictions could be generated for race {race_id}",
+            )
+        save_predictions(db, preds)
+        cached = preds
+
+    # Build the entry-id -> dog/trap lookup the UI uses to render combos.
+    entry_meta = {
+        p["race_entry_id"]: {"dog_name": p.get("dog_name"), "trap": p.get("trap")}
+        for p in cached
+        if p.get("race_entry_id") is not None
+    }
+
+    # Try to read the cached combo lists straight off the prediction row
+    # (cheaper than recomputing). Every row in the race carries the same
+    # JSON, so we just take it from the first entry that has it.
+    forecast_combos: list[dict[str, Any]] = []
+    trio_combos: list[dict[str, Any]] = []
+    place_show: dict[int, dict[str, float | None]] = {}
+
+    for p in cached:
+        place_show[p["race_entry_id"]] = {
+            "place_probability": p.get("place_probability"),
+            "show_probability": p.get("show_probability"),
+        }
+        if not forecast_combos and p.get("forecast_combos"):
+            forecast_combos = p["forecast_combos"]
+        if not trio_combos and p.get("trio_combos"):
+            trio_combos = p["trio_combos"]
+
+    # If the cache is missing combos (e.g. a prediction generated before
+    # this feature shipped) recompute them on the fly from the saved win
+    # probs. We don't persist here — the next predict_race call will
+    # populate the cache.
+    if not forecast_combos or not trio_combos or refresh:
+        win_probs_by_entry: dict[int, float] = {}
+        for p in cached:
+            wp = p.get("win_probability")
+            if wp is not None and p.get("race_entry_id") is not None:
+                win_probs_by_entry[int(p["race_entry_id"])] = float(wp)
+
+        if win_probs_by_entry:
+            entry_ids_ordered = list(win_probs_by_entry.keys())
+            ordering = compute_ordering(
+                entry_ids=entry_ids_ordered,
+                win_probs=[win_probs_by_entry[e] for e in entry_ids_ordered],
+                forecast_limit=forecast_limit,
+                trio_limit=trio_limit,
+                seed=int(race_id),
+            )
+            forecast_combos = [
+                {
+                    "first_entry_id": c.first_entry_id,
+                    "second_entry_id": c.second_entry_id,
+                    "probability": c.probability,
+                }
+                for c in ordering.forecast
+            ]
+            trio_combos = [
+                {
+                    "first_entry_id": c.first_entry_id,
+                    "second_entry_id": c.second_entry_id,
+                    "third_entry_id": c.third_entry_id,
+                    "probability": c.probability,
+                }
+                for c in ordering.trio
+            ]
+            for eid in ordering.entry_ids:
+                place_show.setdefault(eid, {})
+                place_show[eid]["place_probability"] = ordering.place_prob.get(eid)
+                place_show[eid]["show_probability"] = ordering.show_prob.get(eid)
+
+    # Trim to the requested limits and decorate with dog/trap labels for
+    # convenient front-end rendering.
+    def _decorate_forecast(c: dict[str, Any]) -> dict[str, Any]:
+        first = entry_meta.get(c["first_entry_id"], {})
+        second = entry_meta.get(c["second_entry_id"], {})
+        return {
+            **c,
+            "first_dog": first.get("dog_name"),
+            "first_trap": first.get("trap"),
+            "second_dog": second.get("dog_name"),
+            "second_trap": second.get("trap"),
+        }
+
+    def _decorate_trio(c: dict[str, Any]) -> dict[str, Any]:
+        first = entry_meta.get(c["first_entry_id"], {})
+        second = entry_meta.get(c["second_entry_id"], {})
+        third = entry_meta.get(c["third_entry_id"], {})
+        return {
+            **c,
+            "first_dog": first.get("dog_name"),
+            "first_trap": first.get("trap"),
+            "second_dog": second.get("dog_name"),
+            "second_trap": second.get("trap"),
+            "third_dog": third.get("dog_name"),
+            "third_trap": third.get("trap"),
+        }
+
+    forecast_combos = [_decorate_forecast(c) for c in forecast_combos[:forecast_limit]]
+    trio_combos = [_decorate_trio(c) for c in trio_combos[:trio_limit]]
+
+    track = db.query(Track).filter(Track.id == race.track_id).first()
+    return {
+        "race_id": race_id,
+        "race_date": str(race.race_date),
+        "race_number": race.race_number,
+        "track_name": track.name if track else None,
+        "distance_m": race.distance_m,
+        "grade": race.grade,
+        "experiment_id": experiment_id,
+        "place_show": [
+            {
+                "race_entry_id": eid,
+                "dog_name": entry_meta.get(eid, {}).get("dog_name"),
+                "trap": entry_meta.get(eid, {}).get("trap"),
+                "place_probability": probs.get("place_probability"),
+                "show_probability": probs.get("show_probability"),
+            }
+            for eid, probs in place_show.items()
+        ],
+        "forecast_combos": forecast_combos,
+        "trio_combos": trio_combos,
+    }
+
+
+@router.post("/race/{race_id}/combo-kelly")
+def score_combo_bet(race_id: int, payload: ComboKellyRequest, db: Session = Depends(get_db)):
+    """Stake a forecast/trio combo against a user-supplied dividend.
+
+    Returns the model's combo probability, the implied probability from
+    the dividend, the edge, and a (conservative) Kelly stake recommendation.
+    Used by the UI's combo betting form so the user can paste in a Tote
+    dividend and instantly see whether the model considers it a value bet.
+    """
+    from app.services.prediction_service import get_saved_predictions_for_race
+    from app.services.race_ordering import (
+        compute_combo_kelly,
+        compute_ordering,
+    )
+
+    if payload.bet_type not in ("forecast", "trio"):
+        raise HTTPException(
+            status_code=422,
+            detail="bet_type must be 'forecast' or 'trio'",
+        )
+
+    expected_legs = 2 if payload.bet_type == "forecast" else 3
+    if len(payload.legs) != expected_legs:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{payload.bet_type} bets need {expected_legs} legs, "
+                f"got {len(payload.legs)}"
+            ),
+        )
+
+    if len(set(payload.legs)) != len(payload.legs):
+        raise HTTPException(
+            status_code=422, detail="legs must be distinct race_entry_ids",
+        )
+
+    if payload.dividend_decimal <= 1.0:
+        raise HTTPException(
+            status_code=422, detail="dividend_decimal must be > 1.0",
+        )
+
+    cached = get_saved_predictions_for_race(db, payload.experiment_id, race_id)
+    if not cached:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No saved predictions for race {race_id} with experiment "
+                f"{payload.experiment_id}. Run a prediction first."
+            ),
+        )
+
+    # Validate the requested legs are actually in this race.
+    valid_entry_ids = {p["race_entry_id"] for p in cached}
+    for leg in payload.legs:
+        if leg not in valid_entry_ids:
+            raise HTTPException(
+                status_code=422,
+                detail=f"race_entry_id {leg} is not in race {race_id}",
+            )
+
+    # Recompute the ordering layer on the saved win probs so combo
+    # probability lookup doesn't require parsing the JSON cache and
+    # gives the same answer as the /combos endpoint.
+    win_probs_by_entry = {
+        int(p["race_entry_id"]): float(p["win_probability"])
+        for p in cached
+        if p.get("win_probability") is not None
+    }
+    if not win_probs_by_entry:
+        raise HTTPException(
+            status_code=400,
+            detail="Saved predictions have no win probabilities to expand",
+        )
+
+    entry_ids_ordered = list(win_probs_by_entry.keys())
+    ordering = compute_ordering(
+        entry_ids=entry_ids_ordered,
+        win_probs=[win_probs_by_entry[e] for e in entry_ids_ordered],
+        forecast_limit=len(entry_ids_ordered) ** 2,
+        trio_limit=len(entry_ids_ordered) ** 3,
+        seed=int(race_id),
+    )
+
+    combo_probability = 0.0
+    if payload.bet_type == "forecast":
+        for c in ordering.forecast:
+            if (
+                c.first_entry_id == payload.legs[0]
+                and c.second_entry_id == payload.legs[1]
+            ):
+                combo_probability = c.probability
+                break
+    else:  # trio
+        for c in ordering.trio:
+            if (
+                c.first_entry_id == payload.legs[0]
+                and c.second_entry_id == payload.legs[1]
+                and c.third_entry_id == payload.legs[2]
+            ):
+                combo_probability = c.probability
+                break
+
+    kelly = compute_combo_kelly(
+        combo_probability=combo_probability,
+        combo_odds_decimal=payload.dividend_decimal,
+        bankroll=payload.bankroll,
+    )
+
+    return {
+        "race_id": race_id,
+        "experiment_id": payload.experiment_id,
+        "bet_type": payload.bet_type,
+        "legs": payload.legs,
+        "combo_probability": round(combo_probability, 6),
+        "dividend_decimal": payload.dividend_decimal,
+        "kelly": kelly,
     }
 
 

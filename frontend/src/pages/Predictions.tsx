@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react';
 import api from '../api/client';
-import type { Experiment, Track } from '../types/models';
+import type {
+  Experiment,
+  ForecastCombo,
+  Track,
+  TrioCombo,
+} from '../types/models';
 
 interface KellyInfo {
   bet: boolean;
@@ -18,6 +23,8 @@ interface PredictionEntry {
   dog_name: string;
   trap: number;
   win_probability: number | null;
+  place_probability?: number | null;
+  show_probability?: number | null;
   predicted_position: number | null;
   predicted_time: number | null;
   confidence: number | null;
@@ -28,6 +35,8 @@ interface PredictionEntry {
   is_value: boolean | null;
   kelly: KellyInfo | null;
   sp_decimal_at_pred?: number | null;
+  forecast_combos?: ForecastCombo[];
+  trio_combos?: TrioCombo[];
 }
 
 // Mirrors backend `_compute_kelly_stake` so live edits to the market-odds
@@ -783,13 +792,15 @@ export default function Predictions() {
                         {savingOdds ? 'Saving...' : 'Save odds & bet plan'}
                       </button>
                     </div>
-                    <table className="w-full text-sm text-left min-w-[760px]">
+                    <table className="w-full text-sm text-left min-w-[860px]">
                       <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
                         <tr>
                           <th className="px-3 sm:px-4 py-3">Rank</th>
                           <th className="px-3 sm:px-4 py-3">Trap</th>
                           <th className="px-3 sm:px-4 py-3">Dog</th>
-                          <th className="px-3 sm:px-4 py-3">Win Prob</th>
+                          <th className="px-3 sm:px-4 py-3">Win</th>
+                          <th className="px-3 sm:px-4 py-3" title="P(finish 1st or 2nd)">Place</th>
+                          <th className="px-3 sm:px-4 py-3" title="P(finish 1st, 2nd, or 3rd)">Show</th>
                           <th className="px-3 sm:px-4 py-3">Market Odds</th>
                           <th className="px-3 sm:px-4 py-3">Edge</th>
                           <th className="px-3 sm:px-4 py-3">Verdict</th>
@@ -827,6 +838,16 @@ export default function Predictions() {
                               <td className="px-4 py-3 font-medium">{p.dog_name}</td>
                               <td className={`px-4 py-3 font-mono ${probColor(p.win_probability)}`}>
                                 {p.win_probability ? `${(p.win_probability * 100).toFixed(1)}%` : '-'}
+                              </td>
+                              <td className="px-4 py-3 font-mono text-gray-700">
+                                {p.place_probability != null
+                                  ? `${(p.place_probability * 100).toFixed(1)}%`
+                                  : '-'}
+                              </td>
+                              <td className="px-4 py-3 font-mono text-gray-700">
+                                {p.show_probability != null
+                                  ? `${(p.show_probability * 100).toFixed(1)}%`
+                                  : '-'}
                               </td>
                               <td className="px-4 py-3">
                                 <input
@@ -950,6 +971,130 @@ export default function Predictions() {
                           {predictions.predictions[0]?.confidence_tier === 'avoid' &&
                             ' The model also has low confidence in this race overall.'}
                         </p>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Forecast (1st+2nd) and Trio (1st+2nd+3rd) combos —
+                      Henery-discounted Plackett-Luce expansion of the
+                      win-prob layer. Probabilities here are model
+                      estimates only; pair them against Tote / Betfair
+                      F/C dividends in your bookmaker before staking. */}
+                  {(() => {
+                    const top = predictions.predictions[0];
+                    const fc = top?.forecast_combos || [];
+                    const trio = top?.trio_combos || [];
+                    if (fc.length === 0 && trio.length === 0) return null;
+
+                    const fmtPct = (p: number) => `${(p * 100).toFixed(2)}%`;
+                    const fmtFairOdds = (p: number) =>
+                      p > 0 ? (1 / p).toFixed(2) : '-';
+
+                    return (
+                      <div className="bg-white rounded-lg shadow p-4 space-y-4">
+                        <div>
+                          <h3 className="font-semibold text-gray-800 mb-1">
+                            Forecast & Trio combos
+                          </h3>
+                          <p className="text-xs text-gray-500">
+                            Top 1st+2nd and 1st+2nd+3rd combinations from
+                            the ordering model. "Fair odds" is 1 /
+                            probability — your bookmaker's dividend
+                            needs to clear that (plus margin) for the
+                            bet to have positive EV.
+                          </p>
+                        </div>
+
+                        {fc.length > 0 && (
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-700 mb-1">
+                              Top forecasts (1st &amp; 2nd)
+                            </h4>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-xs text-left">
+                                <thead className="bg-gray-50 text-gray-500 uppercase">
+                                  <tr>
+                                    <th className="px-2 py-1.5">#</th>
+                                    <th className="px-2 py-1.5">1st</th>
+                                    <th className="px-2 py-1.5">2nd</th>
+                                    <th className="px-2 py-1.5 text-right">P</th>
+                                    <th className="px-2 py-1.5 text-right">Fair odds</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y">
+                                  {fc.slice(0, 10).map((c, i) => (
+                                    <tr key={i} className="hover:bg-gray-50">
+                                      <td className="px-2 py-1.5 text-gray-400">{i + 1}</td>
+                                      <td className="px-2 py-1.5">
+                                        <span className="font-medium">{c.first_dog || `entry ${c.first_entry_id}`}</span>
+                                        {c.first_trap != null && (
+                                          <span className="text-gray-400 ml-1">(T{c.first_trap})</span>
+                                        )}
+                                      </td>
+                                      <td className="px-2 py-1.5">
+                                        <span className="font-medium">{c.second_dog || `entry ${c.second_entry_id}`}</span>
+                                        {c.second_trap != null && (
+                                          <span className="text-gray-400 ml-1">(T{c.second_trap})</span>
+                                        )}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-right font-mono">{fmtPct(c.probability)}</td>
+                                      <td className="px-2 py-1.5 text-right font-mono text-gray-600">{fmtFairOdds(c.probability)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {trio.length > 0 && (
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-700 mb-1">
+                              Top trios (1st, 2nd &amp; 3rd)
+                            </h4>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-xs text-left">
+                                <thead className="bg-gray-50 text-gray-500 uppercase">
+                                  <tr>
+                                    <th className="px-2 py-1.5">#</th>
+                                    <th className="px-2 py-1.5">1st</th>
+                                    <th className="px-2 py-1.5">2nd</th>
+                                    <th className="px-2 py-1.5">3rd</th>
+                                    <th className="px-2 py-1.5 text-right">P</th>
+                                    <th className="px-2 py-1.5 text-right">Fair odds</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y">
+                                  {trio.slice(0, 10).map((c, i) => (
+                                    <tr key={i} className="hover:bg-gray-50">
+                                      <td className="px-2 py-1.5 text-gray-400">{i + 1}</td>
+                                      <td className="px-2 py-1.5">
+                                        <span className="font-medium">{c.first_dog || `entry ${c.first_entry_id}`}</span>
+                                        {c.first_trap != null && (
+                                          <span className="text-gray-400 ml-1">(T{c.first_trap})</span>
+                                        )}
+                                      </td>
+                                      <td className="px-2 py-1.5">
+                                        <span className="font-medium">{c.second_dog || `entry ${c.second_entry_id}`}</span>
+                                        {c.second_trap != null && (
+                                          <span className="text-gray-400 ml-1">(T{c.second_trap})</span>
+                                        )}
+                                      </td>
+                                      <td className="px-2 py-1.5">
+                                        <span className="font-medium">{c.third_dog || `entry ${c.third_entry_id}`}</span>
+                                        {c.third_trap != null && (
+                                          <span className="text-gray-400 ml-1">(T{c.third_trap})</span>
+                                        )}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-right font-mono">{fmtPct(c.probability)}</td>
+                                      <td className="px-2 py-1.5 text-right font-mono text-gray-600">{fmtFairOdds(c.probability)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     );
                   })()}

@@ -6,10 +6,13 @@ Prediction service: generate predictions for races using a trained model.
 3. Generate predictions (win probability, position, time)
 4. Compute confidence metrics (entropy, margin, edge)
 5. Normalize win probabilities within each race via softmax
-6. Compute bankroll-aware staking recommendations (Kelly criterion)
-7. Save predictions to DB
+6. Compute place/show probabilities and forecast/trio combos via the
+   Henery-discounted Plackett-Luce ordering service
+7. Compute bankroll-aware staking recommendations (Kelly criterion)
+8. Save predictions to DB
 """
 
+import json
 import logging
 import math
 import os
@@ -30,6 +33,11 @@ from app.models.dog import Dog
 from app.models.track import Track
 from app.services.feature_engine import get_dog_history, get_race_context, compute_visual_feature
 from app.services.feature_sandbox import execute_feature_code
+from app.services.race_ordering import (
+    OrderingResult,
+    compute_combo_kelly,
+    compute_ordering,
+)
 from app.models.feature_definition import FeatureDefinition
 from ml.feature_availability import (
     PredictionDataError,
@@ -613,6 +621,66 @@ def predict_race(
     if raw_scores is not None:
         eid_to_raw_score = {int(eid): float(s) for eid, s in zip(X.index, raw_scores)}
 
+    # Forecast / trio layer: take the calibrated win probabilities and
+    # expand them into ordered multi-position probabilities via the
+    # Henery-discounted Plackett-Luce sampler in `race_ordering`. Cheap
+    # — runs in a few milliseconds for a 6-dog field — and reuses the
+    # already-trained win model rather than asking for a second model
+    # head. Combos are deterministic per race (seeded by race_id) so
+    # repeated calls return the same numbers.
+    ordering: OrderingResult | None = None
+    if eid_to_win_prob:
+        ordering_entry_ids = [int(eid) for eid in X.index]
+        ordering_win_probs = [
+            float(eid_to_win_prob[eid]) for eid in ordering_entry_ids
+        ]
+        try:
+            ordering = compute_ordering(
+                entry_ids=ordering_entry_ids,
+                win_probs=ordering_win_probs,
+                seed=int(race_id) if race_id is not None else None,
+            )
+        except Exception as e:
+            # Never let the ordering layer kill a prediction request — if
+            # the Monte Carlo blows up we just fall back to win-only
+            # output and log the failure for diagnosis.
+            logger.warning(
+                "predict_race(%s): ordering layer failed: %s — falling "
+                "back to win-only predictions",
+                race_id, e,
+            )
+            ordering = None
+
+    # Pre-serialize the ordered combo lists once for storage — every dog
+    # in the race gets the same JSON cached on its prediction row so a
+    # single-row API fetch can render the combos panel.
+    forecast_combos_payload: list[dict[str, Any]] = []
+    trio_combos_payload: list[dict[str, Any]] = []
+    forecast_combos_json: str | None = None
+    trio_combos_json: str | None = None
+    if ordering is not None:
+        forecast_combos_payload = [
+            {
+                "first_entry_id": c.first_entry_id,
+                "second_entry_id": c.second_entry_id,
+                "probability": c.probability,
+            }
+            for c in ordering.forecast
+        ]
+        trio_combos_payload = [
+            {
+                "first_entry_id": c.first_entry_id,
+                "second_entry_id": c.second_entry_id,
+                "third_entry_id": c.third_entry_id,
+                "probability": c.probability,
+            }
+            for c in ordering.trio
+        ]
+        if forecast_combos_payload:
+            forecast_combos_json = json.dumps(forecast_combos_payload)
+        if trio_combos_payload:
+            trio_combos_json = json.dumps(trio_combos_payload)
+
     # Build prediction list
     predictions = []
     for entry_row, entry_id in zip(entries, entry_ids):
@@ -636,6 +704,15 @@ def predict_race(
             "data_completeness": completeness,
             "bankroll_used": bankroll,
             "sp_decimal_at_pred": entry.sp_decimal,
+            # Forecast/trio outputs default to None and only get filled
+            # in below for ranking experiments where the win-prob layer
+            # produced a real probability for this dog.
+            "place_probability": None,
+            "show_probability": None,
+            "forecast_combos": forecast_combos_payload,
+            "trio_combos": trio_combos_payload,
+            "forecast_combos_json": forecast_combos_json,
+            "trio_combos_json": trio_combos_json,
         }
 
         if is_ranking or experiment.target == "win_prob":
@@ -643,6 +720,18 @@ def predict_race(
             pred_data["win_probability"] = win_prob
             pred_data["predicted_position"] = None
             pred_data["predicted_time"] = None
+
+            # Per-dog place/show probabilities from the ordering layer.
+            # Ordering is keyed by entry_id so a dog dropped from the
+            # feature matrix simply gets None here rather than an
+            # off-by-one from another dog's draw.
+            if ordering is not None:
+                pred_data["place_probability"] = ordering.place_prob.get(
+                    int(entry_id)
+                )
+                pred_data["show_probability"] = ordering.show_prob.get(
+                    int(entry_id)
+                )
 
             # Confidence score for this dog (race-level confidence * individual probability)
             if race_confidence and win_prob is not None:
@@ -809,12 +898,27 @@ def hydrate_saved_prediction(
     if pred.edge is not None:
         kelly["edge"] = pred.edge
 
+    forecast_combos: list[dict[str, Any]] = []
+    trio_combos: list[dict[str, Any]] = []
+    if pred.forecast_combos_json:
+        try:
+            forecast_combos = json.loads(pred.forecast_combos_json)
+        except (json.JSONDecodeError, TypeError):
+            forecast_combos = []
+    if pred.trio_combos_json:
+        try:
+            trio_combos = json.loads(pred.trio_combos_json)
+        except (json.JSONDecodeError, TypeError):
+            trio_combos = []
+
     return {
         "race_entry_id": pred.race_entry_id,
         "dog_name": dog_name,
         "trap": trap,
         "experiment_id": pred.experiment_id,
         "win_probability": pred.win_probability,
+        "place_probability": pred.place_probability,
+        "show_probability": pred.show_probability,
         "predicted_position": pred.predicted_position,
         "predicted_time": pred.predicted_time,
         "confidence": pred.confidence,
@@ -827,6 +931,8 @@ def hydrate_saved_prediction(
         "data_completeness": pred.data_completeness,
         "bankroll_used": pred.bankroll_used,
         "sp_decimal_at_pred": pred.sp_decimal_at_pred,
+        "forecast_combos": forecast_combos,
+        "trio_combos": trio_combos,
         "created_at": pred.created_at.isoformat() if pred.created_at else None,
         "updated_at": pred.updated_at.isoformat() if pred.updated_at else None,
     }
@@ -865,6 +971,8 @@ def _flatten_prediction_for_storage(pred: dict[str, Any]) -> dict[str, Any]:
     kelly = pred.get("kelly") or {}
     return {
         "win_probability": pred.get("win_probability"),
+        "place_probability": pred.get("place_probability"),
+        "show_probability": pred.get("show_probability"),
         "predicted_position": pred.get("predicted_position"),
         "predicted_time": pred.get("predicted_time"),
         "confidence": pred.get("confidence"),
@@ -883,6 +991,11 @@ def _flatten_prediction_for_storage(pred: dict[str, Any]) -> dict[str, Any]:
         "data_completeness": pred.get("data_completeness"),
         "bankroll_used": pred.get("bankroll_used"),
         "sp_decimal_at_pred": pred.get("sp_decimal_at_pred"),
+        # Combo cache: full forecast/trio JSON repeated on each row.
+        # Storage cost is small (a 6-dog race has 30 forecasts and 120
+        # trios at most) and the duplication keeps the read path simple.
+        "forecast_combos_json": pred.get("forecast_combos_json"),
+        "trio_combos_json": pred.get("trio_combos_json"),
     }
 
 

@@ -10,6 +10,7 @@ from app.models.experiment import Experiment
 from app.models.prediction import Prediction
 from app.models.scrape_log import ScrapeLog
 from app.models.bankroll import BankrollConfig, BetRecord
+from app.models.schedule import ModelSchedule, ScheduledPredictionRun
 
 __all__ = [
     "Track",
@@ -25,4 +26,6 @@ __all__ = [
     "ScrapeLog",
     "BankrollConfig",
     "BetRecord",
+    "ModelSchedule",
+    "ScheduledPredictionRun",
 ]

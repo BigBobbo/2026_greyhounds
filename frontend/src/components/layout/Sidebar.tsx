@@ -8,6 +8,7 @@ const navItems = [
   { to: '/training', label: 'Training Lab', icon: '~' },
   { to: '/predictions', label: 'Predictions', icon: '~' },
   { to: '/bankroll', label: 'Bankroll', icon: '~' },
+  { to: '/schedule', label: 'Schedule', icon: '~' },
   { to: '/scraping', label: 'Scraping', icon: '~' },
 ];
 

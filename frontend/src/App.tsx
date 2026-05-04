@@ -12,6 +12,7 @@ import ExperimentDetail from './pages/ExperimentDetail';
 import Predictions from './pages/Predictions';
 import ScrapingStatus from './pages/ScrapingStatus';
 import BankrollDashboard from './pages/BankrollDashboard';
+import Schedule from './pages/Schedule';
 
 const queryClient = new QueryClient();
 
@@ -31,6 +32,7 @@ function App() {
             <Route path="/training/:id" element={<ExperimentDetail />} />
             <Route path="/predictions" element={<Predictions />} />
             <Route path="/bankroll" element={<BankrollDashboard />} />
+            <Route path="/schedule" element={<Schedule />} />
             <Route path="/scraping" element={<ScrapingStatus />} />
           </Route>
         </Routes>

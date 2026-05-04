@@ -37,10 +37,23 @@ class PlaceBetRequest(BaseModel):
     confidence_tier: str | None = None
     stake: float
     stake_method: str = "kelly"
+    # Combo betting (optional). When `bet_type` is "forecast" or "trio",
+    # `legs` is the ordered list of race_entry_ids backing the bet
+    # ([1st, 2nd] or [1st, 2nd, 3rd]) and `combo_probability` is the
+    # model's combo P. The single `race_entry_id` field above stays as
+    # the primary leg so the existing race-detail join logic still works.
+    bet_type: str = "win"
+    legs: list[int] | None = None
+    combo_probability: float | None = None
 
 
 class SettleBetRequest(BaseModel):
-    actual_position: int
+    # Win/place/show: a single integer is enough.
+    actual_position: int | None = None
+    # Forecast/trio: the ordered list of finishing race_entry_ids the
+    # race actually produced. The handler compares this against the
+    # bet's `legs_json` to decide whether the combo hit.
+    actual_finishing_order: list[int] | None = None
 
 
 # --- Config ---
@@ -137,6 +150,39 @@ def place_bet(bet: PlaceBetRequest, db: Session = Depends(get_db)):
 
     implied_prob = (1.0 / bet.odds_decimal) if bet.odds_decimal and bet.odds_decimal > 1 else None
 
+    # Combo bets: validate the legs list shape and serialise it for
+    # storage. Single-dog bets ("win", "place", "show") leave legs null.
+    bet_type = bet.bet_type or "win"
+    legs_json: str | None = None
+    if bet_type in ("forecast", "trio"):
+        if not bet.legs:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{bet_type} bets require a `legs` list",
+            )
+        expected = 2 if bet_type == "forecast" else 3
+        if len(bet.legs) != expected:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{bet_type} bets need {expected} legs, got {len(bet.legs)}"
+                ),
+            )
+        if len(set(bet.legs)) != len(bet.legs):
+            raise HTTPException(
+                status_code=422, detail="legs must be distinct race_entry_ids",
+            )
+        if bet.race_entry_id != bet.legs[0]:
+            # The primary join column (race_entry_id) is conventionally
+            # the winning leg so race-detail joins still surface combo
+            # bets next to the dog the model thinks finishes 1st.
+            raise HTTPException(
+                status_code=422,
+                detail="race_entry_id must equal the first leg for combo bets",
+            )
+        import json as _json
+        legs_json = _json.dumps(bet.legs)
+
     record = BetRecord(
         race_entry_id=bet.race_entry_id,
         experiment_id=bet.experiment_id,
@@ -146,6 +192,9 @@ def place_bet(bet: PlaceBetRequest, db: Session = Depends(get_db)):
         race_number=entry.race_number,
         trap=entry.RaceEntry.trap,
         grade=entry.grade,
+        bet_type=bet_type,
+        legs_json=legs_json,
+        combo_probability=bet.combo_probability,
         win_probability=bet.win_probability,
         odds_decimal=bet.odds_decimal,
         implied_prob=implied_prob,
@@ -177,7 +226,34 @@ def settle_bet(bet_id: int, settle: SettleBetRequest, db: Session = Depends(get_
 
     config = db.query(BankrollConfig).first()
 
-    won = settle.actual_position == 1
+    bet_type = (record.bet_type or "win").lower()
+    won = False
+    if bet_type == "win":
+        won = settle.actual_position == 1
+    elif bet_type == "place":
+        won = settle.actual_position is not None and settle.actual_position <= 2
+    elif bet_type == "show":
+        won = settle.actual_position is not None and settle.actual_position <= 3
+    elif bet_type in ("forecast", "trio"):
+        # Combo bets need the actual finishing order — compare it leg by
+        # leg to the legs the bet was placed on. For a forecast the
+        # first two finishers must match in order; for a trio the first
+        # three. Reverse forecasts (CB) aren't a separate bet here —
+        # they'd be staked as two separate forecast records.
+        if not settle.actual_finishing_order:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{bet_type} bets must be settled with an "
+                    f"`actual_finishing_order` list"
+                ),
+            )
+        import json as _json
+        legs = _json.loads(record.legs_json) if record.legs_json else []
+        n = 2 if bet_type == "forecast" else 3
+        if len(settle.actual_finishing_order) >= n and len(legs) == n:
+            won = list(settle.actual_finishing_order[:n]) == list(legs)
+
     if won and record.odds_decimal:
         profit = record.stake * (record.odds_decimal - 1)
         record.outcome = "won"
@@ -231,8 +307,16 @@ def list_bets(
         query = query.filter(BetRecord.outcome == status)
     bets = query.order_by(BetRecord.created_at.desc()).limit(limit).all()
 
-    return [
-        {
+    import json as _json
+    out: list[dict[str, Any]] = []
+    for b in bets:
+        legs: list[int] | None = None
+        if b.legs_json:
+            try:
+                legs = _json.loads(b.legs_json)
+            except (ValueError, TypeError):
+                legs = None
+        out.append({
             "id": b.id,
             "race_entry_id": b.race_entry_id,
             "experiment_id": b.experiment_id,
@@ -242,6 +326,9 @@ def list_bets(
             "race_number": b.race_number,
             "trap": b.trap,
             "grade": b.grade,
+            "bet_type": b.bet_type or "win",
+            "legs": legs,
+            "combo_probability": b.combo_probability,
             "win_probability": b.win_probability,
             "odds_decimal": b.odds_decimal,
             "edge": b.edge,
@@ -254,9 +341,8 @@ def list_bets(
             "bankroll_after": b.bankroll_after,
             "settled_at": str(b.settled_at) if b.settled_at else None,
             "created_at": str(b.created_at) if b.created_at else None,
-        }
-        for b in bets
-    ]
+        })
+    return out
 
 
 @router.get("/summary")

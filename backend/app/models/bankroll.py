@@ -34,8 +34,17 @@ class BetRecord(Base):
     trap = Column(Integer)
     grade = Column(String)
 
+    # Bet type discriminator.  "win" matches every legacy row (the
+    # alembic migration backfills NULL -> "win"). Combo bets use
+    # "place", "show", "forecast", "trio" and stash their constituent
+    # entry ids in `legs_json`.
+    bet_type = Column(String, nullable=True, default="win")
+    legs_json = Column(Text, nullable=True)
+
     # Bet details
     win_probability = Column(Float)
+    # For combo bets this is the combo probability (forecast/trio P).
+    combo_probability = Column(Float, nullable=True)
     odds_decimal = Column(Float)
     implied_prob = Column(Float)
     edge = Column(Float)

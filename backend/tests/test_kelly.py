@@ -82,3 +82,40 @@ def test_get_staking_params_reads_bankroll_config():
         db.query(BankrollConfig).delete()
         db.commit()
         db.close()
+
+
+def test_split_val_for_calibration_is_race_aligned_and_disjoint():
+    """Audit C6: Optuna's objective half and the calibration half must be
+    chronologically ordered, race-aligned, and disjoint."""
+    import numpy as np
+    import pandas as pd
+
+    from app.services.training_service import _split_val_for_calibration
+
+    # 6 races, 3 entries each, ascending dates
+    race_ids = np.repeat([101, 102, 103, 104, 105, 106], 3)
+    meta = pd.DataFrame({"race_id": race_ids})
+    X = pd.DataFrame({"f": np.arange(len(race_ids))})
+
+    halves = _split_val_for_calibration(X, meta)
+    assert halves is not None
+    obj_mask, cal_mask = halves
+    assert not (obj_mask & cal_mask).any()
+    assert (obj_mask | cal_mask).all()
+    obj_races = set(race_ids[obj_mask])
+    cal_races = set(race_ids[cal_mask])
+    assert obj_races == {101, 102, 103}
+    assert cal_races == {104, 105, 106}
+    # race-aligned: no race appears in both
+    assert not obj_races & cal_races
+
+
+def test_split_val_returns_none_when_too_small():
+    import numpy as np
+    import pandas as pd
+
+    from app.services.training_service import _split_val_for_calibration
+
+    meta = pd.DataFrame({"race_id": np.repeat([1, 2, 3], 3)})
+    X = pd.DataFrame({"f": np.arange(9)})
+    assert _split_val_for_calibration(X, meta) is None

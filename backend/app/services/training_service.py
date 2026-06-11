@@ -148,6 +148,31 @@ def _nan_policy_for(algorithm: str) -> str:
     return "median_fill"
 
 
+def _split_val_for_calibration(X_val, meta_val):
+    """Split validation chronologically into an Optuna-objective half and a
+    calibration half, race-aligned.
+
+    Hyperparameter selection and calibrator fitting must not share data:
+    tuning to a fold and then fitting the deployed Platt calibrator on the
+    same fold makes the served probabilities inherit the selection bias.
+    The earlier half of val drives the Optuna objective; the later half
+    (closest to the test period, best for calibration recency) fits the
+    final calibrator and is never scored by the search.
+
+    Returns (objective_mask, calibration_mask) as positional boolean
+    arrays, or None when val has too few races to split safely.
+    """
+    if meta_val is None or X_val is None or len(X_val) == 0:
+        return None
+    race_ids = meta_val["race_id"].values
+    unique = pd.unique(race_ids)
+    if len(unique) < 4:
+        return None
+    first_half = set(unique[: len(unique) // 2])
+    obj_mask = np.array([rid in first_half for rid in race_ids])
+    return obj_mask, ~obj_mask
+
+
 def run_training(db: Session, experiment_id: int) -> None:
     """Run the full training pipeline for an experiment."""
     experiment = db.query(Experiment).filter(Experiment.id == experiment_id).first()
@@ -386,6 +411,9 @@ def run_training(db: Session, experiment_id: int) -> None:
             # before this field existed default to "median_fill" to keep
             # legacy models working unchanged.
             "nan_policy": nan_policy,
+            # No hyperparameter search in this path, so calibrating on the
+            # full val set carries no selection bias.
+            "calibration_scheme": "full_val_no_search",
         }
         joblib.dump(artifact, model_path)
 
@@ -538,6 +566,34 @@ def run_optuna_optimization(
         meta_train = dataset.get("meta_train")
         meta_val = dataset.get("meta_val")
 
+        # Keep selection and calibration data disjoint: Optuna scores on the
+        # earlier half of val; the final model's calibrator is fit on the
+        # later half, which the search never sees.
+        from ml.dataset_builder import _compute_group_sizes as _group_sizes
+        _val_halves = _split_val_for_calibration(X_val, meta_val)
+        if _val_halves is not None:
+            _obj_mask, _cal_mask = _val_halves
+            X_val_obj, y_val_obj = X_val[_obj_mask], y_val[_obj_mask]
+            meta_val_obj = meta_val[_obj_mask]
+            X_val_cal, y_val_cal = X_val[_cal_mask], y_val[_cal_mask]
+            group_val_obj = (
+                _group_sizes(meta_val_obj["race_id"]) if is_ranking else None
+            )
+            group_val_cal = (
+                _group_sizes(meta_val[_cal_mask]["race_id"]) if is_ranking else None
+            )
+            calibration_scheme = "val_calibration_half"
+        else:
+            X_val_obj, y_val_obj, meta_val_obj = X_val, y_val, meta_val
+            X_val_cal, y_val_cal = X_val, y_val
+            group_val_obj = group_val
+            group_val_cal = group_val
+            calibration_scheme = "full_val"
+            logger.warning(
+                "Validation set too small to hold out a calibration half — "
+                "the calibrator will share data with the Optuna objective."
+            )
+
         # Optuna objective selector.  Defaults to log_loss (minimize).
         # Betting objectives maximize ROI/Sharpe on the VAL set; we flip
         # sign to stay with Optuna direction="minimize".
@@ -658,19 +714,23 @@ def run_optuna_optimization(
             params = _suggest_params(trial, experiment.algorithm)
 
             if walk_forward_folds <= 1:
-                # Single-split (original behaviour)
+                # Single-split: trials train and score against the OBJECTIVE
+                # half of val only — the calibration half stays unseen until
+                # the final retrain.
                 trainer = create_trainer(
                     experiment.algorithm, params, experiment.target,
                     split_cfg=split_cfg,
                 )
                 if is_ranking:
                     result = trainer.train(
-                        X_train, y_train, X_val, y_val,
-                        group_train=group_train, group_val=group_val,
+                        X_train, y_train, X_val_obj, y_val_obj,
+                        group_train=group_train, group_val=group_val_obj,
                     )
                 else:
-                    result = trainer.train(X_train, y_train, X_val, y_val)
-                return _score_fold(trainer, result, X_val, y_val, meta_val, group_val)
+                    result = trainer.train(X_train, y_train, X_val_obj, y_val_obj)
+                return _score_fold(
+                    trainer, result, X_val_obj, y_val_obj, meta_val_obj, group_val_obj
+                )
 
             # Walk-forward CV: train per fold, average the scores
             from ml.dataset_builder import _compute_group_sizes as _gs
@@ -714,11 +774,13 @@ def run_optuna_optimization(
             experiment.algorithm, best_params, experiment.target,
             split_cfg=split_cfg,
         )
+        # Final retrain calibrates on the held-out calibration half — races
+        # the Optuna objective never scored.
         if is_ranking:
-            result = trainer.train(X_train, y_train, X_val, y_val,
-                                   group_train=group_train, group_val=group_val)
+            result = trainer.train(X_train, y_train, X_val_cal, y_val_cal,
+                                   group_train=group_train, group_val=group_val_cal)
         else:
-            result = trainer.train(X_train, y_train, X_val, y_val)
+            result = trainer.train(X_train, y_train, X_val_cal, y_val_cal)
 
         # Evaluate on test
         _heartbeat(db, experiment, "evaluating", log_handler)
@@ -799,6 +861,10 @@ def run_optuna_optimization(
             "feature_names": dataset.get("feature_names", []),
             "is_ranking": is_ranking,
             "nan_policy": nan_policy,
+            # Which slice the deployed calibrator was fit on (see
+            # _split_val_for_calibration): "val_calibration_half" keeps
+            # selection and calibration data disjoint.
+            "calibration_scheme": calibration_scheme,
         }
         joblib.dump(artifact, model_path)
 

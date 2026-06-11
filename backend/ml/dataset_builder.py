@@ -451,18 +451,29 @@ def _compute_builtin_features(db: Session, entry_ids: list[int],
     Processes in batches to limit peak memory — each batch loads dog histories
     only for its subset of entries.
     """
-    from ml.race_features import compute_builtin_features_batch
+    from ml.race_features import (
+        build_global_aggregate_context,
+        compute_builtin_features_batch,
+    )
 
     BATCH_SIZE = 5000
     if len(entry_ids) <= BATCH_SIZE:
         return compute_builtin_features_batch(db, entry_ids, heartbeat_fn=heartbeat_fn)
+
+    # Build the global aggregate tables once and share them across batches —
+    # they scale with total DB size, not batch size (audit C14).
+    global_ctx = build_global_aggregate_context(db)
+    if heartbeat_fn is not None:
+        heartbeat_fn()
 
     all_dfs = []
     for i in range(0, len(entry_ids), BATCH_SIZE):
         batch = entry_ids[i:i + BATCH_SIZE]
         logger.info("Computing builtin features batch %d-%d of %d",
                      i, min(i + BATCH_SIZE, len(entry_ids)), len(entry_ids))
-        batch_df = compute_builtin_features_batch(db, batch, heartbeat_fn=heartbeat_fn)
+        batch_df = compute_builtin_features_batch(
+            db, batch, heartbeat_fn=heartbeat_fn, global_ctx=global_ctx,
+        )
         if not batch_df.empty:
             all_dfs.append(batch_df)
         gc.collect()

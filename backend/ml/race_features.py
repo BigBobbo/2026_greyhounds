@@ -536,144 +536,21 @@ class _DatePrefix:
         return tuple(u - l for u, l in zip(upper, lower))
 
 
-def compute_builtin_features_batch(
-    db: Session,
-    entry_ids: list[int],
-    heartbeat_fn=None,
-) -> pd.DataFrame:
-    """Compute all built-in race-context features via bulk queries.
+def build_global_aggregate_context(db: Session) -> dict[str, Any]:
+    """Build the time-aware aggregate lookups shared by every entry batch.
 
-    This replaces the per-entry approach (which issued ~8 DB queries per entry)
-    with a small number of bulk queries followed by in-memory joins.
-
-    Args:
-        heartbeat_fn: Optional callable() to keep training heartbeat alive
-            during long-running computation.
+    Hoisted out of compute_builtin_features_batch so multi-batch dataset
+    builds compute the global tables (trap/trainer/sire rates, track time
+    baselines, speed-figure baselines) ONCE instead of once per
+    5000-entry batch — these queries scale with total DB size, not batch
+    size, and re-running them per batch multiplied both the DB I/O and
+    the peak memory that caused the Railway OOMs.
     """
-    def _hb():
-        if heartbeat_fn is not None:
-            heartbeat_fn()
-    if not entry_ids:
-        return pd.DataFrame()
-
-    entry_set = set(entry_ids)
-
-    # --- 1. Bulk fetch entry + race + track + dog context ---
-    logger.info("Batch builtin: fetching entry/race/dog context for %d entries...", len(entry_ids))
-
-    def _ctx_query(chunk):
-        return (
-            db.query(
-                RaceEntry.id.label("entry_id"),
-                RaceEntry.trap,
-                RaceEntry.dog_id,
-                RaceEntry.days_since_last,
-                RaceEntry.weight_kg,
-                RaceEntry.wide_runner,
-                RaceEntry.race_id,
-                Race.track_id,
-                Race.distance_m,
-                Race.grade,
-                Race.going,
-                Race.num_runners,
-                Race.race_date,
-                Race.race_time,
-                Race.race_type,
-                Dog.birth_date,
-                Dog.trainer_name,
-                Dog.sire,
-            )
-            .join(Race, RaceEntry.race_id == Race.id)
-            .join(Dog, RaceEntry.dog_id == Dog.id)
-            .filter(RaceEntry.id.in_(chunk))
-            .all()
-        )
-
-    ctx_rows = _chunked_query(db, _ctx_query, entry_ids, RaceEntry.id)
-
-    if not ctx_rows:
-        return pd.DataFrame()
-
-    ctx_df = pd.DataFrame(ctx_rows, columns=[
-        "entry_id", "trap", "dog_id", "days_since_last", "weight_kg",
-        "wide_runner", "race_id",
-        "track_id", "distance_m", "grade", "going", "num_runners",
-        "race_date", "race_time", "race_type",
-        "birth_date", "trainer_name", "sire",
-    ]).set_index("entry_id")
-
-    logger.info("Batch builtin: fetched context for %d entries", len(ctx_df))
-    _hb()
-
-    # --- 2. Bulk fetch all dog histories (last 100 races per dog, before race date) ---
-    # We need history per (dog_id, race_date) pair. Fetch all historical entries for
-    # relevant dogs, then filter per-entry in memory.
-    unique_dog_ids = ctx_df["dog_id"].unique().tolist()
-    logger.info("Batch builtin: fetching histories for %d unique dogs...", len(unique_dog_ids))
-
-    def _hist_query(chunk):
-        return (
-            db.query(
-                RaceEntry.dog_id,
-                RaceEntry.trap,
-                RaceEntry.finish_position,
-                RaceEntry.finish_time,
-                RaceEntry.sectional_time,
-                RaceEntry.adjusted_time,
-                RaceEntry.beaten_distance,
-                RaceEntry.weight_kg,
-                RaceEntry.sp_decimal,
-                RaceEntry.starting_price,
-                RaceEntry.comment,
-                Race.race_date,
-                Race.track_id,
-                Race.distance_m,
-                Race.grade,
-                Race.race_type,
-                Race.going,
-                Race.going_allowance,
-                Race.num_runners,
-                Race.prize_money,
-            )
-            .join(Race, RaceEntry.race_id == Race.id)
-            .filter(
-                RaceEntry.dog_id.in_(chunk),
-                Race.status == "resulted",
-            )
-            .all()
-        )
-
-    hist_rows = _chunked_query(db, _hist_query, unique_dog_ids, RaceEntry.dog_id)
-
-    hist_columns = [
-        "dog_id", "trap", "finish_position", "finish_time", "sectional_time",
-        "adjusted_time", "beaten_distance", "weight_kg", "sp_decimal",
-        "starting_price", "comment", "race_date", "track_id", "distance_m",
-        "grade", "race_type", "going", "going_allowance", "num_runners",
-        "prize_money",
-    ]
-    all_hist_df = pd.DataFrame(hist_rows, columns=hist_columns) if hist_rows else pd.DataFrame(columns=hist_columns)
-    del hist_rows  # free raw tuples — now redundant
-
-    # Index by dog for fast lookup
-    dog_histories: dict[int, pd.DataFrame] = {}
-    n_hist_rows = len(all_hist_df)
-    if not all_hist_df.empty:
-        for dog_id, group in all_hist_df.groupby("dog_id"):
-            dog_histories[dog_id] = group.sort_values("race_date").reset_index(drop=True)
-
-    del all_hist_df  # free full DataFrame — now split into per-dog dicts
-    gc.collect()
-
-    logger.info("Batch builtin: loaded %d history rows for %d dogs", n_hist_rows, len(dog_histories))
-    _hb()
-
     # --- 3. Bulk compute trap win rates (per track/distance/trap combo) ---
     # Grouped by race_date and folded into prefix sums so every lookup is
     # "stats strictly before this entry's race date" — anything else leaks
     # the entry's own result (and the future) into the training matrix.
-    unique_combos = ctx_df[["track_id", "distance_m", "trap"]].drop_duplicates()
-    logger.info("Batch builtin: computing trap win rates for %d combos...", len(unique_combos))
+    logger.info("Global aggregates: computing trap win rates...")
 
     trap_stats = (
         db.query(
@@ -751,8 +628,14 @@ def compute_builtin_features_batch(
     # over all time, including the entry's own race and the future) and
     # restores the recency window the single-entry path (_trainer_stats)
     # documents — the batch path had silently dropped it.
-    unique_trainers = ctx_df["trainer_name"].dropna().unique().tolist()
-    logger.info("Batch builtin: computing trainer stats for %d trainers...", len(unique_trainers))
+    unique_trainers = [
+        r[0]
+        for r in db.query(Dog.trainer_name)
+        .filter(Dog.trainer_name.isnot(None))
+        .distinct()
+        .all()
+    ]
+    logger.info("Global aggregates: computing trainer stats for %d trainers...", len(unique_trainers))
 
     _TRAINER_WINDOW_DAYS = 90
 
@@ -831,8 +714,11 @@ def compute_builtin_features_batch(
         return out
 
     # --- 5. Bulk compute sire stats (time-aware prefix sums) ---
-    unique_sires = ctx_df["sire"].dropna().unique().tolist()
-    logger.info("Batch builtin: computing sire stats for %d sires...", len(unique_sires))
+    unique_sires = [
+        r[0]
+        for r in db.query(Dog.sire).filter(Dog.sire.isnot(None)).distinct().all()
+    ]
+    logger.info("Global aggregates: computing sire stats for %d sires...", len(unique_sires))
 
     sire_prefix = _DatePrefix.from_rows((), n_values=2)
     sire_time_prefix = _DatePrefix.from_rows((), n_values=2)
@@ -1001,6 +887,163 @@ def compute_builtin_features_batch(
             _SPEED_FIGURE_CENTER
             + _SPEED_FIGURE_STDEV_SCALE * (mean - adj_time) / std
         )
+
+    return {
+        "trap_win_rate_asof": _trap_win_rate_asof,
+        "trap_going_rate_asof": _trap_going_rate_asof,
+        "trainer_stats_asof": _trainer_stats_asof,
+        "sire_stats_asof": _sire_stats_asof,
+        "track_avg_time_asof": _track_avg_time_asof,
+        "speed_figure": _speed_figure,
+    }
+
+
+def compute_builtin_features_batch(
+    db: Session,
+    entry_ids: list[int],
+    heartbeat_fn=None,
+    global_ctx: dict[str, Any] | None = None,
+) -> pd.DataFrame:
+    """Compute all built-in race-context features via bulk queries.
+
+    This replaces the per-entry approach (which issued ~8 DB queries per entry)
+    with a small number of bulk queries followed by in-memory joins.
+
+    Args:
+        heartbeat_fn: Optional callable() to keep training heartbeat alive
+            during long-running computation.
+    """
+    def _hb():
+        if heartbeat_fn is not None:
+            heartbeat_fn()
+    if not entry_ids:
+        return pd.DataFrame()
+
+    entry_set = set(entry_ids)
+
+    # --- 1. Bulk fetch entry + race + track + dog context ---
+    logger.info("Batch builtin: fetching entry/race/dog context for %d entries...", len(entry_ids))
+
+    def _ctx_query(chunk):
+        return (
+            db.query(
+                RaceEntry.id.label("entry_id"),
+                RaceEntry.trap,
+                RaceEntry.dog_id,
+                RaceEntry.days_since_last,
+                RaceEntry.weight_kg,
+                RaceEntry.wide_runner,
+                RaceEntry.race_id,
+                Race.track_id,
+                Race.distance_m,
+                Race.grade,
+                Race.going,
+                Race.num_runners,
+                Race.race_date,
+                Race.race_time,
+                Race.race_type,
+                Dog.birth_date,
+                Dog.trainer_name,
+                Dog.sire,
+            )
+            .join(Race, RaceEntry.race_id == Race.id)
+            .join(Dog, RaceEntry.dog_id == Dog.id)
+            .filter(RaceEntry.id.in_(chunk))
+            .all()
+        )
+
+    ctx_rows = _chunked_query(db, _ctx_query, entry_ids, RaceEntry.id)
+
+    if not ctx_rows:
+        return pd.DataFrame()
+
+    ctx_df = pd.DataFrame(ctx_rows, columns=[
+        "entry_id", "trap", "dog_id", "days_since_last", "weight_kg",
+        "wide_runner", "race_id",
+        "track_id", "distance_m", "grade", "going", "num_runners",
+        "race_date", "race_time", "race_type",
+        "birth_date", "trainer_name", "sire",
+    ]).set_index("entry_id")
+
+    logger.info("Batch builtin: fetched context for %d entries", len(ctx_df))
+    _hb()
+
+    # --- 2. Bulk fetch all dog histories (last 100 races per dog, before race date) ---
+    # We need history per (dog_id, race_date) pair. Fetch all historical entries for
+    # relevant dogs, then filter per-entry in memory.
+    unique_dog_ids = ctx_df["dog_id"].unique().tolist()
+    logger.info("Batch builtin: fetching histories for %d unique dogs...", len(unique_dog_ids))
+
+    def _hist_query(chunk):
+        return (
+            db.query(
+                RaceEntry.dog_id,
+                RaceEntry.trap,
+                RaceEntry.finish_position,
+                RaceEntry.finish_time,
+                RaceEntry.sectional_time,
+                RaceEntry.adjusted_time,
+                RaceEntry.beaten_distance,
+                RaceEntry.weight_kg,
+                RaceEntry.sp_decimal,
+                RaceEntry.starting_price,
+                RaceEntry.comment,
+                Race.race_date,
+                Race.track_id,
+                Race.distance_m,
+                Race.grade,
+                Race.race_type,
+                Race.going,
+                Race.going_allowance,
+                Race.num_runners,
+                Race.prize_money,
+            )
+            .join(Race, RaceEntry.race_id == Race.id)
+            .filter(
+                RaceEntry.dog_id.in_(chunk),
+                Race.status == "resulted",
+            )
+            .all()
+        )
+
+    hist_rows = _chunked_query(db, _hist_query, unique_dog_ids, RaceEntry.dog_id)
+
+    hist_columns = [
+        "dog_id", "trap", "finish_position", "finish_time", "sectional_time",
+        "adjusted_time", "beaten_distance", "weight_kg", "sp_decimal",
+        "starting_price", "comment", "race_date", "track_id", "distance_m",
+        "grade", "race_type", "going", "going_allowance", "num_runners",
+        "prize_money",
+    ]
+    all_hist_df = pd.DataFrame(hist_rows, columns=hist_columns) if hist_rows else pd.DataFrame(columns=hist_columns)
+    del hist_rows  # free raw tuples — now redundant
+
+    # Index by dog for fast lookup
+    dog_histories: dict[int, pd.DataFrame] = {}
+    n_hist_rows = len(all_hist_df)
+    if not all_hist_df.empty:
+        for dog_id, group in all_hist_df.groupby("dog_id"):
+            dog_histories[dog_id] = group.sort_values("race_date").reset_index(drop=True)
+
+    del all_hist_df  # free full DataFrame — now split into per-dog dicts
+    gc.collect()
+
+    logger.info("Batch builtin: loaded %d history rows for %d dogs", n_hist_rows, len(dog_histories))
+    _hb()
+
+    # --- 3-6b. Global aggregate lookups (time-aware) ---
+    # Built once per dataset build and shared across batches; see
+    # build_global_aggregate_context.
+    if global_ctx is None:
+        global_ctx = build_global_aggregate_context(db)
+    _trap_win_rate_asof = global_ctx["trap_win_rate_asof"]
+    _trap_going_rate_asof = global_ctx["trap_going_rate_asof"]
+    _trainer_stats_asof = global_ctx["trainer_stats_asof"]
+    _sire_stats_asof = global_ctx["sire_stats_asof"]
+    _track_avg_time_asof = global_ctx["track_avg_time_asof"]
+    _speed_figure = global_ctx["speed_figure"]
+    _hb()
+
 
     # --- 7. Precompute per-(dog, race_date) history aggregates ---
     # Instead of filtering history DataFrames 300k times in a Python loop,

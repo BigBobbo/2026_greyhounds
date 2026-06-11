@@ -183,3 +183,64 @@ def test_invariant_to_own_race_result(db):
 
     after = _features_for(db, target_entry_id)
     _assert_identical(before, after)
+
+
+def test_builtin_features_computable_pre_race(db):
+    """Audit C4: every builtin feature NOT classified post-race-only must be
+    computable on a scheduled race (current-entry result fields all NULL),
+    given the dog has full history. A feature that is non-null for a resulted
+    entry but null for an identical scheduled entry depends on current-race
+    result data and must be added to POST_RACE_FEATURE_NAMES.
+    """
+    from app.models.race import Race
+    from ml.feature_availability import POST_RACE_FEATURE_NAMES
+
+    track, dogs, target_entry_id, start, _ = _seed(db)
+    resulted_feats = _features_for(db, target_entry_id)
+    target = db.query(RaceEntry).get(target_entry_id)
+    target_race = db.query(Race).get(target.race_id)
+
+    # Scheduled race the day after the target's race: same card data (grade,
+    # distance, traps, dogs) but no results, no weigh-in, no going.
+    sched = Race(
+        track_id=track.id,
+        race_date=target_race.race_date + timedelta(days=1),
+        race_time=time(20, 0),
+        race_number=99,
+        distance_m=525,
+        grade="A3",
+        race_type="flat",
+        going=None,
+        num_runners=len(dogs),
+        status="scheduled",
+    )
+    db.add(sched)
+    db.flush()
+    # Give the target dog the same trap it had in the resulted race so the
+    # trap-keyed features are directly comparable; distribute the rest.
+    other_traps = [t for t in range(1, len(dogs) + 1) if t != target.trap]
+    sched_entry = None
+    for d in dogs:
+        if d.id == target.dog_id:
+            trap = target.trap
+        else:
+            trap = other_traps.pop(0)
+        e = RaceEntry(race_id=sched.id, dog_id=d.id, trap=trap)
+        db.add(e)
+        if d.id == target.dog_id:
+            sched_entry = e
+    db.commit()
+    assert sched_entry is not None
+
+    sched_feats = _features_for(db, sched_entry.id)
+
+    offenders = []
+    for col in resulted_feats.index:
+        if col in POST_RACE_FEATURE_NAMES:
+            continue
+        if not pd.isna(resulted_feats[col]) and pd.isna(sched_feats.get(col)):
+            offenders.append(col)
+    assert not offenders, (
+        "features computable on resulted but not scheduled races — add to "
+        f"POST_RACE_FEATURE_NAMES or fix: {offenders}"
+    )

@@ -43,4 +43,3 @@ frontend/dist/
 Thumbs.db
 
 # Playwright
-backend/scraping/browsers/

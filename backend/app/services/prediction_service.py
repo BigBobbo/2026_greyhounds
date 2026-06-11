@@ -180,47 +180,6 @@ def compute_features_for_entries(
     return df
 
 
-def _raise_for_missing_features(
-    X: pd.DataFrame,
-    race_id: int,
-    entries: list[Any],
-) -> None:
-    """Raise PredictionDataError listing every (entry, feature) NaN cell.
-
-    Used on scheduled (upcoming) races where silent imputation would
-    produce a distribution shift between train and serve. We list up to a
-    handful of (trap, dog_name) pairs per offending feature so the user
-    can see immediately which dogs the scrape didn't cover.
-    """
-    if not X.isna().any().any():
-        return
-
-    # Map entry_id -> (trap, dog_name) for friendly error output.
-    entry_lookup: dict[int, tuple[int | None, str | None]] = {}
-    for row in entries:
-        entry = row.RaceEntry
-        entry_lookup[entry.id] = (entry.trap, getattr(row, "dog_name", None))
-
-    missing_summary: dict[str, list[str]] = {}
-    for col in X.columns[X.isna().any()]:
-        offenders = []
-        for entry_id in X.index[X[col].isna()].tolist()[:6]:
-            trap, dog_name = entry_lookup.get(int(entry_id), (None, None))
-            label = f"trap{trap} {dog_name}" if dog_name else f"entry_id={entry_id}"
-            offenders.append(label)
-        missing_summary[str(col)] = offenders
-
-    pretty = "; ".join(
-        f"{feat} -> {', '.join(rows)}" for feat, rows in missing_summary.items()
-    )
-    raise PredictionDataError(
-        f"Refusing to silently impute missing features for scheduled race "
-        f"{race_id}. Missing cells: {pretty}. Either backfill the upstream "
-        f"data (dog history, sectional times, comments) or retrain without "
-        f"these features."
-    )
-
-
 def _get_train_cutoff(experiment: Experiment) -> date | None:
     """Extract the training data cutoff date from an experiment's split config."""
     split_config = experiment.split_config or {}

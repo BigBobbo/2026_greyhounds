@@ -361,7 +361,7 @@ def compute_shap_summary(model: Any, X: np.ndarray, feature_names: list[str], ma
             shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
 
         mean_abs = np.abs(shap_values).mean(axis=0)
-        feature_shap = dict(zip(feature_names, mean_abs.tolist()))
+        feature_shap = dict(zip(feature_names, mean_abs.tolist(), strict=False))
 
         # Sort by importance
         feature_shap = dict(sorted(feature_shap.items(), key=lambda x: x[1], reverse=True))

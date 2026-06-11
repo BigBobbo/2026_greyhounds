@@ -21,7 +21,6 @@ client = TestClient(app)
 def seeded(request):
     """One track/race/dog/entry + experiment + fresh bankroll of 100."""
     db = SessionLocal()
-    created = []
     try:
         track = Track(name="BetTown", code=f"BT{request.node.name[-3:]}"[:5], active=True)
         db.add(track)
@@ -48,7 +47,6 @@ def seeded(request):
         db.add(BankrollConfig(initial_bankroll=100.0, current_bankroll=100.0,
                               kelly_fraction=0.25, min_edge=0.05, max_stake_pct=0.05))
         db.commit()
-        created = [entry.id, exp.id]
         yield {"entry_id": entry.id, "experiment_id": exp.id, "db": db}
     finally:
         db.query(BetRecord).delete()

@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import and_, case, func, text
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.models.computed_feature import ComputedFeature
@@ -547,7 +547,7 @@ def get_feature_coverage(
             ComputedFeature.feature_def_id,
             func.count(ComputedFeature.id).label("computed"),
             func.sum(
-                case((ComputedFeature.data_complete == False, 1), else_=0)
+                case((ComputedFeature.data_complete.is_(False), 1), else_=0)
             ).label("incomplete"),
         )
         .filter(version_filter)

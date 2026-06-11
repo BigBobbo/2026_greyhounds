@@ -20,13 +20,12 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import case, func, text
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.models.dog import Dog
 from app.models.race import Race
 from app.models.race_entry import RaceEntry
-from app.models.track import Track
 from ml.elo import EloRatings
 from ml.race_comments import COMMENT_FEATURE_NAMES, parse_race_comment
 
@@ -533,7 +532,7 @@ class _DatePrefix:
         if lo == 0:
             return upper
         lower = self._cums[key][lo - 1]
-        return tuple(u - l for u, l in zip(upper, lower))
+        return tuple(u - lo_v for u, lo_v in zip(upper, lower, strict=False))
 
 
 def build_global_aggregate_context(db: Session) -> dict[str, Any]:
@@ -919,7 +918,7 @@ def compute_builtin_features_batch(
     if not entry_ids:
         return pd.DataFrame()
 
-    entry_set = set(entry_ids)
+    set(entry_ids)
 
     # --- 1. Bulk fetch entry + race + track + dog context ---
     logger.info("Batch builtin: fetching entry/race/dog context for %d entries...", len(entry_ids))
@@ -1064,7 +1063,7 @@ def compute_builtin_features_batch(
 
     # Collect all (dog_id, race_date) pairs we need
     needed_pairs: dict[int, set] = defaultdict(set)
-    for entry_id, ctx in ctx_df.iterrows():
+    for _entry_id, ctx in ctx_df.iterrows():
         needed_pairs[ctx["dog_id"]].add(ctx["race_date"])
 
     dogs_done = 0
@@ -1242,7 +1241,7 @@ def compute_builtin_features_batch(
             sect_r = h_sect[recent_sl]
             fin_r = h_finish[recent_sl]
             valid_speed = [
-                float(s / f) for s, f in zip(sect_r, fin_r)
+                float(s / f) for s, f in zip(sect_r, fin_r, strict=False)
                 if s is not None and f is not None
                 and not np.isnan(s) and not np.isnan(f) and f > 0
             ]
@@ -1252,7 +1251,7 @@ def compute_builtin_features_batch(
             # finishing_speed_ratio = (finish_time - sectional_time) / finish_time
             # Low = front-loaded (early burst, faded late), high = strong finish.
             finishing_ratios = [
-                float((f - s) / f) for s, f in zip(sect_r, fin_r)
+                float((f - s) / f) for s, f in zip(sect_r, fin_r, strict=False)
                 if s is not None and f is not None
                 and not np.isnan(s) and not np.isnan(f) and f > 0
             ]
@@ -1271,7 +1270,7 @@ def compute_builtin_features_batch(
             recent10_sect = h_sect[slice(max(0, cut - 10), cut)]
             recent10_fin = h_finish[slice(max(0, cut - 10), cut)]
             finishing_ratios_10 = [
-                float((f - s) / f) for s, f in zip(recent10_sect, recent10_fin)
+                float((f - s) / f) for s, f in zip(recent10_sect, recent10_fin, strict=False)
                 if s is not None and f is not None
                 and not np.isnan(s) and not np.isnan(f) and f > 0
             ]
@@ -1380,7 +1379,7 @@ def compute_builtin_features_batch(
             last10_positions = h_positions[last10_slice]
             clean_positions: list[float] = []
             trouble_positions: list[float] = []
-            for c, p in zip(last10_comments, last10_positions):
+            for c, p in zip(last10_comments, last10_positions, strict=False):
                 if p is None or (isinstance(p, float) and np.isnan(p)):
                     continue
                 c_lower = "" if c is None else str(c).lower()
@@ -1497,16 +1496,19 @@ def compute_builtin_features_batch(
             pos_last10_for_cmt = h_positions[slice(max(0, cut - 10), cut)]
             cmt_n = len(parsed_last10)
             if cmt_n > 0:
-                def _rate(key: str) -> float:
-                    return float(sum(1 for p in parsed_last10 if p.get(key))) / cmt_n
+                # Bind the per-iteration values as defaults: the closures are
+                # called within this iteration only, but explicit binding
+                # removes the late-binding foot-gun outright (B023).
+                def _rate(key: str, _parsed=parsed_last10, _n=cmt_n) -> float:
+                    return float(sum(1 for p in _parsed if p.get(key))) / _n
 
-                def _bend_rate(field: str, bend: int) -> float:
+                def _bend_rate(field: str, bend: int, _parsed=parsed_last10, _n=cmt_n) -> float:
                     return float(
-                        sum(1 for p in parsed_last10 if bend in p.get(field, set()))
-                    ) / cmt_n
+                        sum(1 for p in _parsed if bend in p.get(field, set()))
+                    ) / _n
 
                 clear_win_hits = 0
-                for p, pos in zip(parsed_last10, pos_last10_for_cmt):
+                for p, pos in zip(parsed_last10, pos_last10_for_cmt, strict=False):
                     if pos is None or (isinstance(pos, float) and np.isnan(pos)):
                         continue
                     if p.get("cleared_field") and int(pos) == 1:
@@ -2154,7 +2156,7 @@ def compute_h2h_features_batch(
                 break  # history is sorted; all remaining are on/after target
             entries_in_past = race_to_entries.get(past_race_id, [])
             # Look up this dog's and each opponent's finish in that past race
-            for other_dog_id, other_fp, other_bd, _ in entries_in_past:
+            for other_dog_id, other_fp, _other_bd, _ in entries_in_past:
                 if other_dog_id == dog_id or other_dog_id not in opponents:
                     continue
                 if fp is None or other_fp is None:

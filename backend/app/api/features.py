@@ -1,8 +1,6 @@
 """Feature definition CRUD + preview + materialization endpoints."""
 
 import logging
-import os
-import glob as globmod
 from threading import Thread
 from typing import Any
 

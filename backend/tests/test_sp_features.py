@@ -1,6 +1,5 @@
 """Tests for SP-derived market features in dataset_builder."""
 
-import numpy as np
 import pandas as pd
 
 from ml.dataset_builder import _add_sp_features

@@ -38,3 +38,22 @@ include = ["app*", "scraping*", "ml*"]
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+# E/F: pycodestyle + pyflakes core; I: import order left off (too churny
+# for now); B: bugbear correctness; UP: keep syntax modern.
+select = ["E", "F", "B"]
+ignore = [
+    "E501",  # line length: legacy code has long strings; not worth the churn
+    "E402",  # module-import-not-at-top: scripts adjust sys.path first
+    "B008",  # FastAPI Depends() in defaults is the framework idiom
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

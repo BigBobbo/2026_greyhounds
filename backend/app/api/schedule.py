@@ -310,4 +310,4 @@ def schedule_performance(
     try:
         return compute_performance(db, schedule_id, days=days)
     except ValueError as e:
-        raise HTTPException(404, str(e))
+        raise HTTPException(404, str(e)) from e

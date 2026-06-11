@@ -11,10 +11,9 @@ from collections import defaultdict
 from datetime import date, timedelta
 from typing import Any
 
-from sqlalchemy import func, and_
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.dog import Dog
 from app.models.race import Race
 from app.models.race_entry import RaceEntry
 from app.models.track import Track
@@ -83,7 +82,7 @@ def find_coverage_gaps(
         .filter(Track.active.is_(True))
         .all()
     )
-    track_names = {code: name for code, name in active_tracks}
+    {code: name for code, name in active_tracks}
     coverage = get_track_date_coverage(db, start_date, end_date)
 
     gaps: list[dict[str, Any]] = []
@@ -259,7 +258,7 @@ def assess_materialization_readiness(
         .filter(Track.active.is_(True))
         .all()
     )
-    all_codes = {code for code, _ in active_tracks}
+    {code for code, _ in active_tracks}
     coverage = get_track_date_coverage(db, start_date, end_date)
 
     tracks_missing = [

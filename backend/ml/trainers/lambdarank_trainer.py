@@ -12,7 +12,6 @@ Platt scaling fitted on the validation set.
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import lightgbm as lgb
 from sklearn.linear_model import LogisticRegression
 
@@ -249,7 +248,7 @@ class LambdaRankTrainer(BaseTrainer):
     def get_feature_importance(self) -> dict[str, float]:
         if self.model is not None and hasattr(self.model, "feature_importances_"):
             names = self._feature_names or [f"f{i}" for i in range(len(self.model.feature_importances_))]
-            return dict(zip(names, self.model.feature_importances_.tolist()))
+            return dict(zip(names, self.model.feature_importances_.tolist(), strict=False))
         return {}
 
     @staticmethod

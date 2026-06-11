@@ -2,7 +2,6 @@
 
 from datetime import date, timedelta
 
-import numpy as np
 import pandas as pd
 
 from ml.dataset_builder import generate_walk_forward_fold_indices

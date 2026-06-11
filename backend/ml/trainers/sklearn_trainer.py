@@ -98,8 +98,8 @@ class SklearnTrainer(BaseTrainer):
     def get_feature_importance(self) -> dict[str, float]:
         if hasattr(self.model, "feature_importances_"):
             names = self.model.feature_names_in_ if hasattr(self.model, "feature_names_in_") else [f"f{i}" for i in range(len(self.model.feature_importances_))]
-            return dict(zip(names, self.model.feature_importances_.tolist()))
+            return dict(zip(names, self.model.feature_importances_.tolist(), strict=False))
         elif hasattr(self.model, "coef_"):
             names = self.model.feature_names_in_ if hasattr(self.model, "feature_names_in_") else [f"f{i}" for i in range(len(self.model.coef_[0]))]
-            return dict(zip(names, np.abs(self.model.coef_[0]).tolist()))
+            return dict(zip(names, np.abs(self.model.coef_[0]).tolist(), strict=False))
         return {}

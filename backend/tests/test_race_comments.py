@@ -1,6 +1,5 @@
 """Tests for the greyhound race-comment parser."""
 
-import pytest
 
 from ml.race_comments import parse_race_comment
 

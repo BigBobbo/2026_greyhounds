@@ -22,7 +22,6 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from app.models.experiment import Experiment
@@ -35,7 +34,6 @@ from app.services.feature_engine import get_dog_history, get_race_context, compu
 from app.services.feature_sandbox import execute_feature_code
 from app.services.race_ordering import (
     OrderingResult,
-    compute_combo_kelly,
     compute_ordering,
 )
 from app.models.feature_definition import FeatureDefinition
@@ -659,9 +657,9 @@ def predict_race(
     eid_to_win_prob: dict[int, float] = {}
     eid_to_raw_score: dict[int, float] = {}
     if win_probs is not None:
-        eid_to_win_prob = {int(eid): float(p) for eid, p in zip(X.index, win_probs)}
+        eid_to_win_prob = {int(eid): float(p) for eid, p in zip(X.index, win_probs, strict=True)}
     if raw_scores is not None:
-        eid_to_raw_score = {int(eid): float(s) for eid, s in zip(X.index, raw_scores)}
+        eid_to_raw_score = {int(eid): float(s) for eid, s in zip(X.index, raw_scores, strict=True)}
 
     # Forecast / trio layer: take the calibrated win probabilities and
     # expand them into ordered multi-position probabilities via the
@@ -725,7 +723,7 @@ def predict_race(
 
     # Build prediction list
     predictions = []
-    for entry_row, entry_id in zip(entries, entry_ids):
+    for entry_row, entry_id in zip(entries, entry_ids, strict=True):
         entry = entry_row.RaceEntry
         dog_name = entry_row.dog_name
 

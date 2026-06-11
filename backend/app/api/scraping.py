@@ -1,6 +1,5 @@
 """Scraping management API endpoints — uses httpx (no Playwright)."""
 
-import asyncio
 import logging
 import traceback
 from datetime import date, datetime, timedelta
@@ -194,14 +193,14 @@ def get_cards_status(race_date: str, db: Session = Depends(get_db)):
     )
     log_responses = [
         CardsStatusLog(
-            id=l.id,
-            status=l.status,
-            records_scraped=l.records_scraped or 0,
-            records_new=l.records_new or 0,
-            started_at=l.started_at,
-            completed_at=l.completed_at,
+            id=log_row.id,
+            status=log_row.status,
+            records_scraped=log_row.records_scraped or 0,
+            records_new=log_row.records_new or 0,
+            started_at=log_row.started_at,
+            completed_at=log_row.completed_at,
         )
-        for l in logs
+        for log_row in logs
     ]
 
     return CardsStatusResponse(
@@ -257,7 +256,7 @@ def reap_stale_scrape_logs(
 @router.get("/test-scrape")
 async def test_scrape(track_code: str = "TRL", date_str: str = "04-Apr-2026"):
     """Scrape one date with httpx, save to DB, return results."""
-    from scraping.gri_scraper import scrape_results, parse_results_page, VIEW_RESULTS_URL, format_date, DEFAULT_HEADERS
+    from scraping.gri_scraper import parse_results_page, VIEW_RESULTS_URL, DEFAULT_HEADERS
     from scraping.db_pipeline import upsert_race_results
     from datetime import datetime as dt
 
@@ -420,7 +419,7 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
         start = date.fromisoformat(req.start_date)
         end = date.fromisoformat(req.end_date)
     except ValueError as e:
-        raise HTTPException(status_code=422, detail=f"Invalid date: {e}")
+        raise HTTPException(status_code=422, detail=f"Invalid date: {e}") from e
 
     if end < start:
         raise HTTPException(status_code=422, detail="end_date is before start_date")
@@ -489,7 +488,10 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
             track_races = 0
             track_new = 0
 
-            async def _scrape_track():
+            async def _scrape_track(tc=tc, base_races=total_races, base_new=total_new):
+                # tc and the running totals are bound at definition time:
+                # the closure is invoked synchronously in this iteration,
+                # but explicit binding removes the late-binding foot-gun.
                 nonlocal track_races, track_new
                 async with httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30) as client:
                     db_track = SessionLocal()
@@ -511,7 +513,7 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
                             # Commit + update log every 50 days
                             if day_count % 50 == 0:
                                 db_track.commit()
-                                _update_log(total_races + track_races, total_new + track_new)
+                                _update_log(base_races + track_races, base_new + track_new)
                             else:
                                 _heartbeat(log_id)
 

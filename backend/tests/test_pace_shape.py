@@ -1,6 +1,5 @@
 """Tests for expanded pace-shape features."""
 
-import numpy as np
 import pandas as pd
 
 from ml.dataset_builder import _add_pace_shape_features

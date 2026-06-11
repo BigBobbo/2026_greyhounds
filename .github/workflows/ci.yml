@@ -21,7 +21,9 @@ jobs:
       - name: Install pinned dependencies
         run: |
           pip install -r requirements.lock
-          pip install pytest pytest-asyncio
+          pip install pytest pytest-asyncio ruff
+      - name: Lint (ruff)
+        run: ruff check .
       - name: Fresh-database migration check
         run: |
           DATABASE_URL="sqlite:///$RUNNER_TEMP/fresh.db" python -m alembic upgrade head

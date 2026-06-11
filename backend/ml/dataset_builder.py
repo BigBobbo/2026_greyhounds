@@ -11,12 +11,11 @@ Handles:
 
 import gc
 import logging
-from datetime import date
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import and_, func
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.race import Race
@@ -550,7 +549,7 @@ def generate_walk_forward_fold_indices(
     train_start_size = max(1, n_races - val_size * n_folds)
 
     # Build a lookup from row index -> positional index within input
-    pos_by_index = {idx: i for i, idx in enumerate(ord_idx)}
+    {idx: i for i, idx in enumerate(ord_idx)}
 
     folds: list[tuple[np.ndarray, np.ndarray]] = []
     for fold in range(n_folds):

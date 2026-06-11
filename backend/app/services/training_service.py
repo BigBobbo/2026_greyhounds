@@ -444,8 +444,11 @@ def run_training(db: Session, experiment_id: int) -> None:
         joblib.dump(artifact, model_path)
 
         # Free large objects before updating DB
-        del dataset, X_train, y_train, X_val, y_val, X_test, y_test
-        del artifact, trainer
+        # Release memory while keeping names bound: the Optuna objective
+        # closure references X_train/y_train, and `del` on a closed-over
+        # name makes static analysis (and any post-del call) blow up.
+        dataset = X_train = y_train = X_val = y_val = X_test = y_test = None
+        artifact = trainer = None
         gc.collect()
 
         # 8. Update experiment record
@@ -657,7 +660,6 @@ def run_optuna_optimization(
         if walk_forward_folds > 1:
             from ml.dataset_builder import (
                 generate_walk_forward_fold_indices,
-                _compute_group_sizes,
             )
             X_tv = np.vstack([X_train.values, X_val.values])
             X_tv = pd.DataFrame(X_tv, columns=X_train.columns)
@@ -939,8 +941,11 @@ def run_optuna_optimization(
                 }
 
         # Free large objects
-        del dataset, X_train, y_train, X_val, y_val, X_test, y_test
-        del artifact, trainer, study
+        # Release memory while keeping names bound: the Optuna objective
+        # closure references X_train/y_train, and `del` on a closed-over
+        # name makes static analysis (and any post-del call) blow up.
+        dataset = X_train = y_train = X_val = y_val = X_test = y_test = None
+        artifact = trainer = None, study
         gc.collect()
 
         logger.info("Optuna experiment %d completed. Best: %s", experiment_id, best_params)

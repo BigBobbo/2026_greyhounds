@@ -241,7 +241,7 @@ STRATEGIES = [
 
 def _select_strategy():
     """Weighted random strategy selection."""
-    funcs, weights = zip(*STRATEGIES)
+    funcs, weights = zip(*STRATEGIES, strict=False)
     return random.choices(funcs, weights=weights, k=1)[0]
 
 
@@ -652,7 +652,6 @@ class AutoResearchLoop:
         trial_num: int,
     ) -> None:
         """Save experiment to DB for traceability."""
-        label = "BEST" if is_best else "trial"
         experiment = Experiment(
             name=f"autoresearch_{trial_num:04d}_{proposal.get('strategy', 'unknown')}",
             description=(

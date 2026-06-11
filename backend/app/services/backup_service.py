@@ -16,7 +16,7 @@ import re
 import sqlite3
 import tarfile
 import tempfile
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 
 from app.config import settings

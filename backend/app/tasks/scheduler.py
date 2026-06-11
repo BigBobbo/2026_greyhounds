@@ -14,7 +14,6 @@ Integrates with FastAPI app lifecycle.
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from threading import Thread
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler

@@ -3,7 +3,6 @@
 from typing import Any
 
 import numpy as np
-import pandas as pd
 from sklearn.linear_model import LogisticRegression as _PlattLR
 from xgboost import XGBClassifier, XGBRegressor
 
@@ -98,5 +97,5 @@ class XGBoostTrainer(BaseTrainer):
 
     def get_feature_importance(self) -> dict[str, float]:
         if hasattr(self.model, "feature_importances_") and hasattr(self.model, "feature_names_in_"):
-            return dict(zip(self.model.feature_names_in_, self.model.feature_importances_.tolist()))
+            return dict(zip(self.model.feature_names_in_, self.model.feature_importances_.tolist(), strict=False))
         return {}

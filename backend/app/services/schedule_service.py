@@ -307,7 +307,7 @@ def compute_performance(db: Session, schedule_id: int, days: int = 30) -> dict[s
     log_losses: list[float] = []
     calibration_bins: list[list[tuple[float, int]]] = [[] for _ in range(10)]
 
-    for race_id, entries in by_race.items():
+    for _race_id, entries in by_race.items():
         # Need a winner to evaluate. Skip races where no entry has finish=1
         # (e.g. void/abandoned races or partial results).
         winner = next((e for e in entries if e.finish_position == 1), None)

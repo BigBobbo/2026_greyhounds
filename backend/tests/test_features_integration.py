@@ -58,7 +58,6 @@ def _seed_simple(db):
     db.commit()
 
     base_time = 29.0  # baseline finish time at 525m
-    races_per_day = 0
     race_no = 0
     races = []
 
@@ -220,7 +219,7 @@ def test_elo_handles_unresulted_prediction_race(db):
         .filter(RaceEntry.race_id == last_race.id)
         .all()
     )
-    baseline = compute_elo_features_batch(db, [e.id for e in last_entries])
+    compute_elo_features_batch(db, [e.id for e in last_entries])
 
     # Now create a future scheduled race with the same 4 dogs
     future_race = Race(

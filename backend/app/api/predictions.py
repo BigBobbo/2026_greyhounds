@@ -2,7 +2,6 @@
 
 import logging
 from datetime import date
-from threading import Thread
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,7 +10,7 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.database import get_db, SessionLocal
+from app.database import get_db
 from app.models.dog import Dog
 from app.models.prediction import Prediction
 from app.models.race import Race
@@ -343,7 +342,7 @@ def predict_single_race(
         try:
             preds = predict_race(db, experiment_id, race_id, bankroll=bankroll)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
         saved = save_predictions(db, preds) if preds else 0
         from_cache = False
 
@@ -442,7 +441,6 @@ def get_race_combos(
     already-stored win probabilities, so it's fast (millisecond range)
     and cannot drift from the saved win-bet recommendations.
     """
-    import json
 
     from app.services.prediction_service import (
         get_saved_predictions_for_race,
@@ -469,7 +467,7 @@ def get_race_combos(
         try:
             preds = predict_race(db, experiment_id, race_id, bankroll=bankroll)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
         if not preds:
             raise HTTPException(
                 status_code=404,
@@ -1100,7 +1098,7 @@ def predict_races_by_date(
             raise HTTPException(
                 status_code=500,
                 detail=f"Feature batch computation failed: {e}",
-            )
+            ) from e
 
     results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -1158,7 +1156,7 @@ def get_upcoming_predictions(
     try:
         results = predict_upcoming_races(db, experiment_id, bankroll=bankroll)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     return {
         "experiment_id": experiment_id,
@@ -1188,7 +1186,7 @@ def predict_race_ensemble(
     try:
         preds = ensemble_predict(db, exp_ids, race_id, weights=w, bankroll=bankroll)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     track = db.query(Track).filter(Track.id == race.track_id).first()
 

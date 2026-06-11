@@ -229,9 +229,22 @@ class LambdaRankTrainer(BaseTrainer):
             log_odds = np.log(np.clip(proba, 1e-6, 1 - 1e-6) /
                               (1 - np.clip(proba, 1e-6, 1 - 1e-6)))
             proba = self.calibrator.predict_proba(log_odds.reshape(-1, 1))[:, 1]
-            # Note: we intentionally do NOT re-normalize after Platt scaling.
-            # Re-normalizing can change which dog is the top pick, contradicting
-            # the ranking model's ordering and destroying edge signals.
+            # Step 3: re-normalize per race so probabilities sum to 1 — the
+            # convention every other trainer's serving path follows. Division
+            # by the per-race sum is monotonic, so it cannot change which dog
+            # is the top pick or reorder the field (the previous comment here
+            # claimed otherwise and left ranking-model probabilities summing
+            # to anything but 1, diverging from the pointwise models and the
+            # betting backtest).
+            idx = 0
+            for g_size in group_sizes:
+                if g_size == 0:
+                    continue
+                g = proba[idx:idx + g_size]
+                total = g.sum()
+                if total > 0:
+                    proba[idx:idx + g_size] = g / total
+                idx += g_size
 
         return proba
 

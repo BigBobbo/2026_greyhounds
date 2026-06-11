@@ -25,6 +25,27 @@ from sklearn.metrics import (
 logger = logging.getLogger(__name__)
 
 
+def normalize_probs_per_race(y_proba: np.ndarray, race_ids: np.ndarray) -> np.ndarray:
+    """Normalize win probabilities to sum to 1 within each race.
+
+    This is the convention the serving path uses for every model type, so
+    any evaluation of betting strategies must be computed on the same
+    numbers — otherwise the backtest measures a quantity that is never bet
+    with (e.g. a race whose calibrated probs sum to 0.85 gets every
+    probability inflated ~18% at serve time, manufacturing edge the
+    backtest never validated). Division by the per-race sum is monotonic,
+    so rankings/top picks are unchanged.
+    """
+    proba = np.asarray(y_proba, dtype=float).copy()
+    ids = np.asarray(race_ids)
+    for rid in np.unique(ids):
+        mask = ids == rid
+        total = proba[mask].sum()
+        if total > 0:
+            proba[mask] = proba[mask] / total
+    return proba
+
+
 def compute_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -147,6 +168,11 @@ def compute_betting_metrics(
         }
     """
     import pandas as pd
+
+    # Match the serving convention BEFORE any filtering: normalize over the
+    # full field of each race, then drop no-SP rows (serving normalizes over
+    # all runners regardless of SP availability).
+    y_proba = normalize_probs_per_race(y_proba, race_ids)
 
     df = pd.DataFrame({
         "won": y_true.astype(bool),

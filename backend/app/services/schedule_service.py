@@ -20,13 +20,11 @@ scraped by the existing daily results jobs.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import traceback
 from datetime import date, datetime, timedelta
 from typing import Any
 
-import httpx
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
@@ -48,61 +46,36 @@ DEFAULT_PREDICTION_BANKROLL = 100.0
 def _scrape_upcoming_window(db: Session, start_date: date, days_ahead: int) -> dict[str, Any]:
     """Synchronously scrape upcoming race cards for the given window.
 
-    Mirrors the brute-force scrape-date logic in app.api.scraping but runs
-    inline (the caller is already on a background thread). Returns a dict
-    of stats for logging.
+    Runs via the shared job runner (audit task E8), which also gives this
+    job a ScrapeLog row — it previously ran invisibly. Returns a dict of
+    stats for logging, in the same shape callers always consumed.
     """
-    from scraping.gri_scraper import scrape_card, DEFAULT_HEADERS
+    from scraping.gri_scraper import scrape_card
     from scraping.db_pipeline import upsert_race_results
+    from scraping.job_runner import run_scrape_job
 
     tracks = db.query(Track).filter(Track.active.is_(True)).all()
     track_codes = [t.code for t in tracks]
     if not track_codes:
         return {"races_new": 0, "races_updated": 0, "tracks_failed": []}
 
-    stats = {"races_new": 0, "races_updated": 0, "tracks_failed": []}
+    dates = [start_date + timedelta(days=offset) for offset in range(days_ahead + 1)]
+    result = run_scrape_job(
+        SessionLocal,
+        track_codes,
+        dates,
+        scrape_card,
+        upsert_race_results,
+        spider_name="gri-card",
+        source_desc=f"scheduled upcoming cards {dates[0]} to {dates[-1]}",
+        delay=0.5,
+    )
 
-    async def _run():
-        async with httpx.AsyncClient(
-            headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30
-        ) as client:
-            for offset in range(days_ahead + 1):
-                race_date_val = start_date + timedelta(days=offset)
-                for tc in track_codes:
-                    try:
-                        races = await scrape_card(tc, race_date_val, client)
-                    except Exception as e:
-                        logger.warning("Card scrape %s %s failed: %s", tc, race_date_val, e)
-                        stats["tracks_failed"].append(f"{tc}:{race_date_val}")
-                        await asyncio.sleep(0.5)
-                        continue
-
-                    if not races:
-                        await asyncio.sleep(0.5)
-                        continue
-
-                    # Each track's upsert gets its own short-lived session so
-                    # a failure on one track can't poison the whole job.
-                    db_local = SessionLocal()
-                    try:
-                        upsert = upsert_race_results(db_local, races)
-                        stats["races_new"] += upsert["races_new"]
-                        stats["races_updated"] += upsert["races_updated"]
-                    except Exception as e:
-                        logger.error("Upsert failed for %s %s: %s", tc, race_date_val, e)
-                        db_local.rollback()
-                    finally:
-                        db_local.close()
-
-                    await asyncio.sleep(0.5)
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(_run())
-    finally:
-        loop.close()
-
-    return stats
+    return {
+        "races_new": result["races_new"],
+        "races_updated": result["races_updated"],
+        "tracks_failed": [f"{tc}:{d}" for tc, d in result["failed_pairs"]],
+    }
 
 
 def run_schedule_job(schedule_id: int, trigger: str = "scheduled") -> int:

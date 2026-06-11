@@ -11,14 +11,13 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.database import SessionLocal
 from app.models.track import Track
-from app.models.scrape_log import ScrapeLog
 from scraping.gri_scraper import scrape_results, discover_track_codes
 from scraping.db_pipeline import (
     pop_out_of_order_dogs,
@@ -61,13 +60,20 @@ async def run_discover_tracks():
         db.close()
 
 
-async def run_backfill(
+def run_backfill(
     start_date: date,
     end_date: date,
     track_codes: list[str] | None = None,
     delay: float = 2.0,
 ):
-    """Run historical backfill for specified tracks and date range."""
+    """Run historical backfill for specified tracks and date range.
+
+    Synchronous (the shared job runner manages its own event loop). One
+    ScrapeLog per track is preserved: each track gets its own
+    `run_scrape_job` call, so per-track progress/failures stay visible in
+    the scraping UI exactly as before.
+    """
+    from scraping.job_runner import run_scrape_job
 
     db = SessionLocal()
     try:
@@ -75,97 +81,64 @@ async def run_backfill(
             tracks = db.query(Track).filter(Track.code.in_(track_codes)).all()
         else:
             tracks = db.query(Track).filter(Track.active.is_(True)).all()
+        codes = [t.code for t in tracks]
+    finally:
+        db.close()
 
-        if not tracks:
-            logger.error("No tracks found! Run --discover-tracks first.")
-            return
+    if not codes:
+        logger.error("No tracks found! Run --discover-tracks first.")
+        return
 
+    logger.info(
+        "Starting backfill: %d tracks, %s to %s", len(codes), start_date, end_date,
+    )
+
+    dates = [
+        start_date + timedelta(days=i)
+        for i in range((end_date - start_date).days + 1)
+    ]
+
+    total_races = 0
+    total_entries = 0
+
+    for code in codes:
+        result = run_scrape_job(
+            SessionLocal,
+            [code],
+            dates,
+            scrape_results,
+            upsert_race_results,
+            spider_name="gri",
+            source_desc=f"backfill {code} {start_date} to {end_date}",
+            delay=delay,
+        )
+        total_races += result["races_new"]
+        total_entries += result["entries_new"]
         logger.info(
-            "Starting backfill: %d tracks, %s to %s",
-            len(tracks), start_date, end_date,
+            "Track %s complete: %d races, %d entries (%d failed day(s))",
+            code, result["races_new"], result["entries_new"],
+            len(result["failed_pairs"]),
         )
 
-        total_races = 0
-        total_entries = 0
-
-        for track in tracks:
-            # Create scrape log
-            log = ScrapeLog(
-                spider_name="gri",
-                source=f"backfill {track.code} {start_date} to {end_date}",
-                status="running",
-                started_at=datetime.utcnow(),
-            )
-            db.add(log)
-            db.commit()
-
-            track_races = 0
-            track_entries = 0
-            failed_days: list[str] = []
-            current = start_date
-
-            try:
-                while current <= end_date:
-                    # Per-day failures are recorded but don't stop the loop —
-                    # the rest of the date range is still scraped.
-                    try:
-                        races = await scrape_results(track.code, current)
-
-                        if races:
-                            stats = upsert_race_results(db, races, scrape_log_id=log.id)
-                            track_races += stats["races_new"]
-                            track_entries += stats["entries_new"]
-                    except Exception as e:
-                        logger.error("Error scraping %s %s: %s", track.code, current, e)
-                        failed_days.append(f"{track.code} {current}")
-
-                    log.heartbeat_at = datetime.utcnow()
-                    db.commit()
-                    current += timedelta(days=1)
-                    await asyncio.sleep(delay)
-
-                if failed_days:
-                    shown = ", ".join(failed_days[:20])
-                    extra = f" (+{len(failed_days) - 20} more)" if len(failed_days) > 20 else ""
-                    log.status = "partial"
-                    log.error_message = f"Failed (track, date): {shown}{extra}"
-                else:
-                    log.status = "success"
-                log.records_scraped = track_races
-                log.records_new = track_entries
-
-            except Exception as e:
-                logger.error("Error scraping %s: %s", track.code, e)
-                log.status = "failed"
-                log.error_message = str(e)
-
-            log.completed_at = datetime.utcnow()
-            db.commit()
-
-            total_races += track_races
-            total_entries += track_entries
-            logger.info(
-                "Track %s complete: %d races, %d entries",
-                track.code, track_races, track_entries,
-            )
-
-        # Track-by-track iteration inserts races out of chronological order,
-        # corrupting days_since_last on later entries written first. Heal
-        # once at the end when any out-of-order insert was flagged.
-        flagged = pop_out_of_order_dogs()
-        if flagged:
+    # Track-by-track iteration inserts races out of chronological order,
+    # corrupting days_since_last on later entries written first. Heal
+    # once at the end when any out-of-order insert was flagged.
+    flagged = pop_out_of_order_dogs()
+    if flagged:
+        db = SessionLocal()
+        try:
             healed = recompute_days_since_last(db)
             logger.info(
                 "Healed days_since_last: %d entries corrected (%d dogs flagged)",
                 healed, len(flagged),
             )
+        finally:
+            db.close()
 
-        logger.info(
-            "Backfill complete: %d total races, %d total entries",
-            total_races, total_entries,
-        )
-    finally:
-        db.close()
+    logger.info(
+        "Backfill complete: %d total races, %d total entries",
+        total_races, total_entries,
+    )
 
 
 def main():
@@ -188,7 +161,7 @@ def main():
     end = date.fromisoformat(args.end)
     track_codes = args.tracks.split(",") if args.tracks else None
 
-    asyncio.run(run_backfill(start, end, track_codes, args.delay))
+    run_backfill(start, end, track_codes, args.delay)
 
 
 if __name__ == "__main__":

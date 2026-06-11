@@ -55,6 +55,63 @@ DEFAULT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.5",
 }
 
+# Transient-failure retry policy (audit task E7): network/transport errors and
+# 5xx responses are retried with exponential backoff. 4xx responses and
+# ParseStructureError are NOT retried — repeating a wrong request (or
+# re-parsing the same broken markup) cannot help. Module-level constants so
+# tests can shrink the delays.
+MAX_FETCH_ATTEMPTS = 3
+RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 4.0, 8.0)
+
+
+async def _fetch_page(url: str, client: httpx.AsyncClient | None = None) -> str:
+    """GET a GRI page, retrying transient failures with exponential backoff.
+
+    Transient = network error or 5xx response: up to MAX_FETCH_ATTEMPTS
+    attempts, sleeping RETRY_BACKOFF_S[attempt] between them. Any other
+    non-200 response (4xx etc.) raises immediately without retrying.
+
+    Raises ScrapeFetchError when the page cannot be fetched.
+    """
+    close_client = False
+    if client is None:
+        client = httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30)
+        close_client = True
+
+    try:
+        last_error: Exception | None = None
+        reason = "unknown"
+        for attempt in range(MAX_FETCH_ATTEMPTS):
+            try:
+                resp = await client.get(url)
+            except Exception as e:
+                last_error = e
+                reason = f"network error: {e}"
+            else:
+                if resp.status_code == 200:
+                    return resp.text
+                if resp.status_code < 500:
+                    # 4xx (or a 3xx that survived follow_redirects): the
+                    # request itself is wrong — retrying cannot help.
+                    raise ScrapeFetchError(f"Got {resp.status_code} for {url}")
+                last_error = None
+                reason = f"HTTP {resp.status_code}"
+            if attempt + 1 < MAX_FETCH_ATTEMPTS:
+                backoff = RETRY_BACKOFF_S[min(attempt, len(RETRY_BACKOFF_S) - 1)]
+                logger.warning(
+                    "Transient fetch failure for %s (%s) — attempt %d/%d, "
+                    "retrying in %.0fs",
+                    url, reason, attempt + 1, MAX_FETCH_ATTEMPTS, backoff,
+                )
+                await asyncio.sleep(backoff)
+        msg = f"Failed to fetch {url} after {MAX_FETCH_ATTEMPTS} attempts ({reason})"
+        if last_error is not None:
+            raise ScrapeFetchError(msg) from last_error
+        raise ScrapeFetchError(msg)
+    finally:
+        if close_client:
+            await client.aclose()
+
 GRI_TRACK_CODES = {
     "CML": "Clonmel",
     "CRK": "Curraheen Park",
@@ -523,30 +580,14 @@ async def scrape_results(
 ) -> list[dict[str, Any]]:
     """Scrape race results for a specific track and date.
 
-    Raises ScrapeFetchError on network failure or non-200 response, and
+    Raises ScrapeFetchError on network failure or non-200 response (with
+    retry/backoff for transient failures — see `_fetch_page`), and
     propagates ParseStructureError from the parser — callers record these
     as failed (track, date) pairs instead of silently logging success.
     """
     date_str = format_date(race_date)
     url = f"{VIEW_RESULTS_URL}?track={track_code}&date={date_str}"
-
-    close_client = False
-    if client is None:
-        client = httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30)
-        close_client = True
-
-    try:
-        try:
-            resp = await client.get(url)
-        except Exception as e:
-            raise ScrapeFetchError(f"Failed to fetch {url}: {e}") from e
-        if resp.status_code != 200:
-            raise ScrapeFetchError(f"Got {resp.status_code} for {url}")
-        html = resp.text
-    finally:
-        if close_client:
-            await client.aclose()
-
+    html = await _fetch_page(url, client)
     return parse_results_page(html, track_code, race_date)
 
 
@@ -738,28 +779,12 @@ async def scrape_card(
 ) -> list[dict[str, Any]]:
     """Scrape the card summary (Tier 1) for a track + future date.
 
-    Raises ScrapeFetchError on network failure or non-200 response.
+    Raises ScrapeFetchError on network failure or non-200 response (with
+    retry/backoff for transient failures — see `_fetch_page`).
     """
     date_str = format_date(race_date)
     url = f"{VIEW_CARD_URL}?track={track_code}&date={date_str}"
-
-    close_client = False
-    if client is None:
-        client = httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30)
-        close_client = True
-
-    try:
-        try:
-            resp = await client.get(url)
-        except Exception as e:
-            raise ScrapeFetchError(f"Failed to fetch {url}: {e}") from e
-        if resp.status_code != 200:
-            raise ScrapeFetchError(f"Got {resp.status_code} for {url}")
-        html = resp.text
-    finally:
-        if close_client:
-            await client.aclose()
-
+    html = await _fetch_page(url, client)
     return parse_card_page(html, track_code, race_date)
 
 
@@ -880,31 +905,15 @@ async def scrape_card_form(
 ) -> dict[int, dict[str, Any]]:
     """Scrape per-race form detail (Tier 2) and return enrichment by trap.
 
-    Raises ScrapeFetchError on network failure or non-200 response.
+    Raises ScrapeFetchError on network failure or non-200 response (with
+    retry/backoff for transient failures — see `_fetch_page`).
     """
     date_str = format_date(race_date)
     url = (
         f"{VIEW_CARD_FORM_URL}?Track={track_code}&Date={date_str}"
         f"&RaceNumber={race_number}"
     )
-
-    close_client = False
-    if client is None:
-        client = httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30)
-        close_client = True
-
-    try:
-        try:
-            resp = await client.get(url)
-        except Exception as e:
-            raise ScrapeFetchError(f"Failed to fetch {url}: {e}") from e
-        if resp.status_code != 200:
-            raise ScrapeFetchError(f"Got {resp.status_code} for {url}")
-        html = resp.text
-    finally:
-        if close_client:
-            await client.aclose()
-
+    html = await _fetch_page(url, client)
     return parse_card_form_page(html)
 
 

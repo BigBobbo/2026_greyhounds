@@ -260,8 +260,10 @@ def _run(coro):
 
 
 def test_scrape_results_raises_on_non_200():
+    # A 404 raises immediately — 4xx is never retried (transient 5xx/network
+    # retry behaviour is covered in test_scrape_retry.py).
     async def go():
-        transport = httpx.MockTransport(lambda req: httpx.Response(500))
+        transport = httpx.MockTransport(lambda req: httpx.Response(404))
         async with httpx.AsyncClient(transport=transport) as client:
             await scrape_results("SPK", RACE_DATE, client)
 
@@ -269,7 +271,13 @@ def test_scrape_results_raises_on_non_200():
         _run(go())
 
 
-def test_scrape_results_raises_on_network_error():
+def test_scrape_results_raises_on_network_error(monkeypatch):
+    import scraping.gri_scraper as gri_scraper
+
+    # Network errors are retried with backoff (E7) — zero the delays so the
+    # exhaustion path runs instantly.
+    monkeypatch.setattr(gri_scraper, "RETRY_BACKOFF_S", (0.0, 0.0, 0.0))
+
     def handler(request):
         raise httpx.ConnectError("connection refused", request=request)
 

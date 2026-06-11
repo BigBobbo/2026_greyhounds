@@ -10,7 +10,7 @@ Handles:
 
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func
@@ -149,6 +149,34 @@ def find_or_create_dog(
     return new_dog
 
 
+def _apply_field(
+    obj: Any, field: str, new_value: Any, *, authoritative: bool, label: str
+) -> None:
+    """Write `new_value` onto `obj.field` according to scrape provenance.
+
+    Fill-only when not authoritative (card scrapes): a stored value is never
+    replaced. For authoritative (results) scrapes a differing stored value
+    is OVERWRITTEN and the correction logged — re-scrapes must heal bad
+    data instead of preserving it forever (audit task E10).
+    """
+    if new_value is None:
+        return
+    current = getattr(obj, field)
+    if current is None or current == "":
+        setattr(obj, field, new_value)
+        return
+    if authoritative and current != new_value:
+        logger.info(
+            "Correcting %s.%s: %r -> %r", label, field, current, new_value
+        )
+        setattr(obj, field, new_value)
+
+
+# Race fields that result pages carry authoritatively. Card scrapes only
+# fill these when NULL; results scrapes overwrite differing values.
+_RACE_RESULT_FIELDS = ("going", "going_allowance", "prize_money", "grade", "race_time")
+
+
 def upsert_race(
     db: Session,
     track: Track,
@@ -160,10 +188,20 @@ def upsert_race(
 
     Returns None (and does not create a race) when a NEW race has no parsed
     distance — storing distance_m=0 would poison distance-based features.
+
+    When the scraped data carries results (any entry has a finish position),
+    result-derived race fields are authoritative: stored values that differ
+    are overwritten (and logged), not preserved (audit task E10). Card
+    scrapes keep fill-only-if-NULL semantics — results are stronger
+    provenance. ``num_runners`` is handled in ``upsert_race_results``,
+    which recomputes it from non-scratched entries on results scrapes.
     """
     race_date_val = race_data["race_date"]
     race_number = race_data.get("race_number")
     stamp = scraped_at or datetime.utcnow()
+    has_results = any(
+        e.get("finish_position") is not None for e in race_data.get("entries", [])
+    )
 
     existing = (
         db.query(Race)
@@ -176,19 +214,17 @@ def upsert_race(
     )
 
     if existing:
-        # Update fields if we have better data
+        label = f"race id={existing.id} ({track.code} {race_date_val} R{race_number})"
+        # Distance defines the race's identity for features — fill-only.
         if race_data.get("distance_m") and not existing.distance_m:
             existing.distance_m = race_data["distance_m"]
-        if race_data.get("grade") and not existing.grade:
-            existing.grade = race_data["grade"]
-        if race_data.get("going") and not existing.going:
-            existing.going = race_data["going"]
-        if race_data.get("prize_money") and not existing.prize_money:
-            existing.prize_money = race_data["prize_money"]
-        if race_data.get("race_time") and not existing.race_time:
-            existing.race_time = race_data["race_time"]
+        for field in _RACE_RESULT_FIELDS:
+            _apply_field(
+                existing, field, race_data.get(field),
+                authoritative=has_results, label=label,
+            )
         # Mark as resulted if we have finish data
-        if any(e.get("finish_position") for e in race_data.get("entries", [])):
+        if has_results:
             existing.status = "resulted"
         existing.last_scraped_at = stamp
         if scrape_log_id is not None:
@@ -215,7 +251,7 @@ def upsert_race(
         prize_money=race_data.get("prize_money"),
         num_runners=len(race_data.get("entries", [])),
         source="gri",
-        status="resulted" if any(e.get("finish_position") for e in race_data.get("entries", [])) else "scheduled",
+        status="resulted" if has_results else "scheduled",
         last_scraped_at=stamp,
         last_scrape_log_id=scrape_log_id,
     )
@@ -224,14 +260,31 @@ def upsert_race(
     return race
 
 
+# Entry fields that result pages carry authoritatively (audit task E10).
+# sp_decimal rides along with starting_price.
+_ENTRY_RESULT_FIELDS = (
+    "finish_position", "finish_time", "sectional_time", "adjusted_time",
+    "beaten_distance", "weight_kg", "starting_price", "sp_decimal", "comment",
+)
+
+
 def upsert_race_entry(
     db: Session,
     race: Race,
     entry_data: dict[str, Any],
     scrape_log_id: int | None = None,
     scraped_at: datetime | None = None,
+    authoritative: bool = False,
 ) -> RaceEntry | None:
-    """Upsert a race entry. Returns existing or new RaceEntry."""
+    """Upsert a race entry. Returns existing or new RaceEntry.
+
+    With ``authoritative=True`` (results scrapes — set by
+    ``upsert_race_results`` when the race carries finish data),
+    result-derived fields OVERWRITE differing stored values and the
+    correction is logged, so re-scrapes heal bad data (audit task E10).
+    With the default ``False`` (card scrapes), stored values are only
+    filled when NULL — results are stronger provenance than cards.
+    """
     dog_name = entry_data.get("dog_name")
     trap = entry_data.get("trap")
     stamp = scraped_at or datetime.utcnow()
@@ -280,18 +333,27 @@ def upsert_race_entry(
                 dog.name,
             )
             existing.dog_id = dog.id
-        # Update with new data if available
-        if entry_data.get("finish_position") is not None:
-            existing.finish_position = entry_data["finish_position"]
-        if entry_data.get("finish_time") is not None:
-            existing.finish_time = entry_data["finish_time"]
-        if entry_data.get("starting_price") and not existing.starting_price:
-            existing.starting_price = entry_data["starting_price"]
-            existing.sp_decimal = entry_data.get("sp_decimal")
-        if entry_data.get("weight_kg") and not existing.weight_kg:
-            existing.weight_kg = entry_data["weight_kg"]
-        if entry_data.get("comment") and not existing.comment:
-            existing.comment = entry_data["comment"]
+        # Update with new data if available. Results scrapes are
+        # authoritative for result-derived fields; card scrapes fill-only.
+        if authoritative:
+            label = f"entry race={race.id} trap={trap}"
+            for field in _ENTRY_RESULT_FIELDS:
+                _apply_field(
+                    existing, field, entry_data.get(field),
+                    authoritative=True, label=label,
+                )
+        else:
+            if entry_data.get("finish_position") is not None:
+                existing.finish_position = entry_data["finish_position"]
+            if entry_data.get("finish_time") is not None:
+                existing.finish_time = entry_data["finish_time"]
+            if entry_data.get("starting_price") and not existing.starting_price:
+                existing.starting_price = entry_data["starting_price"]
+                existing.sp_decimal = entry_data.get("sp_decimal")
+            if entry_data.get("weight_kg") and not existing.weight_kg:
+                existing.weight_kg = entry_data["weight_kg"]
+            if entry_data.get("comment") and not existing.comment:
+                existing.comment = entry_data["comment"]
         # Backfill derivable fields if they were left NULL at first scrape.
         if grade_at_entry and not existing.grade_at_entry:
             existing.grade_at_entry = grade_at_entry
@@ -400,7 +462,15 @@ def upsert_race_results(
         else:
             stats["races_new"] += 1
 
-        for entry_data in race_data.get("entries", []):
+        # Results scrapes are authoritative for result-derived entry fields
+        # (audit task E10) — they overwrite differing stored values instead
+        # of only filling NULLs the way card scrapes do.
+        scraped_entries = race_data.get("entries", [])
+        has_results = any(
+            e.get("finish_position") is not None for e in scraped_entries
+        )
+
+        for entry_data in scraped_entries:
             existing_entry = None
             if existing_race:
                 existing_entry = (
@@ -412,7 +482,11 @@ def upsert_race_results(
                     .first()
                 )
 
-            upsert_race_entry(db, race, entry_data, scrape_log_id=scrape_log_id, scraped_at=stamp)
+            upsert_race_entry(
+                db, race, entry_data,
+                scrape_log_id=scrape_log_id, scraped_at=stamp,
+                authoritative=has_results,
+            )
 
             if existing_entry:
                 stats["entries_updated"] += 1
@@ -422,10 +496,6 @@ def upsert_race_results(
         # When this scrape carries RESULTS, any previously carded entry whose
         # trap is absent from the results did not run — mark it scratched and
         # recompute num_runners from the non-scratched entries.
-        scraped_entries = race_data.get("entries", [])
-        has_results = any(
-            e.get("finish_position") is not None for e in scraped_entries
-        )
         if has_results:
             result_traps = {e.get("trap") for e in scraped_entries if e.get("trap")}
             stored_entries = (
@@ -461,6 +531,30 @@ def upsert_race_results(
     )
 
     return stats
+
+
+def void_stale_scheduled_races(db: Session, older_than_days: int = 3) -> int:
+    """Mark long-past races still stuck in status='scheduled' as 'void'.
+
+    A scheduled race whose date is more than `older_than_days` in the past
+    never got results (meeting abandoned, race cancelled, results scrape
+    permanently missed). Leaving it 'scheduled' keeps it selectable for
+    prediction forever — void it instead. Prediction listings filter on
+    status == 'scheduled', so voided races drop out everywhere (audit
+    task E10). Returns the number of races voided.
+    """
+    cutoff = date.today() - timedelta(days=older_than_days)
+    count = (
+        db.query(Race)
+        .filter(Race.status == "scheduled", Race.race_date < cutoff)
+        .update({"status": "void"}, synchronize_session=False)
+    )
+    if count:
+        db.commit()
+        logger.warning(
+            "Voided %d stale scheduled race(s) dated before %s", count, cutoff
+        )
+    return count
 
 
 def recompute_days_since_last(db: Session) -> int:

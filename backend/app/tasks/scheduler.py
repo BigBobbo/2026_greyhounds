@@ -11,7 +11,6 @@ Two job kinds run here:
 Integrates with FastAPI app lifecycle.
 """
 
-import asyncio
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -127,113 +126,160 @@ def warn_if_results_stale(db: Session) -> None:
         )
 
 
-def _scrape_all_tracks_today():
-    """Scrape today's results for all active tracks."""
+def _active_track_codes() -> list[str]:
+    db = SessionLocal()
+    try:
+        return [t.code for t in db.query(Track).filter(Track.active.is_(True)).all()]
+    finally:
+        db.close()
+
+
+def _scrape_results_for_day(day, source_desc: str) -> None:
+    """Scrape one day's results for all active tracks via the job runner (E8)."""
     from scraping.gri_scraper import scrape_results
     from scraping.db_pipeline import upsert_race_results
+    from scraping.job_runner import run_scrape_job
 
-    async def _run():
-        db = SessionLocal()
-        try:
-            tracks = db.query(Track).filter(Track.active.is_(True)).all()
-            today = _dublin_today()
+    try:
+        result = run_scrape_job(
+            SessionLocal,
+            _active_track_codes(),
+            [day],
+            scrape_results,
+            upsert_race_results,
+            spider_name="gri",
+            source_desc=source_desc,
+            delay=2.0,
+        )
+        logger.info(
+            "%s complete: %d races (%d new), %d failed pair(s)",
+            source_desc, result["races_scraped"], result["races_new"],
+            len(result["failed_pairs"]),
+        )
+    except Exception as e:
+        logger.error("%s failed: %s", source_desc, e)
 
-            log = ScrapeLog(
-                spider_name="gri",
-                source=f"scheduled daily {today}",
-                status="running",
-                started_at=datetime.utcnow(),
-            )
-            db.add(log)
-            db.commit()
 
-            total_races = 0
-            total_new = 0
-            failed: list[str] = []
-
-            for track in tracks:
-                try:
-                    races = await scrape_results(track.code, today)
-                    if races:
-                        stats = upsert_race_results(db, races)
-                        total_races += stats["races_new"] + stats["races_updated"]
-                        total_new += stats["races_new"]
-                    await asyncio.sleep(2.0)
-                except Exception as e:
-                    logger.error("Error scraping %s: %s", track.code, e)
-                    failed.append(f"{track.code} {today}")
-
-            if failed:
-                log.status = "partial"
-                log.error_message = f"Failed (track, date): {', '.join(failed)}"
-            else:
-                log.status = "success"
-            log.records_scraped = total_races
-            log.records_new = total_new
-            log.completed_at = datetime.utcnow()
-            db.commit()
-
-            logger.info("Daily scrape complete: %d races (%d new)", total_races, total_new)
-
-        except Exception as e:
-            logger.error("Daily scrape failed: %s", e)
-        finally:
-            db.close()
-
-    loop = asyncio.new_event_loop()
-    loop.run_until_complete(_run())
-    loop.close()
+def _scrape_all_tracks_today():
+    """Scrape today's results for all active tracks."""
+    today = _dublin_today()
+    _scrape_results_for_day(today, f"scheduled daily {today}")
 
 
 def _scrape_yesterday_results():
     """Scrape yesterday's results (ensures we catch late-posted results)."""
-    from scraping.gri_scraper import scrape_results
-    from scraping.db_pipeline import upsert_race_results
+    yesterday = _dublin_today() - timedelta(days=1)
+    _scrape_results_for_day(yesterday, f"scheduled yesterday {yesterday}")
 
-    async def _run():
-        db = SessionLocal()
+
+def _void_stale_races_job():
+    """APScheduler entrypoint: void scheduled races whose date has long
+    passed without results (audit task E10)."""
+    from scraping.db_pipeline import void_stale_scheduled_races
+
+    db = SessionLocal()
+    try:
+        voided = void_stale_scheduled_races(db)
+        if voided:
+            logger.warning("Void sweep: %d stale scheduled race(s) voided", voided)
+    except Exception as e:
+        logger.error("Void sweep failed: %s", e)
+    finally:
+        db.close()
+
+
+def daily_digest(db: Session) -> dict:
+    """Summarize the last 24h of scraping/training activity (audit task E12).
+
+    Returned dict (also served by GET /api/scraping/digest):
+      - scrape_jobs_by_status: ScrapeLog counts in the window, keyed by status
+      - failed_pairs / total_failed_pairs: structured per-(track, date)
+        failure rows (E7) with their error messages
+      - races_scraped: records_scraped summed over finished jobs
+      - stale_experiments: 'running' experiments with no recent heartbeat
+      - anything_failed: True when any of the above indicates a problem
+    """
+    from app.models.experiment import Experiment
+
+    now = datetime.utcnow()
+    since = now - timedelta(hours=24)
+
+    logs = db.query(ScrapeLog).filter(ScrapeLog.started_at >= since).all()
+
+    jobs_by_status: dict[str, int] = {}
+    failed_pairs: list[dict] = []
+    races_scraped = 0
+    for log in logs:
+        jobs_by_status[log.status] = jobs_by_status.get(log.status, 0) + 1
+        if log.status == "failed" and log.track_code and log.race_date:
+            failed_pairs.append({
+                "track_code": log.track_code,
+                "race_date": str(log.race_date),
+                "error": log.error_message,
+            })
+        if log.status in ("success", "partial"):
+            races_scraped += log.records_scraped or 0
+
+    cutoff = now - timedelta(minutes=STALE_JOB_MINUTES)
+    stale_experiments = 0
+    for exp in db.query(Experiment).filter(Experiment.status == "running").all():
+        last_alive = exp.heartbeat_at or exp.created_at
+        if last_alive is None or last_alive < cutoff:
+            stale_experiments += 1
+
+    anything_failed = bool(
+        jobs_by_status.get("failed")
+        or jobs_by_status.get("partial")
+        or failed_pairs
+        or stale_experiments
+    )
+
+    return {
+        "generated_at": now.isoformat(),
+        "window_hours": 24,
+        "scrape_jobs_by_status": jobs_by_status,
+        "total_failed_pairs": len(failed_pairs),
+        "failed_pairs": failed_pairs,
+        "races_scraped": races_scraped,
+        "stale_experiments": stale_experiments,
+        "anything_failed": anything_failed,
+    }
+
+
+def _daily_digest_job():
+    """APScheduler entrypoint: log the daily digest and ship it to Sentry.
+
+    WARNING when anything failed in the last 24h, INFO otherwise. The
+    Sentry message is only sent when something failed — a quiet day should
+    not page anyone.
+    """
+    db = SessionLocal()
+    try:
+        digest = daily_digest(db)
+    except Exception as e:
+        logger.error("Daily digest failed: %s", e)
+        return
+    finally:
+        db.close()
+
+    summary = (
+        f"Daily scrape digest: jobs={digest['scrape_jobs_by_status']} "
+        f"failed_pairs={digest['total_failed_pairs']} "
+        f"races_scraped={digest['races_scraped']} "
+        f"stale_experiments={digest['stale_experiments']}"
+    )
+    if digest["anything_failed"]:
+        logger.warning(summary)
+    else:
+        logger.info(summary)
+
+    if settings.sentry_dsn and digest["anything_failed"]:
         try:
-            tracks = db.query(Track).filter(Track.active.is_(True)).all()
-            yesterday = _dublin_today() - timedelta(days=1)
+            import sentry_sdk
 
-            log = ScrapeLog(
-                spider_name="gri",
-                source=f"scheduled yesterday {yesterday}",
-                status="running",
-                started_at=datetime.utcnow(),
-            )
-            db.add(log)
-            db.commit()
-
-            total_races = 0
-            failed: list[str] = []
-            for track in tracks:
-                try:
-                    races = await scrape_results(track.code, yesterday)
-                    if races:
-                        stats = upsert_race_results(db, races)
-                        total_races += stats["races_new"] + stats["races_updated"]
-                    await asyncio.sleep(2.0)
-                except Exception as e:
-                    logger.error("Error scraping %s: %s", track.code, e)
-                    failed.append(f"{track.code} {yesterday}")
-
-            if failed:
-                log.status = "partial"
-                log.error_message = f"Failed (track, date): {', '.join(failed)}"
-            else:
-                log.status = "success"
-            log.records_scraped = total_races
-            log.completed_at = datetime.utcnow()
-            db.commit()
+            sentry_sdk.capture_message(summary, level="warning")
         except Exception as e:
-            logger.error("Yesterday scrape failed: %s", e)
-        finally:
-            db.close()
-
-    loop = asyncio.new_event_loop()
-    loop.run_until_complete(_run())
-    loop.close()
+            logger.error("Could not send daily digest to Sentry: %s", e)
 
 
 # --- Per-schedule prediction jobs ---
@@ -355,6 +401,27 @@ def start_scheduler():
         trigger=IntervalTrigger(hours=1),
         id="stale_job_reaper",
         name="Reap stale running jobs",
+        replace_existing=True,
+    )
+
+    # Void sweep at 04:00 Dublin (quiet hour, after the late-night results
+    # scrape): scheduled races whose date passed days ago never got results
+    # and must not stay selectable for prediction (audit task E10).
+    scheduler.add_job(
+        _void_stale_races_job,
+        trigger=CronTrigger(hour=4, minute=0, timezone="Europe/Dublin"),
+        id="void_stale_races",
+        name="Void stale scheduled races",
+        replace_existing=True,
+    )
+
+    # Daily failure-visibility digest at 08:30 Dublin, after the 08:00
+    # yesterday-results scrape so its outcome is included (audit task E12).
+    scheduler.add_job(
+        _daily_digest_job,
+        trigger=CronTrigger(hour=8, minute=30, timezone="Europe/Dublin"),
+        id="daily_digest",
+        name="Daily scrape digest",
         replace_existing=True,
     )
 

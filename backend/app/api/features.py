@@ -394,13 +394,6 @@ def delete_version(version_id: int, db: Session = Depends(get_db)):
     db.commit()
 
 
-@router.get("/start-materialize")
-def start_materialize_get(force: bool = False, db: Session = Depends(get_db)):
-    """GET endpoint to trigger materialization from browser URL bar."""
-    req = MaterializeRequest(force=force)
-    return trigger_materialization(req, db)
-
-
 @router.get("/{feature_id}", response_model=FeatureDefinitionResponse)
 def get_feature(feature_id: int, db: Session = Depends(get_db)):
     feature = db.query(FeatureDefinition).filter(FeatureDefinition.id == feature_id).first()

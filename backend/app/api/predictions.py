@@ -277,7 +277,7 @@ def predict_race_preflight(
     }
 
 
-@router.get("/race/{race_id}")
+@router.post("/race/{race_id}")
 def predict_single_race(
     race_id: int,
     experiment_id: int,
@@ -416,7 +416,7 @@ def get_saved_race_predictions(
     }
 
 
-@router.get("/race/{race_id}/combos")
+@router.post("/race/{race_id}/combos")
 def get_race_combos(
     race_id: int,
     experiment_id: int,
@@ -1005,7 +1005,7 @@ def get_races_for_date(
     ]
 
 
-@router.get("/by-date")
+@router.post("/by-date")
 def predict_races_by_date(
     race_date: date,
     experiment_id: int,
@@ -1146,7 +1146,7 @@ def predict_races_by_date(
     }
 
 
-@router.get("/upcoming")
+@router.post("/upcoming")
 def get_upcoming_predictions(
     experiment_id: int,
     bankroll: float | None = Query(default=None, ge=1, description="Override the tracked bankroll; defaults to BankrollConfig.current_bankroll"),
@@ -1167,7 +1167,7 @@ def get_upcoming_predictions(
     }
 
 
-@router.get("/race/{race_id}/ensemble")
+@router.post("/race/{race_id}/ensemble")
 def predict_race_ensemble(
     race_id: int,
     experiment_ids: str = Query(..., description="Comma-separated experiment IDs"),
@@ -1204,7 +1204,7 @@ def predict_race_ensemble(
     }
 
 
-@router.get("/best-bets")
+@router.post("/best-bets")
 def get_best_bets(
     experiment_id: int,
     race_date: date,

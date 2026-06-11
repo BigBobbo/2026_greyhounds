@@ -344,7 +344,7 @@ export default function Predictions() {
         bankroll: String(bankroll),
       });
       if (forceRefresh) params.set('refresh', 'true');
-      const res = await api.get(`/predictions/race/${raceId}?${params}`);
+      const res = await api.post(`/predictions/race/${raceId}?${params}`);
       setPredictions(res.data);
     } catch {
       // error toast shown by the API interceptor
@@ -491,7 +491,7 @@ export default function Predictions() {
         bankroll: String(bankroll),
         only_scheduled: 'true',
       });
-      const res = await api.get<ByDateResponse>(`/predictions/by-date?${params}`);
+      const res = await api.post<ByDateResponse>(`/predictions/by-date?${params}`);
       setByDateResult(res.data);
     } catch {
       // error toast shown by the API interceptor

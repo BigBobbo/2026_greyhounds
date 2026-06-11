@@ -58,3 +58,34 @@ def test_auth_disabled_when_key_unset(client, monkeypatch):
     monkeypatch.setattr(settings, "api_key", "")
     resp = client.get("/api/tracks/")
     assert resp.status_code != 401
+
+
+def test_no_get_route_mutates_state():
+    """Audit I1: every known state-changing route must not be GET.
+
+    GETs are crawlable, prefetchable, and cacheable; these routes run
+    models, persist predictions, or launch background jobs.
+    """
+    mutating_paths = {
+        "/api/predictions/race/{race_id}": "POST",
+        "/api/predictions/by-date": "POST",
+        "/api/predictions/best-bets": "POST",
+        "/api/predictions/upcoming": "POST",
+        "/api/predictions/race/{race_id}/ensemble": "POST",
+        "/api/predictions/race/{race_id}/combos": "POST",
+        "/api/features/materialize": "POST",
+    }
+    from app.main import app as _app
+
+    routes = {}
+    for route in _app.routes:
+        methods = getattr(route, "methods", None)
+        if methods:
+            routes.setdefault(route.path, set()).update(methods)
+
+    for path, method in mutating_paths.items():
+        assert path in routes, f"route {path} missing"
+        assert "GET" not in routes[path], f"{path} still accepts GET"
+        assert method in routes[path]
+
+    assert "/api/features/start-materialize" not in routes

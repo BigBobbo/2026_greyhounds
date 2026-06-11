@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import api from '../api/client';
+import { parseUtc } from '../lib/time';
 import type { Track } from '../types/models';
 
 interface ScrapeLog {
@@ -419,7 +420,7 @@ export default function ScrapingStatusPage() {
                 const isRunning = log.status === 'running';
                 const lastAlive = log.heartbeat_at || log.started_at;
                 const minsSinceAlive = isRunning && lastAlive
-                  ? Math.round((now - new Date(lastAlive).getTime()) / 60000)
+                  ? Math.round((now - (parseUtc(lastAlive)?.getTime() ?? now)) / 60000)
                   : null;
                 const isStale = isRunning && minsSinceAlive !== null && minsSinceAlive >= 15;
                 return (

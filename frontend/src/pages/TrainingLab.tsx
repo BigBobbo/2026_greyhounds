@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
+import { parseUtc } from '../lib/time';
 import api from '../api/client';
 import type { Experiment, FeatureDefinition, SplitConfig } from '../types/models';
 
@@ -190,7 +191,7 @@ export default function TrainingLab() {
 
   const heartbeatAgeSeconds = (heartbeat: string | null) => {
     if (!heartbeat) return null;
-    return Math.floor((now - new Date(heartbeat + 'Z').getTime()) / 1000);
+    return Math.floor((now - (parseUtc(heartbeat)?.getTime() ?? 0)) / 1000);
   };
 
   const formatHeartbeatAge = (seconds: number) => {

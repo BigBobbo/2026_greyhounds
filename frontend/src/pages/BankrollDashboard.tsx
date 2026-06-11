@@ -136,6 +136,8 @@ export default function BankrollDashboard() {
   };
 
   const handleSettleBet = async (betId: number, position: number) => {
+    const verdict = position === 1 ? 'WON' : 'LOST';
+    if (!confirm(`Settle this bet as ${verdict}? This adjusts the bankroll and cannot be undone.`)) return;
     try {
       await api.post(`/bankroll/bets/${betId}/settle`, { actual_position: position });
       toast.success(`Bet settled as ${position === 1 ? 'won' : 'lost'}`);

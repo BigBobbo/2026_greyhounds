@@ -23,6 +23,7 @@ dependencies = [
     "apscheduler>=3.10.0,<4",
     "RestrictedPython>=7.0,<9",
     "boto3>=1.34.0,<2",
+    "sentry-sdk[fastapi]>=2.0,<4",
 ]
 
 [project.optional-dependencies]

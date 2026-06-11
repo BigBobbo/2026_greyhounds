@@ -14,6 +14,20 @@ from app.api import tracks, dogs, races, features, training, predictions, bankro
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+if settings.sentry_dsn:
+    # Captures unhandled API exceptions plus errors raised in the
+    # APScheduler/training threads (threading integration is on by
+    # default). The system takes scheduled, money-relevant actions —
+    # failures must reach a human, not just the Railway log stream.
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=settings.sentry_dsn,
+        traces_sample_rate=0.0,
+        send_default_pii=False,
+    )
+    logger.info("Sentry enabled")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     # APScheduler (e.g. for one-off maintenance containers or local dev).
     enable_scheduler: bool = True
 
+    # Error tracking: set SENTRY_DSN to enable Sentry (captures API
+    # exceptions and scheduler/training thread errors). Empty = disabled.
+    sentry_dsn: str = ""
+
     # Scraping
     scrape_delay: float = 2.0  # seconds between requests
     gri_base_url: str = "https://www.grireland.ie"

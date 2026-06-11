@@ -8,7 +8,7 @@ from threading import Thread
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -416,16 +416,50 @@ def trigger_scrape(req: TriggerRequest, db: Session = Depends(get_db)):
 @router.post("/backfill", response_model=TriggerResponse)
 def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
     """Trigger a historical backfill in the background."""
-    start = date.fromisoformat(req.start_date)
-    end = date.fromisoformat(req.end_date)
+    try:
+        start = date.fromisoformat(req.start_date)
+        end = date.fromisoformat(req.end_date)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid date: {e}")
+
+    if end < start:
+        raise HTTPException(status_code=422, detail="end_date is before start_date")
+    if (end - start).days > 366:
+        raise HTTPException(
+            status_code=422,
+            detail="Backfill range capped at 366 days per request — split "
+            "longer ranges into multiple calls.",
+        )
+
+    # Refuse to start while another scrape job is still running: overlapping
+    # jobs double-hit GRI and race each other on upserts.
+    running = (
+        db.query(ScrapeLog)
+        .filter(ScrapeLog.status == "running")
+        .order_by(ScrapeLog.id.desc())
+        .first()
+    )
+    if running:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Scrape job {running.id} ({running.source}) is still running. "
+                "Wait for it to finish or reap stale jobs first."
+            ),
+        )
 
     if req.track_codes:
         tracks = db.query(Track).filter(Track.code.in_(req.track_codes)).all()
+        unknown = set(req.track_codes) - {t.code for t in tracks}
+        if unknown:
+            raise HTTPException(
+                status_code=404, detail=f"Unknown track codes: {sorted(unknown)}"
+            )
     else:
         tracks = db.query(Track).filter(Track.active.is_(True)).all()
 
     if not tracks:
-        return TriggerResponse(message="No tracks found")
+        raise HTTPException(status_code=404, detail="No tracks found")
 
     log = ScrapeLog(
         spider_name="gri",
@@ -600,30 +634,55 @@ def trigger_scrape_since_last_race_date(
     """
     from sqlalchemy import func
 
-    last_date = (
-        db.query(func.max(Race.race_date))
+    # Per-track last dates: a single global max would skip any track whose
+    # coverage lags behind the most recently scraped one (its gap could
+    # never heal through this endpoint).
+    track_query = db.query(Track).filter(Track.active.is_(True))
+    if req.track_codes:
+        track_query = db.query(Track).filter(Track.code.in_(req.track_codes))
+    tracks = track_query.all()
+    if not tracks:
+        raise HTTPException(status_code=404, detail="No matching tracks")
+
+    per_track_last = dict(
+        db.query(Race.track_id, func.max(Race.race_date))
         .filter(Race.status == "resulted")
-        .scalar()
+        .group_by(Race.track_id)
+        .all()
     )
-    if not last_date:
+    if not per_track_last:
         return TriggerResponse(
             message="No prior scraped races found. Use /backfill with explicit dates instead."
         )
 
-    start = last_date + timedelta(days=1)
     end = date.fromisoformat(req.end_date) if req.end_date else date.today()
 
-    if start > end:
-        return TriggerResponse(
-            message=f"Already up to date — last race date is {last_date}."
-        )
+    # Scrape each track from the day after ITS own last resulted race.
+    # Tracks with no coverage at all are skipped (use /backfill for those).
+    stale_tracks: list[tuple[Track, date]] = []
+    for t in tracks:
+        last = per_track_last.get(t.id)
+        if last is None:
+            continue
+        start = last + timedelta(days=1)
+        if start <= end:
+            stale_tracks.append((t, start))
 
-    backfill_req = BackfillRequest(
-        start_date=start.isoformat(),
-        end_date=end.isoformat(),
-        track_codes=req.track_codes,
+    if not stale_tracks:
+        return TriggerResponse(message="Already up to date for all covered tracks.")
+
+    earliest = min(s for _, s in stale_tracks)
+    ranges = ", ".join(
+        f"{t.code} from {s.isoformat()}" for t, s in sorted(stale_tracks, key=lambda x: x[1])
     )
-    return trigger_backfill(backfill_req, db)
+    backfill_req = BackfillRequest(
+        start_date=earliest.isoformat(),
+        end_date=end.isoformat(),
+        track_codes=[t.code for t, _ in stale_tracks],
+    )
+    resp = trigger_backfill(backfill_req, db)
+    resp.message = f"{resp.message} Per-track catch-up: {ranges}."
+    return resp
 
 
 def _run_scrape_date_in_thread(

@@ -1,9 +1,10 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.auth import require_api_key
 from app.config import settings
 from app.api import tracks, dogs, races, features, training, predictions, bankroll, schedule
 
@@ -34,25 +35,28 @@ app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(tracks.router, prefix="/api")
-app.include_router(dogs.router, prefix="/api")
-app.include_router(races.router, prefix="/api")
-app.include_router(features.router, prefix="/api")
-app.include_router(training.router, prefix="/api")
-app.include_router(predictions.router, prefix="/api")
-app.include_router(bankroll.router, prefix="/api")
-app.include_router(schedule.router, prefix="/api")
+API_AUTH = [Depends(require_api_key)]
 
-# Import scraping router separately — it uses Playwright which is heavy
+app.include_router(tracks.router, prefix="/api", dependencies=API_AUTH)
+app.include_router(dogs.router, prefix="/api", dependencies=API_AUTH)
+app.include_router(races.router, prefix="/api", dependencies=API_AUTH)
+app.include_router(features.router, prefix="/api", dependencies=API_AUTH)
+app.include_router(training.router, prefix="/api", dependencies=API_AUTH)
+app.include_router(predictions.router, prefix="/api", dependencies=API_AUTH)
+app.include_router(bankroll.router, prefix="/api", dependencies=API_AUTH)
+app.include_router(schedule.router, prefix="/api", dependencies=API_AUTH)
+
+# The scraping router pulls in the scraper stack; keep its import failure
+# from taking down the whole API.
 try:
     from app.api import scraping
-    app.include_router(scraping.router, prefix="/api")
+    app.include_router(scraping.router, prefix="/api", dependencies=API_AUTH)
     logger.info("Scraping router loaded")
 except Exception as e:
     logger.error("Failed to load scraping router: %s", e)

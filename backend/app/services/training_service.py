@@ -321,12 +321,17 @@ def run_training(db: Session, experiment_id: int) -> None:
         )
         if can_eval_betting:
             try:
+                from app.services.prediction_service import get_staking_params
+                _stk = get_staking_params(db)
                 y_binary = (y_test == 1).astype(float).values if is_ranking else y_test.values
                 betting = compute_betting_metrics(
                     y_binary,
                     test_proba,
                     meta_test["sp_decimal"].values,
                     meta_test["race_id"].values,
+                    kelly_fraction=_stk["kelly_fraction"],
+                    kelly_min_edge=_stk["min_edge"],
+                    max_stake_pct=_stk["max_stake_pct"],
                 )
                 if "error" in betting:
                     logger.warning("Betting metrics unavailable: %s", betting["error"])
@@ -831,12 +836,17 @@ def run_optuna_optimization(
         if can_eval_betting:
             try:
                 from ml.evaluation import compute_betting_metrics
+                from app.services.prediction_service import get_staking_params
+                _stk = get_staking_params(db)
                 y_binary_bet = (y_test == 1).astype(float).values if is_ranking else y_test.values
                 betting = compute_betting_metrics(
                     y_binary_bet,
                     test_proba,
                     meta_test["sp_decimal"].values,
                     meta_test["race_id"].values,
+                    kelly_fraction=_stk["kelly_fraction"],
+                    kelly_min_edge=_stk["min_edge"],
+                    max_stake_pct=_stk["max_stake_pct"],
                 )
                 if "error" in betting:
                     logger.warning("Optuna betting metrics unavailable: %s", betting["error"])

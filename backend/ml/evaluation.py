@@ -144,12 +144,24 @@ def compute_betting_metrics(
     y_proba: np.ndarray,
     sp_decimal: np.ndarray,
     race_ids: np.ndarray,
+    kelly_fraction: float = 0.25,
+    kelly_min_edge: float = 0.05,
+    max_stake_pct: float = 0.05,
+    commission: float = 0.02,
 ) -> dict[str, Any]:
     """
     Compute betting P&L metrics.
 
     Simulates betting $1 on the model's top pick in each race.
     Also evaluates value betting (bet when model prob > implied prob).
+
+    The Kelly simulation mirrors the served staking rule exactly
+    (_compute_kelly_stake's defaults: quarter Kelly, 5% min edge, 5% cap,
+    one bet per race on the top pick) and COMPOUNDS the bankroll in
+    chronological order — a fixed-bankroll "Kelly" sim measures nothing
+    Kelly-like. Winning returns are shaved by `commission` to approximate
+    exchange commission / SP spread; passing 0 reproduces frictionless
+    settlement. Assumptions are echoed in the result.
 
     Returns:
         {
@@ -228,24 +240,24 @@ def compute_betting_metrics(
     value_pnl = float(value_profit.sum()) if len(value_profit) > 0 else 0
     value_winners = int(value_bets["won"].sum())
 
-    # --- Strategy 3: Kelly criterion staking (fractional Kelly) ---
-    # Use a hybrid approach: bet on the model's top pick per race,
-    # but size the bet using Kelly based on the probability edge.
-    # We use a lower min-edge threshold than value betting since we're
-    # already filtering to the model's top pick (higher conviction).
-    kelly_fraction = 0.25  # Quarter Kelly for safety
-    kelly_min_edge = 0.02  # 2% min edge (lower than value betting's 5%)
-    bankroll = 100.0
+    # --- Strategy 3: Kelly criterion staking (mirrors the served rule) ---
+    # One bet per race on the model's top pick, quarter-Kelly sized with the
+    # same min-edge and stake cap _compute_kelly_stake serves, COMPOUNDING
+    # the bankroll race by race in chronological order (race_ids arrive
+    # date-sorted from the dataset builder; sort=False preserves that).
+    # Edge is measured against raw 1/SP — same convention as serving —
+    # which keeps the overround as a conservative hurdle.
+    starting_bankroll = 100.0
+    bankroll = starting_bankroll
     kelly_results = []
-    for race_id, group in df.groupby("race_id"):
-        if len(group) == 0:
+    for race_id, group in df.groupby("race_id", sort=False):
+        if len(group) == 0 or bankroll <= 0:
             continue
         top = group.loc[group["prob"].idxmax()]
         b = top["sp"] - 1
         if b <= 0:
             continue
 
-        # Check if there's a minimum probability edge
         edge = top["prob"] - top["implied_prob"]
         if edge < kelly_min_edge:
             continue
@@ -253,15 +265,20 @@ def compute_betting_metrics(
         f_star = (b * top["prob"] - (1 - top["prob"])) / b
         if f_star <= 0:
             continue
-        stake_pct = min(f_star * kelly_fraction, 0.05)  # Cap at 5% of bankroll
+        stake_pct = min(f_star * kelly_fraction, max_stake_pct)
         stake = bankroll * stake_pct
-        profit = stake * (top["sp"] - 1) if top["won"] else -stake
+        if top["won"]:
+            profit = stake * (top["sp"] - 1) * (1.0 - commission)
+        else:
+            profit = -stake
+        bankroll += profit
         kelly_results.append({
             "race_id": int(race_id),
             "won": bool(top["won"]),
             "stake": round(float(stake), 2),
             "profit": round(float(profit), 2),
             "edge": round(float(edge), 4),
+            "bankroll": round(float(bankroll), 2),
         })
 
     kelly_total_staked = sum(r["stake"] for r in kelly_results) if kelly_results else 0
@@ -303,6 +320,16 @@ def compute_betting_metrics(
         "kelly_roi": round(kelly_pnl / max(kelly_total_staked, 1) * 100, 2),
         "kelly_races": len(kelly_results),
         "kelly_total_staked": round(kelly_total_staked, 2),
+        "kelly_final_bankroll": round(bankroll, 2),
+        "kelly_growth_pct": round((bankroll / starting_bankroll - 1) * 100, 2),
+        "assumptions": {
+            "kelly_fraction": kelly_fraction,
+            "kelly_min_edge": kelly_min_edge,
+            "max_stake_pct": max_stake_pct,
+            "commission": commission,
+            "staking": "compounding, one bet per race (top pick)",
+            "settlement": "SP minus commission on winnings",
+        },
         "kelly_pnl_by_race": kelly_cumulative,
         "favourite_pnl": round(fav_pnl, 2),
         "favourite_roi": round(fav_pnl / max(len(fav_profits), 1) * 100, 2),

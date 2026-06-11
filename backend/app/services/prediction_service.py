@@ -277,6 +277,39 @@ def get_staking_params(db: Session) -> dict[str, float]:
     }
 
 
+# Strength of the completeness shrinkage applied to win probabilities
+# before Kelly staking. 1.0 = a dog with zero real features is staked as
+# if its probability equals the market's; 0.0 disables shrinkage.
+COMPLETENESS_SHRINKAGE = 1.0
+
+
+def shrink_toward_market(
+    win_prob: float,
+    odds_decimal: float | None,
+    completeness: float | None,
+    strength: float = COMPLETENESS_SHRINKAGE,
+) -> float:
+    """Shrink a model probability toward the market prior by data thinness.
+
+    A debutant whose features were entirely imputed gets the same model
+    output treatment as a fully-profiled veteran unless staking accounts
+    for input quality. Baker & McHale-style shrinkage: pull win_prob
+    toward the odds-implied probability proportionally to the missing
+    fraction of real features, so Kelly bets on thin-history dogs shrink
+    toward zero edge instead of betting full size on a guess.
+    """
+    if (
+        completeness is None
+        or odds_decimal is None
+        or odds_decimal <= 1.0
+        or win_prob is None
+    ):
+        return win_prob
+    anchor = 1.0 / odds_decimal
+    lam = strength * (1.0 - max(0.0, min(1.0, completeness)))
+    return float(win_prob - lam * (win_prob - anchor))
+
+
 def _compute_kelly_stake(
     win_prob: float,
     odds_decimal: float | None,
@@ -739,16 +772,25 @@ def predict_race(
                 pred_data["margin"] = race_confidence["margin"]
                 pred_data["entropy"] = race_confidence["entropy"]
 
-            # Kelly staking recommendation
+            # Kelly staking recommendation — staked on the
+            # completeness-shrunk probability so thin-history dogs are
+            # downweighted; the displayed win_probability stays the raw
+            # model output and the kelly dict discloses what it staked on.
             if win_prob is not None:
+                staking_prob = shrink_toward_market(
+                    win_prob, entry.sp_decimal, completeness
+                )
                 kelly = _compute_kelly_stake(
-                    win_prob,
+                    staking_prob,
                     entry.sp_decimal,
                     bankroll=bankroll,
                     kelly_fraction=staking["kelly_fraction"],
                     min_edge=staking["min_edge"],
                     max_stake_pct=staking["max_stake_pct"],
                 )
+                if staking_prob != win_prob:
+                    kelly["staking_win_probability"] = round(staking_prob, 4)
+                    kelly["completeness_shrinkage_applied"] = True
                 pred_data["kelly"] = kelly
             else:
                 pred_data["kelly"] = {"bet": False, "reason": "no_probability"}

@@ -119,3 +119,26 @@ def test_split_val_returns_none_when_too_small():
     meta = pd.DataFrame({"race_id": np.repeat([1, 2, 3], 3)})
     X = pd.DataFrame({"f": np.arange(9)})
     assert _split_val_for_calibration(X, meta) is None
+
+
+def test_completeness_shrinkage_monotone():
+    """Audit D5: lower completeness must monotonically reduce the stake;
+    full completeness must reproduce the unshrunk stake exactly."""
+    from app.services.prediction_service import shrink_toward_market
+
+    p, odds = 0.40, 3.5  # implied ~0.286, real edge
+    full = shrink_toward_market(p, odds, 1.0)
+    assert full == pytest.approx(p)
+
+    stakes = []
+    for completeness in (1.0, 0.8, 0.5, 0.2, 0.0):
+        sp = shrink_toward_market(p, odds, completeness)
+        out = _compute_kelly_stake(sp, odds, bankroll=100.0)
+        stakes.append(out.get("stake", 0.0) if out["bet"] else 0.0)
+    assert stakes == sorted(stakes, reverse=True), stakes
+    # zero completeness shrinks fully to the market: no edge, no bet
+    assert stakes[-1] == 0.0
+
+    # missing inputs are no-ops
+    assert shrink_toward_market(p, None, 0.5) == p
+    assert shrink_toward_market(p, odds, None) == p

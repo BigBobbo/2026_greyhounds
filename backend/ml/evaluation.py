@@ -343,7 +343,8 @@ def compute_shap_summary(model: Any, X: np.ndarray, feature_names: list[str], ma
         import shap
 
         if X.shape[0] > max_samples:
-            indices = np.random.choice(X.shape[0], max_samples, replace=False)
+            rng = np.random.default_rng(42)
+            indices = rng.choice(X.shape[0], max_samples, replace=False)
             X_sample = X.iloc[indices] if hasattr(X, "iloc") else X[indices]
         else:
             X_sample = X

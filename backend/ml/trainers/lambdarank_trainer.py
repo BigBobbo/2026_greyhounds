@@ -6,7 +6,7 @@ sees the full competitive field at once.
 
 At prediction time the raw ranking scores are converted to win
 probabilities via softmax over the race, then calibrated using
-isotonic regression fitted on the validation set.
+Platt scaling fitted on the validation set.
 """
 
 from typing import Any
@@ -14,8 +14,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
 from ml.monotonic_constraints import build_monotone_constraints
@@ -48,7 +46,7 @@ class LambdaRankTrainer(BaseTrainer):
         }
         self.model: lgb.LGBMRanker | None = None
         self._feature_names: list[str] = []
-        self.calibrator: IsotonicRegression | None = None
+        self.calibrator: LogisticRegression | None = None
 
     def train(self, X_train, y_train, X_val, y_val,
               group_train=None, group_val=None) -> TrainResult:
@@ -191,7 +189,7 @@ class LambdaRankTrainer(BaseTrainer):
                          calibrate: bool = True) -> np.ndarray:
         """Convert raw ranking scores to win probabilities via softmax per race.
 
-        If a calibrator is fitted (isotonic regression), applies calibration
+        If a calibrator is fitted (Platt scaling), applies calibration
         to map softmax outputs to true win rates, then re-normalizes within
         each race so probabilities still sum to 1.0.
 

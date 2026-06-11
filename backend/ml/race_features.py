@@ -2170,7 +2170,11 @@ def compute_h2h_features_batch(
         # Beta(1,3) shrinkage keeps the feature well-behaved for small samples.
         # Prior favours "not particularly good vs this field" so the raw rate
         # only starts to influence the estimate once meetings accumulate.
-        win_rate = (wins + 1.0) / (meetings + 4.0) if meetings >= 0 else None
+        # Only emit the smoothed rate when the dogs have actually met:
+        # a Beta prior on zero meetings fabricated 0.25 for every unseen
+        # matchup, indistinguishable from a real record and inconsistent
+        # with h2h_meetings_vs_field reporting 0.
+        win_rate = (wins + 1.0) / (meetings + 4.0) if meetings > 0 else None
         avg_beaten = float(np.mean(beaten_lengths)) if beaten_lengths else None
 
         rows[entry_id] = {

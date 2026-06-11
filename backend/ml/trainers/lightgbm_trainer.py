@@ -1,4 +1,4 @@
-"""LightGBM trainer implementation with isotonic calibration."""
+"""LightGBM trainer implementation with Platt-scaling calibration."""
 
 from typing import Any
 

@@ -1,4 +1,4 @@
-"""XGBoost trainer implementation with isotonic calibration."""
+"""XGBoost trainer implementation with Platt-scaling calibration."""
 
 from typing import Any
 

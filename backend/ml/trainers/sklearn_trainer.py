@@ -20,7 +20,14 @@ class SklearnTrainer(BaseTrainer):
         self.scaler = StandardScaler()
         self.calibrator: _PlattLR | None = None
 
-        model_params = {k: v for k, v in params.items() if k not in ("algorithm", "target_type")}
+        # Strip pipeline-meta keys that create_trainer injects for the GBM
+        # trainers (monotonic-constraint plumbing); sklearn estimators reject
+        # unknown kwargs, so leaving them in broke every sklearn experiment.
+        model_params = {
+            k: v
+            for k, v in params.items()
+            if k not in ("algorithm", "target_type", "_target", "apply_monotone_constraints")
+        }
 
         if algorithm == "logistic_regression":
             model_params.setdefault("max_iter", 1000)

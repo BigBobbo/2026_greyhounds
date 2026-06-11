@@ -313,6 +313,32 @@ def predict_single_race(
         preds = cached
         saved = 0
         from_cache = True
+        # The cached Kelly stakes were sized against the bankroll at
+        # prediction time. If the caller passes a different bankroll,
+        # silently returning the old stakes is a correctness trap —
+        # recompute the staking layer (cheap; no model run) against the
+        # cached probabilities and stored SPs.
+        if bankroll is not None:
+            from app.services.prediction_service import (
+                compute_kelly_stake,
+                get_staking_params,
+            )
+
+            staking = get_staking_params(db)
+            for p in preds:
+                stale_bankroll = p.get("bankroll_used")
+                if stale_bankroll == bankroll:
+                    continue
+                wp = p.get("win_probability")
+                odds = p.get("sp_decimal_at_pred")
+                if wp is not None:
+                    p["kelly"] = compute_kelly_stake(
+                        wp, odds, bankroll=bankroll,
+                        kelly_fraction=staking["kelly_fraction"],
+                        min_edge=staking["min_edge"],
+                        max_stake_pct=staking["max_stake_pct"],
+                    )
+                    p["bankroll_used"] = bankroll
     else:
         try:
             preds = predict_race(db, experiment_id, race_id, bankroll=bankroll)

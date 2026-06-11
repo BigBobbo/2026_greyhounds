@@ -42,15 +42,23 @@ class LightGBMTrainer(BaseTrainer):
             # LightGBM accepts a list of ints of same length as features.
             model_params["monotone_constraints"] = constraints
 
+        # Early stopping on val with a high tree ceiling — see the
+        # XGBoost trainer for the val-usage boundary note.
+        model_params.setdefault("n_estimators", 2000)
+
         if self.target_type == "classification":
             self.model = LGBMClassifier(**model_params)
         else:
             self.model = LGBMRegressor(**model_params)
 
+        import lightgbm as lgb
+
         self.model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
+            callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
         )
+        self.best_iteration = getattr(self.model, "best_iteration_", None)
 
         from ml.evaluation import compute_metrics
         if self.target_type == "classification":

@@ -42,6 +42,14 @@ class XGBoostTrainer(BaseTrainer):
             # XGBoost accepts either a tuple or a string like "(0,1,-1,...)"
             model_params["monotone_constraints"] = tuple(constraints)
 
+        # Early stopping on val with a high tree ceiling: the optimal
+        # n_estimators is set per-config by the data instead of being a
+        # searched hyperparameter. NOTE the val-usage boundary: val is used
+        # for stopping AND (in the calibration-half scheme) calibration —
+        # never for Optuna objectives, which score the objective half.
+        model_params.setdefault("n_estimators", 2000)
+        model_params.setdefault("early_stopping_rounds", 50)
+
         if self.target_type == "classification":
             self.model = XGBClassifier(**model_params)
         else:
@@ -52,6 +60,7 @@ class XGBoostTrainer(BaseTrainer):
             eval_set=[(X_val, y_val)],
             verbose=False,
         )
+        self.best_iteration = getattr(self.model, "best_iteration", None)
 
         from ml.evaluation import compute_metrics
         if self.target_type == "classification":

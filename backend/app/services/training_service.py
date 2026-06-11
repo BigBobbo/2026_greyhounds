@@ -1014,8 +1014,8 @@ def _suggest_params(trial, algorithm: str) -> dict:
             "min_child_samples": trial.suggest_int("min_child_samples", 5, 50),
         }
     elif algorithm == "xgboost":
+        # n_estimators is set by early stopping, not searched
         return {
-            "n_estimators": trial.suggest_int("n_estimators", 50, 500),
             "max_depth": trial.suggest_int("max_depth", 3, 10),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),
@@ -1023,8 +1023,8 @@ def _suggest_params(trial, algorithm: str) -> dict:
             "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
         }
     elif algorithm == "lightgbm":
+        # n_estimators is set by early stopping, not searched
         return {
-            "n_estimators": trial.suggest_int("n_estimators", 50, 500),
             "num_leaves": trial.suggest_int("num_leaves", 15, 63),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),

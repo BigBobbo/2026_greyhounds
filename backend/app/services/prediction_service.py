@@ -1232,11 +1232,46 @@ def predict_upcoming_races(
         .all()
     )
 
+    # Batch the feature computation across every scheduled entry once —
+    # the ELO pass walks the full resulted history regardless of target
+    # count, so running it per race multiplied the cost by the number of
+    # races (the by-date endpoint already worked this way; this path
+    # didn't).
+    precomputed = None
+    race_id_list = [row.Race.id for row in scheduled_races]
+    if race_id_list:
+        all_entry_ids = [
+            eid for (eid,) in db.query(RaceEntry.id)
+            .filter(RaceEntry.race_id.in_(race_id_list))
+            .all()
+        ]
+        if all_entry_ids:
+            try:
+                split_cfg = experiment.split_config or {}
+                include_builtin = split_cfg.get("include_builtin_features", True)
+                feature_defs = (
+                    db.query(FeatureDefinition)
+                    .filter(FeatureDefinition.id.in_(experiment.feature_set))
+                    .all()
+                )
+                precomputed = compute_features_for_entries(
+                    db, all_entry_ids, feature_defs, include_builtin=include_builtin,
+                )
+            except Exception:
+                logger.exception(
+                    "upcoming: batched feature compute failed — falling back "
+                    "to per-race computation"
+                )
+                precomputed = None
+
     results = []
     for race_row in scheduled_races:
         race = race_row.Race
         try:
-            preds = predict_race(db, experiment_id, race.id, bankroll=bankroll)
+            preds = predict_race(
+                db, experiment_id, race.id, bankroll=bankroll,
+                precomputed_features=precomputed,
+            )
             if preds:
                 save_predictions(db, preds)
                 results.append({

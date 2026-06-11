@@ -22,4 +22,9 @@ COPY backend/ .
 
 RUN mkdir -p data/models
 
+# Deliberately running as root: Railway mounts the persistent volume at
+# /app/data with root ownership, and a build-time chown cannot affect a
+# runtime mount — a USER directive here would break DB/model writes on
+# deploy. Revisit if Railway's volume UID handling (RAILWAY_RUN_UID) is
+# adopted, or when moving the datastore off the volume (e.g. Postgres).
 CMD ["python", "scripts/start.py"]

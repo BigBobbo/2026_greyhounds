@@ -40,7 +40,7 @@ class OddsEntry(BaseModel):
 
 class UpdateOddsRequest(BaseModel):
     experiment_id: int
-    bankroll: float = 100.0
+    bankroll: float | None = None
     odds: list[OddsEntry]
 
 
@@ -57,7 +57,7 @@ class ComboKellyRequest(BaseModel):
     bet_type: str  # "forecast" or "trio"
     legs: list[int]  # ordered race_entry_ids: [1st, 2nd] or [1st, 2nd, 3rd]
     dividend_decimal: float
-    bankroll: float = 100.0
+    bankroll: float | None = None
 
 
 @router.get("/", response_model=list[PredictionResponse])
@@ -281,7 +281,7 @@ def predict_race_preflight(
 def predict_single_race(
     race_id: int,
     experiment_id: int,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1, description="Override the tracked bankroll; defaults to BankrollConfig.current_bankroll"),
     refresh: bool = Query(
         default=False,
         description="If true, recompute even if saved predictions exist",
@@ -394,7 +394,7 @@ def get_saved_race_predictions(
 def get_race_combos(
     race_id: int,
     experiment_id: int,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1, description="Override the tracked bankroll; defaults to BankrollConfig.current_bankroll"),
     refresh: bool = Query(
         default=False,
         description="If true, recompute the ordering layer even if predictions are cached",
@@ -674,10 +674,16 @@ def score_combo_bet(race_id: int, payload: ComboKellyRequest, db: Session = Depe
                 combo_probability = c.probability
                 break
 
+    from app.services.prediction_service import get_staking_params
+
+    combo_bankroll = payload.bankroll
+    if combo_bankroll is None:
+        combo_bankroll = get_staking_params(db)["current_bankroll"]
+
     kelly = compute_combo_kelly(
         combo_probability=combo_probability,
         combo_odds_decimal=payload.dividend_decimal,
-        bankroll=payload.bankroll,
+        bankroll=combo_bankroll,
     )
 
     return {
@@ -714,7 +720,7 @@ def update_predictions_with_odds(
     if not race:
         raise HTTPException(status_code=404, detail="Race not found")
 
-    if payload.bankroll < 1:
+    if payload.bankroll is not None and payload.bankroll < 1:
         raise HTTPException(status_code=422, detail="bankroll must be >= 1")
 
     odds_by_entry: dict[int, float | None] = {}
@@ -728,12 +734,18 @@ def update_predictions_with_odds(
             )
         odds_by_entry[entry.race_entry_id] = entry.decimal_odds
 
+    from app.services.prediction_service import get_staking_params
+
+    effective_bankroll = payload.bankroll
+    if effective_bankroll is None:
+        effective_bankroll = get_staking_params(db)["current_bankroll"]
+
     updated = recompute_kelly_for_saved_predictions(
         db=db,
         experiment_id=payload.experiment_id,
         race_id=race_id,
         odds_by_entry=odds_by_entry,
-        bankroll=payload.bankroll,
+        bankroll=effective_bankroll,
     )
     if not updated:
         raise HTTPException(
@@ -972,7 +984,7 @@ def predict_races_by_date(
     race_date: date,
     experiment_id: int,
     track_code: str | None = None,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1, description="Override the tracked bankroll; defaults to BankrollConfig.current_bankroll"),
     only_scheduled: bool = Query(
         default=True,
         description="If true, only predict races with status='scheduled' (skip resulted)",
@@ -1111,7 +1123,7 @@ def predict_races_by_date(
 @router.get("/upcoming")
 def get_upcoming_predictions(
     experiment_id: int,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1, description="Override the tracked bankroll; defaults to BankrollConfig.current_bankroll"),
     db: Session = Depends(get_db),
 ):
     """Get or generate predictions for all scheduled (upcoming) races."""
@@ -1134,7 +1146,7 @@ def predict_race_ensemble(
     race_id: int,
     experiment_ids: str = Query(..., description="Comma-separated experiment IDs"),
     weights: str | None = Query(default=None, description="Comma-separated weights (must match experiment_ids)"),
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1, description="Override the tracked bankroll; defaults to BankrollConfig.current_bankroll"),
     db: Session = Depends(get_db),
 ):
     """Generate ensemble predictions by combining multiple trained models."""
@@ -1170,7 +1182,7 @@ def predict_race_ensemble(
 def get_best_bets(
     experiment_id: int,
     race_date: date,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1, description="Override the tracked bankroll; defaults to BankrollConfig.current_bankroll"),
     min_confidence: str = Query(default="moderate", description="Minimum confidence tier: strong, moderate, weak"),
     min_edge: float = Query(default=0.05, description="Minimum edge over market odds"),
     limit: int = Query(default=10, le=50),

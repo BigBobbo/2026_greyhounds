@@ -1,22 +1,18 @@
 import { useEffect, useState } from 'react';
 import api, { errorMessage } from '../api/client';
+import {
+  DEFAULT_STAKING,
+  computeKelly,
+  verdictReason,
+  type KellyInfo,
+  type StakingParams,
+} from '../lib/kelly';
 import type {
   Experiment,
   ForecastCombo,
   Track,
   TrioCombo,
 } from '../types/models';
-
-interface KellyInfo {
-  bet: boolean;
-  reason?: string;
-  stake?: number;
-  stake_pct?: number;
-  full_kelly_pct?: number;
-  edge?: number;
-  implied_prob?: number;
-  expected_value?: number;
-}
 
 interface PredictionEntry {
   race_entry_id?: number;
@@ -37,66 +33,6 @@ interface PredictionEntry {
   sp_decimal_at_pred?: number | null;
   forecast_combos?: ForecastCombo[];
   trio_combos?: TrioCombo[];
-}
-
-// Mirrors backend `_compute_kelly_stake` so live edits to the market-odds
-// input update the BET/PASS verdict instantly without a server round-trip.
-// Keep these defaults identical to the Python side.
-const KELLY_FRACTION = 0.25;
-const MIN_EDGE = 0.05;
-const MAX_STAKE_PCT = 0.05;
-
-function computeKelly(
-  winProb: number | null | undefined,
-  oddsDecimal: number | null | undefined,
-  bankroll: number,
-): KellyInfo {
-  if (winProb == null) return { bet: false, reason: 'no_probability' };
-  if (oddsDecimal == null || oddsDecimal <= 1.0) {
-    return { bet: false, reason: 'no_odds' };
-  }
-  const impliedProb = 1.0 / oddsDecimal;
-  const edge = winProb - impliedProb;
-  if (edge < MIN_EDGE) {
-    return {
-      bet: false,
-      reason: 'insufficient_edge',
-      edge: round4(edge),
-      implied_prob: round4(impliedProb),
-    };
-  }
-  const b = oddsDecimal - 1;
-  const fStar = (b * winProb - (1 - winProb)) / b;
-  const fractionalKelly = Math.max(0, fStar * KELLY_FRACTION);
-  const stakePct = Math.min(fractionalKelly, MAX_STAKE_PCT);
-  const stake = Math.round(bankroll * stakePct * 100) / 100;
-  return {
-    bet: true,
-    stake,
-    stake_pct: Math.round(stakePct * 10000) / 100,
-    full_kelly_pct: Math.round(fStar * 10000) / 100,
-    edge: round4(edge),
-    implied_prob: round4(impliedProb),
-    expected_value: round4(winProb * (oddsDecimal - 1) - (1 - winProb)),
-  };
-}
-
-function round4(x: number): number {
-  return Math.round(x * 10000) / 10000;
-}
-
-function verdictReason(
-  kelly: KellyInfo,
-  winProb: number | null | undefined,
-  odds: number | null | undefined,
-): string {
-  if (winProb == null) return 'no model probability';
-  if (odds == null || odds <= 1) return 'enter market odds →';
-  if (kelly.reason === 'insufficient_edge' && kelly.edge != null) {
-    const edgePct = (kelly.edge * 100).toFixed(1);
-    return `PASS — only ${edgePct}% edge (need 5%)`;
-  }
-  return 'PASS';
 }
 
 interface RacePrediction {
@@ -292,6 +228,31 @@ export default function Predictions() {
   const [selectedRaceId, setSelectedRaceId] = useState<number | null>(null);
   const [loadingRaces, setLoadingRaces] = useState(false);
   const [bankroll, setBankroll] = useState(100);
+  const [staking, setStaking] = useState<StakingParams>(DEFAULT_STAKING);
+
+  // Staking parameters are the user's Bankroll settings — the single source
+  // of truth shared with the backend. Also seeds the bankroll input from the
+  // tracked bankroll instead of a hardcoded 100.
+  useEffect(() => {
+    api
+      .get<{
+        kelly_fraction: number;
+        min_edge: number;
+        max_stake_pct: number;
+        current_bankroll: number;
+      }>('/bankroll/config')
+      .then((res) => {
+        setStaking({
+          kelly_fraction: res.data.kelly_fraction,
+          min_edge: res.data.min_edge,
+          max_stake_pct: res.data.max_stake_pct,
+        });
+        setBankroll(Math.round(res.data.current_bankroll * 100) / 100);
+      })
+      .catch(() => {
+        // keep defaults; backend uses the same fallback
+      });
+  }, []);
 
   // Manual race ID fallback
   const [manualRaceId, setManualRaceId] = useState('');
@@ -819,6 +780,7 @@ export default function Predictions() {
                             p.win_probability,
                             oddsNum && oddsNum > 1 ? oddsNum : null,
                             bankroll,
+                            staking,
                           );
                           const verdictBet = liveKelly.bet;
                           const liveEdge = liveKelly.edge ?? null;
@@ -884,7 +846,7 @@ export default function Predictions() {
                                   </div>
                                 ) : (
                                   <span className="text-gray-500 text-xs">
-                                    {verdictReason(liveKelly, p.win_probability, oddsNum)}
+                                    {verdictReason(liveKelly, p.win_probability, oddsNum, staking.min_edge)}
                                   </span>
                                 )}
                               </td>
@@ -908,6 +870,7 @@ export default function Predictions() {
                           p.win_probability,
                           odds && odds > 1 ? odds : null,
                           bankroll,
+                          staking,
                         );
                         return { p, kelly, odds };
                       })

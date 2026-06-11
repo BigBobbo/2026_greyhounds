@@ -292,12 +292,41 @@ def _compute_confidence(probs: np.ndarray) -> dict[str, float]:
     }
 
 
+DEFAULT_STAKING = {
+    "kelly_fraction": 0.25,
+    "min_edge": 0.05,
+    "max_stake_pct": 0.05,
+    "current_bankroll": 100.0,
+}
+
+
+def get_staking_params(db: Session) -> dict[str, float]:
+    """User staking settings from BankrollConfig, with safe defaults.
+
+    Single source of truth for Kelly parameters: the user edits these on the
+    Bankroll page; the previous hardcoded constants meant those settings
+    silently did nothing to the recommendations they were supposed to drive.
+    """
+    from app.models.bankroll import BankrollConfig
+
+    cfg = db.query(BankrollConfig).first()
+    if cfg is None:
+        return dict(DEFAULT_STAKING)
+    return {
+        "kelly_fraction": float(cfg.kelly_fraction),
+        "min_edge": float(cfg.min_edge),
+        "max_stake_pct": float(cfg.max_stake_pct),
+        "current_bankroll": float(cfg.current_bankroll),
+    }
+
+
 def _compute_kelly_stake(
     win_prob: float,
     odds_decimal: float | None,
     bankroll: float = 100.0,
     kelly_fraction: float = 0.25,
     min_edge: float = 0.05,
+    max_stake_pct: float = 0.05,
 ) -> dict[str, Any]:
     """Compute Kelly criterion stake for a bet.
 
@@ -307,11 +336,18 @@ def _compute_kelly_stake(
         bankroll: Current bankroll
         kelly_fraction: Fraction of full Kelly to use (0.25 = quarter Kelly, safer)
         min_edge: Minimum edge required to place a bet (default 5%)
+        max_stake_pct: Absolute cap on stake as a fraction of bankroll
 
-    Returns dict with stake info or None if no bet recommended.
+    The returned dict echoes the parameters used so clients (and saved
+    predictions) can show which settings produced the verdict.
     """
+    params_used = {
+        "kelly_fraction": kelly_fraction,
+        "min_edge": min_edge,
+        "max_stake_pct": max_stake_pct,
+    }
     if odds_decimal is None or odds_decimal <= 1.0:
-        return {"bet": False, "reason": "no_odds"}
+        return {"bet": False, "reason": "no_odds", "params_used": params_used}
 
     implied_prob = 1.0 / odds_decimal
     edge = win_prob - implied_prob
@@ -322,6 +358,7 @@ def _compute_kelly_stake(
             "reason": "insufficient_edge",
             "edge": round(edge, 4),
             "implied_prob": round(implied_prob, 4),
+            "params_used": params_used,
         }
 
     # Kelly formula: f* = (bp - q) / b
@@ -332,8 +369,7 @@ def _compute_kelly_stake(
     # Cap at kelly_fraction of full Kelly for safety
     fractional_kelly = max(0, f_star * kelly_fraction)
 
-    # Also cap at 5% of bankroll as absolute max
-    max_stake_pct = 0.05
+    # Absolute cap as fraction of bankroll
     stake_pct = min(fractional_kelly, max_stake_pct)
     stake = round(bankroll * stake_pct, 2)
 
@@ -345,6 +381,7 @@ def _compute_kelly_stake(
         "edge": round(edge, 4),
         "implied_prob": round(implied_prob, 4),
         "expected_value": round(win_prob * (odds_decimal - 1) - (1 - win_prob), 4),
+        "params_used": params_used,
     }
 
 
@@ -352,7 +389,7 @@ def predict_race(
     db: Session,
     experiment_id: int,
     race_id: int,
-    bankroll: float = 100.0,
+    bankroll: float | None = None,
     precomputed_features: pd.DataFrame | None = None,
 ) -> list[dict[str, Any]]:
     """
@@ -370,6 +407,12 @@ def predict_race(
     experiment = db.query(Experiment).filter(Experiment.id == experiment_id).first()
     if not experiment or experiment.status != "completed":
         raise ValueError(f"Experiment {experiment_id} not found or not completed")
+
+    # Staking parameters come from the user's BankrollConfig; an explicit
+    # bankroll argument overrides the tracked bankroll only.
+    staking = get_staking_params(db)
+    if bankroll is None:
+        bankroll = staking["current_bankroll"]
 
     # Load model artifact (trainer + preprocessing info + calibrator)
     artifact = load_trained_model(experiment)
@@ -742,7 +785,12 @@ def predict_race(
             # Kelly staking recommendation
             if win_prob is not None:
                 kelly = _compute_kelly_stake(
-                    win_prob, entry.sp_decimal, bankroll=bankroll,
+                    win_prob,
+                    entry.sp_decimal,
+                    bankroll=bankroll,
+                    kelly_fraction=staking["kelly_fraction"],
+                    min_edge=staking["min_edge"],
+                    max_stake_pct=staking["max_stake_pct"],
                 )
                 pred_data["kelly"] = kelly
             else:
@@ -789,6 +837,7 @@ def compute_kelly_stake(
     bankroll: float = 100.0,
     kelly_fraction: float = 0.25,
     min_edge: float = 0.05,
+    max_stake_pct: float = 0.05,
 ) -> dict[str, Any]:
     """Public wrapper around the Kelly calculation. Same math used at
     prediction time — exposed so endpoints recomputing against
@@ -796,6 +845,7 @@ def compute_kelly_stake(
     return _compute_kelly_stake(
         win_prob, odds_decimal, bankroll=bankroll,
         kelly_fraction=kelly_fraction, min_edge=min_edge,
+        max_stake_pct=max_stake_pct,
     )
 
 
@@ -827,6 +877,7 @@ def recompute_kelly_for_saved_predictions(
     if not rows:
         return []
 
+    staking = get_staking_params(db)
     now = datetime.utcnow()
     updated: list[dict[str, Any]] = []
     for pred, dog_name, trap in rows:
@@ -834,7 +885,12 @@ def recompute_kelly_for_saved_predictions(
         wp = pred.win_probability
 
         if wp is not None:
-            kelly = compute_kelly_stake(wp, odds, bankroll=bankroll)
+            kelly = compute_kelly_stake(
+                wp, odds, bankroll=bankroll,
+                kelly_fraction=staking["kelly_fraction"],
+                min_edge=staking["min_edge"],
+                max_stake_pct=staking["max_stake_pct"],
+            )
         else:
             kelly = {"bet": False, "reason": "no_probability"}
 
@@ -1036,7 +1092,7 @@ def predict_race_ensemble(
     experiment_ids: list[int],
     race_id: int,
     weights: list[float] | None = None,
-    bankroll: float = 100.0,
+    bankroll: float | None = None,
 ) -> list[dict[str, Any]]:
     """
     Generate ensemble predictions by combining multiple trained models.
@@ -1053,6 +1109,10 @@ def predict_race_ensemble(
     """
     if len(experiment_ids) < 2:
         raise ValueError("Ensemble requires at least 2 experiments")
+
+    staking = get_staking_params(db)
+    if bankroll is None:
+        bankroll = staking["current_bankroll"]
 
     if weights is None:
         weights = [1.0 / len(experiment_ids)] * len(experiment_ids)
@@ -1120,7 +1180,12 @@ def predict_race_ensemble(
         sp_decimal = sp_map.get(eid)
 
         if win_prob is not None and win_prob > 0:
-            kelly = _compute_kelly_stake(win_prob, sp_decimal, bankroll=bankroll)
+            kelly = _compute_kelly_stake(
+                win_prob, sp_decimal, bankroll=bankroll,
+                kelly_fraction=staking["kelly_fraction"],
+                min_edge=staking["min_edge"],
+                max_stake_pct=staking["max_stake_pct"],
+            )
             pred["kelly"] = kelly
 
             if sp_decimal and sp_decimal > 1:
@@ -1149,7 +1214,7 @@ def predict_race_ensemble(
 def predict_upcoming_races(
     db: Session,
     experiment_id: int,
-    bankroll: float = 100.0,
+    bankroll: float | None = None,
 ) -> list[dict[str, Any]]:
     """
     Generate predictions for all scheduled (upcoming) races.

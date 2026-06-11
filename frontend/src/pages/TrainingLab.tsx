@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api/client';
 import type { Experiment, FeatureDefinition } from '../types/models';
@@ -38,6 +38,7 @@ export default function TrainingLab() {
   const [algorithm, setAlgorithm] = useState('lambdarank');
   const [target, setTarget] = useState('win_prob');
   const [selectedFeatures, setSelectedFeatures] = useState<number[]>([]);
+  const featuresSeeded = useRef(false);
   const [selectedVersionId, setSelectedVersionId] = useState<number | null>(null);
   const [autoTune, setAutoTune] = useState(false);
   const [optunTrials, setOptunTrials] = useState(50);
@@ -73,8 +74,13 @@ export default function TrainingLab() {
       setExperiments(expRes.data);
       setFeatures(featRes.data);
       setVersions(verRes.data);
-      if (featRes.data.length > 0 && selectedFeatures.length === 0) {
-        setSelectedFeatures(featRes.data.map(f => f.id));
+      // Seed the default selection exactly once. The interval below captures
+      // a stale closure where selectedFeatures is always [], so checking the
+      // state variable here would re-select everything on every poll tick,
+      // silently undoing the user's un-checks while the form is open.
+      if (featRes.data.length > 0 && !featuresSeeded.current) {
+        featuresSeeded.current = true;
+        setSelectedFeatures(prev => (prev.length > 0 ? prev : featRes.data.map(f => f.id)));
       }
       setLoading(false);
     }).catch(() => setLoading(false));

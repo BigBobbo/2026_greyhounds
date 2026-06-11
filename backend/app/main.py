@@ -18,6 +18,27 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("App starting up")
+
+    # Startup reaper + freshness check run BEFORE the scheduler starts so
+    # jobs orphaned by the previous process (crash/redeploy) are marked
+    # failed before anything new is kicked off. The freshness check only
+    # LOGS a warning when results are behind — it deliberately does not
+    # auto-trigger a scrape, because a crash-looping container would hammer
+    # GRI on every boot. Operators are pointed at
+    # POST /api/scraping/scrape-since-last-race-date instead.
+    try:
+        from app.database import SessionLocal
+        from app.tasks.scheduler import reap_stale_jobs, warn_if_results_stale
+
+        db = SessionLocal()
+        try:
+            reap_stale_jobs(db)
+            warn_if_results_stale(db)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error("Startup reaper/freshness check failed: %s", e)
+
     stop_fn = None
     try:
         from app.tasks.scheduler import start_scheduler, stop_scheduler

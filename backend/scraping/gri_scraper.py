@@ -86,6 +86,23 @@ def format_date(d: date) -> str:
     return d.strftime("%d-%b-%Y")
 
 
+_GRI_DOG_ID_RE = re.compile(r"[?&]gid=(\d+)", re.IGNORECASE)
+
+
+def _extract_gri_id(href: str | None) -> str | None:
+    """Pull the GRI dog id out of a greyhound-details href querystring.
+
+    GRI dog-detail links look like
+    `/results/greyhound-search/greyhound-details/?gid=12345` — the gid is a
+    stable per-dog identifier, unlike the name (two dogs can share a name).
+    Returns None when the href carries no gid.
+    """
+    if not href:
+        return None
+    m = _GRI_DOG_ID_RE.search(href)
+    return m.group(1) if m else None
+
+
 def _has_gri_page_anchor(soup: BeautifulSoup) -> bool:
     """True if the page carries GRI structural anchors.
 
@@ -401,6 +418,9 @@ def _parse_row(row, cells, col_map: dict[str, int] | None) -> dict[str, Any]:
     dog_link = dog_cell.find("a") if dog_cell is not None else None
     if dog_link:
         entry["dog_name"] = dog_link.get_text(strip=True).upper()
+        gri_id = _extract_gri_id(dog_link.get("href"))
+        if gri_id:
+            entry["gri_id"] = gri_id
 
     # Sire / Dam — search within THIS ROW's subtree only. (The old code used
     # cells[2].find_next(...), which walks the whole document forward: a row
@@ -671,7 +691,11 @@ def parse_card_page(html: str, track_code: str, race_date: date) -> list[dict[st
             if not dog_name:
                 continue
 
-            entries.append({"trap": trap, "dog_name": dog_name})
+            entry: dict[str, Any] = {"trap": trap, "dog_name": dog_name}
+            gri_id = _extract_gri_id(dog_link.get("href"))
+            if gri_id:
+                entry["gri_id"] = gri_id
+            entries.append(entry)
 
         if not entries:
             continue
@@ -785,6 +809,7 @@ def parse_card_form_page(html: str) -> dict[int, dict[str, Any]]:
             "sire_name": None,
             "dam_name": None,
             "best_time": None,
+            "gri_id": None,
         }
 
         for row in block_rows:
@@ -802,10 +827,26 @@ def parse_card_form_page(html: str) -> dict[int, dict[str, Any]]:
                     if name:
                         info["trainer_name"] = name
 
+            row_text = row.get_text(" ", strip=True)
+            is_breeding_row = bool(
+                "/" in row_text and re.search(r"\.\w{3}-\d{2}", row_text)
+            )
+
+            # The running dog's own detail link (carries its GRI id) appears
+            # in a NON-breeding row — breeding rows hold sire/dam links.
+            if info["gri_id"] is None and not is_breeding_row:
+                own_link = row.find(
+                    "a",
+                    href=re.compile(
+                        r"greyhound-search/greyhound-details", re.IGNORECASE
+                    ),
+                )
+                if own_link:
+                    info["gri_id"] = _extract_gri_id(own_link.get("href"))
+
             # Sire/Dam: two greyhound-details links inside breeding cell
             if info["sire_name"] is None or info["dam_name"] is None:
-                breeding_text = row.get_text(" ", strip=True)
-                if "/" in breeding_text and re.search(r"\.\w{3}-\d{2}", breeding_text):
+                if is_breeding_row:
                     dog_links = row.find_all(
                         "a",
                         href=re.compile(
@@ -876,6 +917,9 @@ def merge_card_form_into_race(
         if trap is None or trap not in form_by_trap:
             continue
         form = form_by_trap[trap]
-        for key in ("trainer_name", "owner_name", "sire_name", "dam_name", "best_time"):
+        for key in (
+            "trainer_name", "owner_name", "sire_name", "dam_name",
+            "best_time", "gri_id",
+        ):
             if form.get(key) and not entry.get(key):
                 entry[key] = form[key]

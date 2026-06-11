@@ -542,6 +542,25 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
                 failed_tracks.append(tc)
                 # Continue with next track
 
+        # Track-by-track backfills insert races out of chronological order,
+        # which corrupts days_since_last on entries inserted earlier. Heal
+        # once at the end if any out-of-order insert was flagged.
+        from scraping.db_pipeline import pop_out_of_order_dogs, recompute_days_since_last
+        flagged = pop_out_of_order_dogs()
+        if flagged:
+            db_heal = SessionLocal()
+            try:
+                healed = recompute_days_since_last(db_heal)
+                logger.info(
+                    "Backfill healed days_since_last: %d entries corrected "
+                    "(%d dogs flagged out-of-order)",
+                    healed, len(flagged),
+                )
+            except Exception as e:
+                logger.error("days_since_last recompute failed: %s", e)
+            finally:
+                db_heal.close()
+
         # Final update
         db_final = SessionLocal()
         try:

@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     # value in the X-API-Key header. Empty disables auth (local dev only).
     api_key: str = ""
 
+    # Scheduler: set ENABLE_SCHEDULER=false to skip starting the in-process
+    # APScheduler (e.g. for one-off maintenance containers or local dev).
+    enable_scheduler: bool = True
+
     # Scraping
     scrape_delay: float = 2.0  # seconds between requests
     gri_base_url: str = "https://www.grireland.ie"

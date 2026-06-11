@@ -74,6 +74,7 @@ def get_dog_history(
             RaceEntry.dog_id == dog_id,
             Race.race_date < before_date,
             Race.status == "resulted",
+            RaceEntry.scratched.isnot(True),
         )
         .order_by(Race.race_date.desc())
         .limit(limit)

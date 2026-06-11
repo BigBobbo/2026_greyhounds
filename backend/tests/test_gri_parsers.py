@@ -78,6 +78,7 @@ def test_results_winner_row_with_malformed_markup(results_races):
     winner = _by_trap(results_races[0])[4]
     assert winner["finish_position"] == 1
     assert winner["dog_name"] == "BALLYMAC VISION"
+    assert winner["gri_id"] == "101"  # from the dog-details href gid=
     assert winner["sire_name"] == "LAUGHIL BLAKE"
     # Mixed-case link text in the fixture — must be uppercased
     assert winner["dam_name"] == "BALLYMAC ARRA"
@@ -133,6 +134,18 @@ def test_results_pedigree_scoped_to_row(results_races):
     assert by_trap[1].get("dam_name") is None
     assert by_trap[2]["sire_name"] == "BALLYMAC BEST"
     assert by_trap[2]["dam_name"] == "COOLAVANNY MISS"
+
+
+def test_results_gri_ids_extracted_for_every_runner(results_races):
+    """E5: each runner's GRI dog id comes from its dog-details href, and the
+    pedigree (sire/dam) links' gids must NOT leak into it."""
+    by_trap = _by_trap(results_races[0])
+    assert {t: e["gri_id"] for t, e in by_trap.items()} == {
+        4: "101", 1: "102", 2: "103", 3: "104", 5: "105", 6: "106",
+    }
+    marathon = _by_trap(results_races[1])
+    assert marathon[2]["gri_id"] == "201"
+    assert marathon[4]["gri_id"] == "206"
 
 
 def test_results_marathon_race(results_races):
@@ -417,6 +430,10 @@ def test_card_page_golden():
     assert [e["trap"] for e in race1["entries"]] == [1, 2, 3, 4, 5, 6]
     assert race1["entries"][0]["dog_name"] == "CLONBRIEN ROCKET"
     assert race1["entries"][5]["dog_name"] == "SKYWALKER HOPE"
+    # E5: card entries carry the GRI dog id from the dog-details href
+    assert [e["gri_id"] for e in race1["entries"]] == [
+        "401", "402", "403", "404", "405", "406",
+    ]
 
     race2 = races[1]
     assert race2["race_number"] == 2
@@ -436,6 +453,8 @@ def test_card_form_page_golden():
     assert t1["sire_name"] == "DROOPYS SYDNEY"
     assert t1["dam_name"] == "CLONBRIEN TREACLE"
     assert t1["best_time"] == 28.55
+    # E5: the dog's OWN gid, not the sire/dam gids from the breeding row
+    assert t1["gri_id"] == "401"
 
     t2 = by_trap[2]
     assert t2["owner_name"] == "Tyrur Syndicate"
@@ -443,3 +462,4 @@ def test_card_form_page_golden():
     assert t2["sire_name"] == "BALLYMAC BEST"
     assert t2["dam_name"] == "TYRUR PEGGY SUE"
     assert t2["best_time"] == 28.91
+    assert t2["gri_id"] == "402"

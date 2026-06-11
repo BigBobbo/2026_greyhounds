@@ -19,6 +19,9 @@ class RaceEntry(Base):
     sp_decimal = Column(Float)  # 4.0, 2.0
     comment = Column(String)
     wide_runner = Column(Boolean, default=False)
+    # True when the dog was carded but did not run (trap absent from the
+    # results). NULL/False = ran or not yet resolved.
+    scratched = Column(Boolean)
     grade_at_entry = Column(String)
     days_since_last = Column(Integer)
     last_scraped_at = Column(DateTime)

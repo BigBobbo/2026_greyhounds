@@ -20,7 +20,11 @@ from app.database import SessionLocal
 from app.models.track import Track
 from app.models.scrape_log import ScrapeLog
 from scraping.gri_scraper import scrape_results, discover_track_codes
-from scraping.db_pipeline import upsert_race_results
+from scraping.db_pipeline import (
+    pop_out_of_order_dogs,
+    recompute_days_since_last,
+    upsert_race_results,
+)
 import app.models  # noqa: F401
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -143,6 +147,17 @@ async def run_backfill(
             logger.info(
                 "Track %s complete: %d races, %d entries",
                 track.code, track_races, track_entries,
+            )
+
+        # Track-by-track iteration inserts races out of chronological order,
+        # corrupting days_since_last on later entries written first. Heal
+        # once at the end when any out-of-order insert was flagged.
+        flagged = pop_out_of_order_dogs()
+        if flagged:
+            healed = recompute_days_since_last(db)
+            logger.info(
+                "Healed days_since_last: %d entries corrected (%d dogs flagged)",
+                healed, len(flagged),
             )
 
         logger.info(

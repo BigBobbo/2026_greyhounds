@@ -1002,6 +1002,7 @@ def compute_builtin_features_batch(
             .filter(
                 RaceEntry.dog_id.in_(chunk),
                 Race.status == "resulted",
+                RaceEntry.scratched.isnot(True),
             )
             .all()
         )

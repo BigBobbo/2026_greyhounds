@@ -206,3 +206,27 @@ export interface RaceCombosResponse {
   forecast_combos: ForecastCombo[];
   trio_combos: TrioCombo[];
 }
+
+// GET /predictions/preflight/{race_id} — pre-bet data-quality check
+export interface PreflightCompleteness {
+  entry_id: number;
+  trap: number | null;
+  dog_name: string | null;
+  completeness: number;
+}
+
+export interface PreflightResponse {
+  race_id: number;
+  race_status: string;
+  experiment_id: number;
+  n_entries: number;
+  post_race_features_in_use: { feature: string; reason: string }[];
+  entries_missing_history: { entry_id: number; trap: number | null; dog_name: string | null }[];
+  missing_features: {
+    feature: string;
+    reason?: string;
+    missing_for?: { entry_id: number; trap: number | null; dog_name: string | null }[];
+  }[];
+  data_completeness: PreflightCompleteness[];
+  would_fail: boolean;
+}

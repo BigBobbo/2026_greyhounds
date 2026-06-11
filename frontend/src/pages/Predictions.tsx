@@ -10,6 +10,7 @@ import {
 import type {
   Experiment,
   ForecastCombo,
+  PreflightResponse,
   Track,
   TrioCombo,
 } from '../types/models';
@@ -30,6 +31,7 @@ interface PredictionEntry {
   edge: number | null;
   is_value: boolean | null;
   kelly: KellyInfo | null;
+  data_completeness?: number | null;
   sp_decimal_at_pred?: number | null;
   forecast_combos?: ForecastCombo[];
   trio_combos?: TrioCombo[];
@@ -226,6 +228,7 @@ export default function Predictions() {
   const [trackCode, setTrackCode] = useState('');
   const [availableRaces, setAvailableRaces] = useState<RaceOption[]>([]);
   const [selectedRaceId, setSelectedRaceId] = useState<number | null>(null);
+  const [preflight, setPreflight] = useState<PreflightResponse | null>(null);
   const [loadingRaces, setLoadingRaces] = useState(false);
   const [bankroll, setBankroll] = useState(100);
   const [staking, setStaking] = useState<StakingParams>(DEFAULT_STAKING);
@@ -292,6 +295,31 @@ export default function Predictions() {
       .catch(() => setAvailableRaces([]))
       .finally(() => setLoadingRaces(false));
   }, [raceDate, trackCode]);
+
+  // Pre-bet data-quality check: would this (race, experiment) prediction
+  // fail, and how complete is each dog's history? The backend has carried
+  // this safety signal since the preflight endpoint shipped; surface it
+  // BEFORE the user generates predictions and bets on them.
+  useEffect(() => {
+    if (!selectedRaceId || !selectedExp) {
+      setPreflight(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .get<PreflightResponse>(
+        `/predictions/preflight/${selectedRaceId}?experiment_id=${selectedExp}`,
+      )
+      .then((res) => {
+        if (!cancelled) setPreflight(res.data);
+      })
+      .catch(() => {
+        if (!cancelled) setPreflight(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRaceId, selectedExp]);
 
   const handlePredict = async (forceRefresh: boolean = false) => {
     const raceId = selectedRaceId || (manualRaceId ? parseInt(manualRaceId) : null);
@@ -675,6 +703,60 @@ export default function Predictions() {
                 </div>
               </div>
 
+              {/* Pre-bet data-quality check (preflight) */}
+              {preflight && (preflight.would_fail || preflight.entries_missing_history.length > 0 || preflight.data_completeness.some((d) => d.completeness < 0.5)) && (
+                <div
+                  className={`rounded-lg border px-4 py-3 text-sm ${
+                    preflight.would_fail
+                      ? 'bg-red-50 border-red-300 text-red-800'
+                      : 'bg-yellow-50 border-yellow-300 text-yellow-800'
+                  }`}
+                >
+                  {preflight.would_fail ? (
+                    <div>
+                      <p className="font-semibold">
+                        This model cannot be served on a scheduled race.
+                      </p>
+                      <ul className="list-disc ml-5 mt-1">
+                        {preflight.post_race_features_in_use.map((f) => (
+                          <li key={f.feature}>
+                            <span className="font-mono">{f.feature}</span> — {f.reason}
+                          </li>
+                        ))}
+                      </ul>
+                      <p className="mt-1 text-xs">
+                        Retrain the experiment (post-race features are excluded by default) or pick another model.
+                      </p>
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="font-semibold">Data-quality warning</p>
+                      {preflight.entries_missing_history.length > 0 && (
+                        <p className="mt-1">
+                          No prior form at all:{' '}
+                          {preflight.entries_missing_history
+                            .map((d) => `trap ${d.trap ?? '?'} ${d.dog_name ?? ''}`)
+                            .join(', ')}
+                          {' '}— their probabilities are guesses from imputed data.
+                        </p>
+                      )}
+                      {preflight.data_completeness.filter((d) => d.completeness < 0.5).length > 0 && (
+                        <p className="mt-1">
+                          Thin history (&lt;50% real features):{' '}
+                          {preflight.data_completeness
+                            .filter((d) => d.completeness < 0.5)
+                            .map((d) => `trap ${d.trap ?? '?'} ${d.dog_name ?? ''} (${Math.round(d.completeness * 100)}%)`)
+                            .join(', ')}
+                        </p>
+                      )}
+                      <p className="mt-1 text-xs">
+                        Treat BET verdicts involving these dogs with caution — consider passing or reducing stakes.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Prediction results */}
               {predictions && (
                 <div className="space-y-4">
@@ -761,6 +843,7 @@ export default function Predictions() {
                           <th className="px-3 sm:px-4 py-3">Rank</th>
                           <th className="px-3 sm:px-4 py-3">Trap</th>
                           <th className="px-3 sm:px-4 py-3">Dog</th>
+                          <th className="px-3 sm:px-4 py-3" title="Share of model features computed from real history (1.0 = full form; low values mean the model is guessing from imputed data)">Data</th>
                           <th className="px-3 sm:px-4 py-3">Win</th>
                           <th className="px-3 sm:px-4 py-3" title="P(finish 1st or 2nd)">Place</th>
                           <th className="px-3 sm:px-4 py-3" title="P(finish 1st, 2nd, or 3rd)">Show</th>
@@ -800,6 +883,24 @@ export default function Predictions() {
                               <td className="px-4 py-3 font-medium">{i + 1}</td>
                               <td className="px-4 py-3">{p.trap || '-'}</td>
                               <td className="px-4 py-3 font-medium">{p.dog_name}</td>
+                              <td className="px-4 py-3">
+                                {p.data_completeness != null ? (
+                                  <span
+                                    className={`inline-block px-1.5 py-0.5 rounded text-xs font-mono ${
+                                      p.data_completeness >= 0.8
+                                        ? 'bg-green-100 text-green-700'
+                                        : p.data_completeness >= 0.5
+                                        ? 'bg-yellow-100 text-yellow-700'
+                                        : 'bg-red-100 text-red-700'
+                                    }`}
+                                    title={`${Math.round(p.data_completeness * 100)}% of features computed from real history`}
+                                  >
+                                    {Math.round(p.data_completeness * 100)}%
+                                  </span>
+                                ) : (
+                                  <span className="text-gray-300 text-xs">-</span>
+                                )}
+                              </td>
                               <td className={`px-4 py-3 font-mono ${probColor(p.win_probability)}`}>
                                 {p.win_probability ? `${(p.win_probability * 100).toFixed(1)}%` : '-'}
                               </td>

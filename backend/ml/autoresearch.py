@@ -44,7 +44,6 @@ SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         "subsample": {"type": "float", "low": 0.5, "high": 1.0},
         "colsample_bytree": {"type": "float", "low": 0.4, "high": 1.0},
         "min_child_weight": {"type": "int", "low": 1, "high": 30},
-        "scale_pos_weight": {"type": "float", "low": 1.0, "high": 10.0},
         "gamma": {"type": "float", "low": 0.0, "high": 5.0},
         "reg_alpha": {"type": "float_log", "low": 1e-5, "high": 10.0},
         "reg_lambda": {"type": "float_log", "low": 1e-5, "high": 10.0},

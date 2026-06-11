@@ -25,10 +25,11 @@ class XGBoostTrainer(BaseTrainer):
         }
         model_params.setdefault("verbosity", 0)
         model_params.setdefault("random_state", 42)
-        if target_type == "classification":
-            # Handle class imbalance: win is ~16.7% in 6-dog races
-            # scale_pos_weight = neg_count / pos_count ≈ 5.0
-            model_params.setdefault("scale_pos_weight", 5.0)
+        # No class re-weighting by default: a ~16.7% positive rate needs
+        # none for GBMs, and scale_pos_weight inflates the raw probability
+        # scale ~5x pre-calibration — Platt then corrects the mean but
+        # compresses resolution. Still settable as an explicit
+        # hyperparameter for experiments that want it.
         self._model_params = model_params
         self.model = None
 

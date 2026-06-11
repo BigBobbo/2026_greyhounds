@@ -704,16 +704,18 @@ def run_optuna_optimization(
             if optuna_objective == "top_pick_roi":
                 return -float(bm.get("top_pick_roi", -999))
             if optuna_objective == "value_bet_roi":
-                if bm.get("value_bet_count", 0) < 10:
+                # ROI on a handful of bets is noise that Optuna will
+                # happily overfit; require a real sample.
+                if bm.get("value_bet_count", 0) < 100:
                     return 999.0
                 return -float(bm.get("value_bet_roi", -999))
             if optuna_objective == "kelly_roi":
-                if bm.get("kelly_races", 0) < 10:
+                if bm.get("kelly_races", 0) < 100:
                     return 999.0
                 return -float(bm.get("kelly_roi", -999))
             if optuna_objective == "sharpe":
                 kelly_cum = bm.get("kelly_pnl_by_race", [])
-                if len(kelly_cum) < 5:
+                if len(kelly_cum) < 30:
                     return 999.0
                 pnls = [kelly_cum[0]["pnl"]]
                 for i in range(1, len(kelly_cum)):

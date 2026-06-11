@@ -28,8 +28,8 @@ class LightGBMTrainer(BaseTrainer):
         }
         model_params.setdefault("verbosity", -1)
         model_params.setdefault("random_state", 42)
-        if target_type == "classification":
-            model_params.setdefault("is_unbalance", True)
+        # No is_unbalance default — same probability-scale reasoning as
+        # the XGBoost trainer; pass it explicitly if an experiment wants it.
         self._model_params = model_params
         self.model = None
 

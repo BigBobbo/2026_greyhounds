@@ -24,6 +24,16 @@ class Settings(BaseSettings):
     # ML
     model_artifacts_dir: str = "./data/models"
 
+    # Backups (S3-compatible storage; all empty = backups disabled)
+    backup_s3_bucket: str = ""
+    backup_s3_endpoint_url: str = ""  # e.g. https://<account>.r2.cloudflarestorage.com
+    backup_s3_access_key: str = ""
+    backup_s3_secret_key: str = ""
+    backup_s3_region: str = "auto"
+    backup_s3_prefix: str = "backups"
+    backup_retention_daily: int = 7
+    backup_retention_weekly: int = 4
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

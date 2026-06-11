@@ -228,6 +228,17 @@ def start_scheduler():
         replace_existing=True,
     )
 
+    # Nightly off-site backup of the DB and model artifacts at 02:30.
+    # Runs after the late-night results scrape so the snapshot includes it.
+    from app.services.backup_service import run_backup_job
+    scheduler.add_job(
+        run_backup_job,
+        trigger=CronTrigger(hour=2, minute=30),
+        id="nightly_backup",
+        name="Nightly off-site backup",
+        replace_existing=True,
+    )
+
     scheduler.start()
 
     # Register dynamic schedule jobs after start so add_job + cron triggers

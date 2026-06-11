@@ -48,10 +48,16 @@ def upgrade() -> None:
             sa.Column('data_complete', sa.Boolean(), nullable=True, server_default=sa.text('1')),
         )
     if 'version_id' not in existing_cols:
-        op.add_column(
-            'computed_features',
-            sa.Column('version_id', sa.Integer(), sa.ForeignKey('feature_versions.id'), nullable=True),
-        )
+        # add_column with an inline ForeignKey raises NotImplementedError on
+        # SQLite (no ALTER for constraints); batch mode rebuilds the table.
+        with op.batch_alter_table('computed_features') as batch_op:
+            batch_op.add_column(sa.Column('version_id', sa.Integer(), nullable=True))
+            batch_op.create_foreign_key(
+                'fk_computed_features_version_id',
+                'feature_versions',
+                ['version_id'],
+                ['id'],
+            )
         op.create_index('ix_computed_features_version_id', 'computed_features', ['version_id'])
 
     # Replace the old unique constraint with one that includes version_id.

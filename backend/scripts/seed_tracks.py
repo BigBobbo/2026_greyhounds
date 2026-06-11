@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.database import SessionLocal, engine, Base
+from app.database import SessionLocal
 from app.models.track import Track
 import app.models  # noqa: F401
 
@@ -168,7 +168,6 @@ IRISH_TRACKS = [
 
 
 def seed():
-    Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
         existing = {t.code for t in db.query(Track).all()}

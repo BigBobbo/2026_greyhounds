@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.database import SessionLocal, engine, Base
+from app.database import SessionLocal
 from app.models.track import Track
 from app.models.scrape_log import ScrapeLog
 from scraping.gri_scraper import scrape_results, discover_track_codes
@@ -64,7 +64,6 @@ async def run_backfill(
     delay: float = 2.0,
 ):
     """Run historical backfill for specified tracks and date range."""
-    Base.metadata.create_all(bind=engine)
 
     db = SessionLocal()
     try:

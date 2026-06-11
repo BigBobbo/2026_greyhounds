@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import api from '../api/client';
+import api, { errorMessage } from '../api/client';
 import type {
   Experiment,
   ForecastCombo,
@@ -278,8 +278,8 @@ export default function Predictions() {
         },
       );
       setPredictions(res.data);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to save odds');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to save odds'));
     } finally {
       setSavingOdds(false);
     }
@@ -344,8 +344,8 @@ export default function Predictions() {
       if (forceRefresh) params.set('refresh', 'true');
       const res = await api.get(`/predictions/race/${raceId}?${params}`);
       setPredictions(res.data);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to generate predictions');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to generate predictions'));
     }
     setLoading(false);
   };
@@ -363,8 +363,8 @@ export default function Predictions() {
         `/predictions/history?${params}`,
       );
       setHistory(res.data.sessions);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to load history');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to load history'));
       setHistory([]);
     } finally {
       setHistoryLoading(false);
@@ -383,8 +383,8 @@ export default function Predictions() {
         `/predictions/race/${s.race_id}/saved?experiment_id=${s.experiment_id}`,
       );
       setPredictions(res.data);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to load saved prediction');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to load saved prediction'));
     } finally {
       setLoading(false);
     }
@@ -408,9 +408,11 @@ export default function Predictions() {
     refreshCardsStatus(scrapeDate);
   }, [tab, scrapeDate]);
 
-  // Poll the scrape log while a card scrape is running
+  // Poll the scrape log while a card scrape is running. Only the log id is
+  // needed inside the effect, so depend on that rather than the whole object.
+  const scrapeLogId = scrapeStatus?.log_id;
   useEffect(() => {
-    if (!scrapeStatus || !scrapeRunning) return;
+    if (scrapeLogId == null || !scrapeRunning) return;
     interface RawLog {
       id: number;
       spider_name: string;
@@ -424,7 +426,7 @@ export default function Predictions() {
     const interval = setInterval(async () => {
       try {
         const res = await api.get<{ recent_logs: RawLog[] }>('/scraping/status');
-        const latest = res.data.recent_logs.find(l => l.id === scrapeStatus.log_id);
+        const latest = res.data.recent_logs.find(l => l.id === scrapeLogId);
         if (latest) {
           setScrapeStatus({
             log_id: latest.id,
@@ -446,7 +448,7 @@ export default function Predictions() {
       }
     }, 2500);
     return () => clearInterval(interval);
-  }, [scrapeStatus?.log_id, scrapeRunning, scrapeDate]);
+  }, [scrapeLogId, scrapeRunning, scrapeDate]);
 
   const handleStartScrape = async () => {
     setScrapeStatus(null);
@@ -471,8 +473,8 @@ export default function Predictions() {
         completed_at: null,
       });
       setScrapeRunning(true);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to start scrape');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to start scrape'));
     }
   };
 
@@ -489,8 +491,8 @@ export default function Predictions() {
       });
       const res = await api.get<ByDateResponse>(`/predictions/by-date?${params}`);
       setByDateResult(res.data);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to predict races for date');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to predict races for date'));
     }
     setByDateLoading(false);
   };
@@ -501,8 +503,8 @@ export default function Predictions() {
     try {
       const res = await api.get(`/predictions/results-comparison?experiment_id=${selectedExp}&limit=100`);
       setComparisons(res.data.results);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to load comparisons');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to load comparisons'));
     }
     setLoading(false);
   };

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import api from '../api/client';
-import type { Experiment, FeatureDefinition } from '../types/models';
+import api, { errorMessage } from '../api/client';
+import type { Experiment, FeatureDefinition, SplitConfig } from '../types/models';
 
 interface FeatureVersion {
   id: number;
@@ -32,6 +32,9 @@ export default function TrainingLab() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [creating, setCreating] = useState(false);
+  // "Now" is sampled once per poll tick (see fetchData) instead of during
+  // render, so heartbeat ages stay pure but still refresh with each poll.
+  const [now, setNow] = useState(() => Date.now());
 
   // Form state
   const [name, setName] = useState('');
@@ -71,6 +74,7 @@ export default function TrainingLab() {
       api.get<FeatureDefinition[]>('/features/?enabled_only=true'),
       api.get<FeatureVersion[]>('/features/versions'),
     ]).then(([expRes, featRes, verRes]) => {
+      setNow(Date.now());
       setExperiments(expRes.data);
       setFeatures(featRes.data);
       setVersions(verRes.data);
@@ -98,7 +102,7 @@ export default function TrainingLab() {
 
     setCreating(true);
     try {
-      const splitConfig: Record<string, any> = {
+      const splitConfig: SplitConfig = {
         test_after: testAfter,
         val_pct: 0.15,
         include_builtin_features: includeBuiltin,
@@ -130,8 +134,8 @@ export default function TrainingLab() {
       setShowForm(false);
       setName('');
       fetchData();
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create experiment');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to create experiment'));
     }
     setCreating(false);
   };
@@ -175,7 +179,7 @@ export default function TrainingLab() {
 
   const heartbeatAgeSeconds = (heartbeat: string | null) => {
     if (!heartbeat) return null;
-    return Math.floor((Date.now() - new Date(heartbeat + 'Z').getTime()) / 1000);
+    return Math.floor((now - new Date(heartbeat + 'Z').getTime()) / 1000);
   };
 
   const formatHeartbeatAge = (seconds: number) => {
@@ -651,8 +655,8 @@ export default function TrainingLab() {
                     <Link to={`/training/${exp.id}`} className="text-blue-600 hover:underline font-medium">
                       {exp.name}
                     </Link>
-                    {exp.split_config && (exp.split_config as any).test_after && (
-                      <p className="text-xs text-gray-400">Test after: {(exp.split_config as any).test_after}</p>
+                    {exp.split_config?.test_after && (
+                      <p className="text-xs text-gray-400">Test after: {exp.split_config.test_after}</p>
                     )}
                   </td>
                   <td className="px-4 py-3">
@@ -663,7 +667,7 @@ export default function TrainingLab() {
                       </span>
                     )}
                     {(() => {
-                      const sc = (exp.split_config as any) || {};
+                      const sc: SplitConfig = exp.split_config || {};
                       const obj = sc.optuna_objective;
                       const folds = sc.walk_forward_folds;
                       const embargo = sc.embargo_days;

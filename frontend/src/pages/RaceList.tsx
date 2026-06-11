@@ -24,9 +24,15 @@ export default function RaceList() {
     }).catch(() => setLoading(false));
   };
 
+  // Initial load: state updates happen inside the promise chains (loading
+  // starts true) so no setState runs synchronously in the effect body. No
+  // filters are set on mount, so this matches fetchRaces() with defaults.
   useEffect(() => {
     api.get<Track[]>('/tracks/').then(res => setTracks(res.data));
-    fetchRaces();
+    api.get<Race[]>('/races/', { params: { limit: '100' } }).then(res => {
+      setRaces(res.data);
+      setLoading(false);
+    }).catch(() => setLoading(false));
   }, []);
 
   const handleFilter = (e: React.FormEvent) => {

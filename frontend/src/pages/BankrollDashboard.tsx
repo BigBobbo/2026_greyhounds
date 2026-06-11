@@ -265,9 +265,9 @@ export default function BankrollDashboard() {
                   <XAxis dataKey="bet" label={{ value: 'Bet #', position: 'bottom', offset: -5 }} />
                   <YAxis label={{ value: 'P&L ($)', angle: -90, position: 'left' }} />
                   <Tooltip
-                    formatter={(v: any) => [`$${v}`, 'P&L']}
-                    labelFormatter={(label: any) => {
-                      const item = summary.cumulative_pnl[label - 1];
+                    formatter={(v) => [`$${v}`, 'P&L']}
+                    labelFormatter={(label) => {
+                      const item = summary.cumulative_pnl[Number(label) - 1];
                       return item ? `${item.dog} (${item.date})` : `Bet #${label}`;
                     }}
                   />

@@ -22,4 +22,17 @@ const api = axios.create({
   headers,
 });
 
+/**
+ * Extracts a human-readable message from an API error without resorting to
+ * `any`. FastAPI returns errors as `{ detail: string }`; anything else
+ * (network failure, non-string detail) falls back to the supplied message.
+ */
+export function errorMessage(e: unknown, fallback: string): string {
+  if (axios.isAxiosError(e)) {
+    const detail = (e.response?.data as { detail?: unknown } | undefined)?.detail;
+    if (typeof detail === 'string' && detail) return detail;
+  }
+  return fallback;
+}
+
 export default api;

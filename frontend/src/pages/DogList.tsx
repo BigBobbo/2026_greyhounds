@@ -6,7 +6,7 @@ import type { Dog } from '../types/models';
 export default function DogList() {
   const [dogs, setDogs] = useState<Dog[]>([]);
   const [search, setSearch] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   const fetchDogs = (query: string) => {
     setLoading(true);
@@ -18,7 +18,14 @@ export default function DogList() {
     }).catch(() => setLoading(false));
   };
 
-  useEffect(() => { fetchDogs(''); }, []);
+  // Initial load: state updates happen inside the promise chain (loading
+  // starts true) so no setState runs synchronously in the effect body.
+  useEffect(() => {
+    api.get<Dog[]>('/dogs/').then((res) => {
+      setDogs(res.data);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  }, []);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();

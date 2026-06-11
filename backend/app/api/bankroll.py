@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -124,6 +124,9 @@ def reset_bankroll(db: Session = Depends(get_db)):
 @router.post("/bets")
 def place_bet(bet: PlaceBetRequest, db: Session = Depends(get_db)):
     """Record a new bet."""
+    if bet.stake <= 0:
+        raise HTTPException(status_code=422, detail="stake must be > 0")
+
     config = db.query(BankrollConfig).first()
     if not config:
         config = BankrollConfig(initial_bankroll=100.0, current_bankroll=100.0)
@@ -207,11 +210,30 @@ def place_bet(bet: PlaceBetRequest, db: Session = Depends(get_db)):
     )
     db.add(record)
 
-    # Deduct stake from bankroll
-    config.current_bankroll -= bet.stake
+    # Deduct the stake atomically: a single guarded UPDATE instead of
+    # read-modify-write, so concurrent placements can neither lose a
+    # decrement nor drive the bankroll negative.
+    result = db.execute(
+        update(BankrollConfig)
+        .where(
+            BankrollConfig.id == config.id,
+            BankrollConfig.current_bankroll >= bet.stake,
+        )
+        .values(current_bankroll=BankrollConfig.current_bankroll - bet.stake)
+    )
+    if result.rowcount == 0:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"stake {bet.stake} exceeds current bankroll "
+                f"{config.current_bankroll}"
+            ),
+        )
 
     db.commit()
     db.refresh(record)
+    db.refresh(config)
     return {"id": record.id, "status": "placed", "bankroll": config.current_bankroll}
 
 
@@ -254,7 +276,15 @@ def settle_bet(bet_id: int, settle: SettleBetRequest, db: Session = Depends(get_
         if len(settle.actual_finishing_order) >= n and len(legs) == n:
             won = list(settle.actual_finishing_order[:n]) == list(legs)
 
-    if won and record.odds_decimal:
+    if won and not record.odds_decimal:
+        # Silently settling a winner as a loss corrupted P&L; the caller
+        # must supply odds (via PATCH or re-placing) before settling a win.
+        raise HTTPException(
+            status_code=422,
+            detail="cannot settle a winning bet without odds_decimal on the record",
+        )
+
+    if won:
         profit = record.stake * (record.odds_decimal - 1)
         record.outcome = "won"
     else:
@@ -264,10 +294,20 @@ def settle_bet(bet_id: int, settle: SettleBetRequest, db: Session = Depends(get_
     record.profit = round(profit, 2)
     record.settled_at = datetime.utcnow()
 
-    # Update bankroll: add back stake + profit if won, nothing if lost (stake already deducted)
+    # Credit winnings atomically (stake was already deducted at placement)
     if config:
         if won:
-            config.current_bankroll += record.stake + profit  # return stake + winnings
+            db.execute(
+                update(BankrollConfig)
+                .where(BankrollConfig.id == config.id)
+                .values(
+                    current_bankroll=BankrollConfig.current_bankroll
+                    + record.stake
+                    + profit
+                )
+            )
+        db.flush()
+        db.refresh(config)
         record.bankroll_after = config.current_bankroll
 
     db.commit()
@@ -288,7 +328,11 @@ def delete_bet(bet_id: int, db: Session = Depends(get_db)):
 
     config = db.query(BankrollConfig).first()
     if record.outcome == "pending" and config:
-        config.current_bankroll += record.stake
+        db.execute(
+            update(BankrollConfig)
+            .where(BankrollConfig.id == config.id)
+            .values(current_bankroll=BankrollConfig.current_bankroll + record.stake)
+        )
 
     db.delete(record)
     db.commit()

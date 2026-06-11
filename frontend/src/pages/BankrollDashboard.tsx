@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import api from '../api/client';
+import api, { errorMessage } from '../api/client';
 
 interface BankrollConfig {
   initial_bankroll: number;
@@ -91,15 +91,30 @@ export default function BankrollDashboard() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleSaveSettings = async () => {
-    await api.put('/bankroll/config', {
-      initial_bankroll: editBankroll,
-      current_bankroll: editBankroll,
+    // Never send current_bankroll from the settings form: it would overwrite
+    // the P&L-adjusted running bankroll with the input value. Changing the
+    // starting bankroll asks explicitly whether to restart tracking.
+    const payload: Record<string, number> = {
       kelly_fraction: editKelly,
       min_edge: editMinEdge,
       max_stake_pct: editMaxStake,
-    });
-    setShowSettings(false);
-    fetchData();
+    };
+    if (config && editBankroll !== config.initial_bankroll) {
+      const alsoReset = confirm(
+        `Change starting bankroll from $${config.initial_bankroll} to $${editBankroll}?\n\n` +
+          `OK = also set the CURRENT bankroll to $${editBankroll} (restart tracking).\n` +
+          `Cancel = keep the current bankroll of $${config.current_bankroll} and only change the starting value.`
+      );
+      payload.initial_bankroll = editBankroll;
+      if (alsoReset) payload.current_bankroll = editBankroll;
+    }
+    try {
+      await api.put('/bankroll/config', payload);
+      setShowSettings(false);
+      fetchData();
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to save settings'));
+    }
   };
 
   const handleReset = async () => {

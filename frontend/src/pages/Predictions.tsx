@@ -874,7 +874,13 @@ export default function Predictions() {
                         );
                         return { p, kelly, odds };
                       })
-                      .filter((x) => x.kelly.bet);
+                      .filter((x) => x.kelly.bet)
+                      // One bet per race: win bets are mutually exclusive, so
+                      // staking several dogs in the same race overstakes.
+                      // Keep the highest-edge qualifier — same rule as the
+                      // backend backtest and /best-bets.
+                      .sort((a, b) => (b.kelly.edge ?? 0) - (a.kelly.edge ?? 0))
+                      .slice(0, 1);
 
                     if (liveBets.length > 0) {
                       const totalStake = liveBets.reduce(

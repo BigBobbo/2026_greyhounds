@@ -1256,9 +1256,22 @@ def get_best_bets(
         except Exception as e:
             logger.warning("Best bets: race %d failed: %s", race.id, e)
 
+    # One bet per race: win bets in a race are mutually exclusive outcomes,
+    # and independent Kelly stakes on several of them systematically
+    # overstake (multiple "value" dogs in one race usually means the race's
+    # probabilities are miscalibrated, not that the race is a goldmine).
+    # Keep only the highest-edge qualifier per race — the same rule the
+    # betting backtest simulates, so live results stay comparable to it.
+    best_per_race: dict[int, dict] = {}
+    for bet in all_value_bets:
+        existing = best_per_race.get(bet["race_id"])
+        if existing is None or bet["edge"] > existing["edge"]:
+            best_per_race[bet["race_id"]] = bet
+    deduped = list(best_per_race.values())
+
     # Sort by edge (highest first) and limit
-    all_value_bets.sort(key=lambda b: b["edge"], reverse=True)
-    best_bets = all_value_bets[:limit]
+    deduped.sort(key=lambda b: b["edge"], reverse=True)
+    best_bets = deduped[:limit]
 
     return {
         "race_date": str(race_date),

@@ -110,3 +110,33 @@ def test_extreme_embargo_drops_entire_val_windows():
         race_ids, race_dates, n_folds=3, embargo_days=365,
     )
     assert folds == []
+
+
+def test_descending_input_raises():
+    """Audit C2: with newest-first input the embargo check silently discarded
+    every fold and training fell back to a single split. The generator must
+    refuse non-ascending input loudly instead."""
+    import pytest
+
+    race_ids, race_dates = _make_inputs(50)
+    race_ids_desc = race_ids.iloc[::-1].reset_index(drop=True)
+    race_dates_desc = race_dates.iloc[::-1].reset_index(drop=True)
+    with pytest.raises(ValueError, match="ascending"):
+        generate_walk_forward_fold_indices(
+            race_ids_desc, race_dates_desc, n_folds=3, embargo_days=0,
+        )
+
+
+def test_group_sizes_require_contiguity():
+    """Audit C2: interleaved race ids would fragment LambdaRank groups
+    silently; _compute_group_sizes must fail loudly."""
+    import pytest
+
+    from ml.dataset_builder import _compute_group_sizes
+
+    ok = pd.Series([1, 1, 1, 2, 2, 3, 3, 3])
+    assert _compute_group_sizes(ok) == [3, 2, 3]
+
+    fragmented = pd.Series([1, 1, 2, 2, 1, 3])
+    with pytest.raises(ValueError, match="contiguous"):
+        _compute_group_sizes(fragmented)

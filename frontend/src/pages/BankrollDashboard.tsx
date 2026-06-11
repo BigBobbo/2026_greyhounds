@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import api, { errorMessage } from '../api/client';
+import { toast } from 'sonner';
+import api from '../api/client';
 
 interface BankrollConfig {
   initial_bankroll: number;
@@ -58,6 +59,7 @@ export default function BankrollDashboard() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [bets, setBets] = useState<BetRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [tab, setTab] = useState<'overview' | 'bets' | 'calculator'>('overview');
 
@@ -84,8 +86,12 @@ export default function BankrollDashboard() {
       setEditKelly(configRes.data.kelly_fraction);
       setEditMinEdge(configRes.data.min_edge);
       setEditMaxStake(configRes.data.max_stake_pct);
+      setLoadError(false);
       setLoading(false);
-    }).catch(() => setLoading(false));
+    }).catch(() => {
+      setLoadError(true);
+      setLoading(false);
+    });
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
@@ -111,27 +117,43 @@ export default function BankrollDashboard() {
     try {
       await api.put('/bankroll/config', payload);
       setShowSettings(false);
+      toast.success('Bankroll settings saved');
       fetchData();
-    } catch (err) {
-      alert(errorMessage(err, 'Failed to save settings'));
+    } catch {
+      // error toast shown by the API interceptor
     }
   };
 
   const handleReset = async () => {
     if (!confirm('Reset bankroll and clear all bet history?')) return;
-    await api.post('/bankroll/reset');
-    fetchData();
+    try {
+      await api.post('/bankroll/reset');
+      toast.success('Bankroll reset');
+      fetchData();
+    } catch {
+      // error toast shown by the API interceptor
+    }
   };
 
   const handleSettleBet = async (betId: number, position: number) => {
-    await api.post(`/bankroll/bets/${betId}/settle`, { actual_position: position });
-    fetchData();
+    try {
+      await api.post(`/bankroll/bets/${betId}/settle`, { actual_position: position });
+      toast.success(`Bet settled as ${position === 1 ? 'won' : 'lost'}`);
+      fetchData();
+    } catch {
+      // error toast shown by the API interceptor
+    }
   };
 
   const handleDeleteBet = async (betId: number) => {
     if (!confirm('Delete this bet and refund the stake?')) return;
-    await api.delete(`/bankroll/bets/${betId}`);
-    fetchData();
+    try {
+      await api.delete(`/bankroll/bets/${betId}`);
+      toast.success('Bet deleted and stake refunded');
+      fetchData();
+    } catch {
+      // error toast shown by the API interceptor
+    }
   };
 
   // Kelly calculator
@@ -159,6 +181,20 @@ export default function BankrollDashboard() {
   const calc = kellyCalc();
 
   if (loading) return <p className="text-gray-500">Loading...</p>;
+
+  if (loadError) {
+    return (
+      <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-4 flex items-center justify-between gap-3 text-sm">
+        <span>Failed to load bankroll data. Check the backend and try again.</span>
+        <button
+          onClick={() => { setLoading(true); fetchData(); }}
+          className="shrink-0 px-3 py-1.5 border border-red-300 rounded-md text-red-700 hover:bg-red-100 font-medium"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
 
   const pnlColor = (val: number) => val >= 0 ? 'text-green-600' : 'text-red-600';
 

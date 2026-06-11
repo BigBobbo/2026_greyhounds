@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import api, { errorMessage } from '../api/client';
+import { toast } from 'sonner';
+import api from '../api/client';
 import type { Experiment, FeatureDefinition, SplitConfig } from '../types/models';
 
 interface FeatureVersion {
@@ -97,8 +98,14 @@ export default function TrainingLab() {
   }, []);
 
   const handleCreate = async () => {
-    if (!name.trim()) return alert('Please enter a name');
-    if (selectedFeatures.length === 0) return alert('Please select at least one feature');
+    if (!name.trim()) {
+      toast.warning('Please enter a name');
+      return;
+    }
+    if (selectedFeatures.length === 0) {
+      toast.warning('Please select at least one feature');
+      return;
+    }
 
     setCreating(true);
     try {
@@ -134,16 +141,20 @@ export default function TrainingLab() {
       setShowForm(false);
       setName('');
       fetchData();
-    } catch (err) {
-      alert(errorMessage(err, 'Failed to create experiment'));
+    } catch {
+      // error toast shown by the API interceptor
     }
     setCreating(false);
   };
 
   const handleDelete = async (id: number) => {
     if (!confirm('Delete this experiment?')) return;
-    await api.delete(`/training/experiments/${id}`);
-    fetchData();
+    try {
+      await api.delete(`/training/experiments/${id}`);
+      fetchData();
+    } catch {
+      // error toast shown by the API interceptor
+    }
   };
 
   const statusColor = (s: string) => {

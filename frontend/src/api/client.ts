@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { toast } from 'sonner';
 
 const baseURL = import.meta.env.VITE_API_URL
   ? `${import.meta.env.VITE_API_URL}/api`
@@ -34,5 +35,20 @@ export function errorMessage(e: unknown, fallback: string): string {
   }
   return fallback;
 }
+
+// Global error surface: every failed API request shows a toast with the
+// server's detail message (or a generic fallback), then re-throws so callers
+// can still branch on the failure. Callers must NOT toast the same error
+// again — catch blocks exist only to stop post-mutation refetches and
+// unhandled rejections.
+api.interceptors.response.use(
+  (response) => response,
+  (error: unknown) => {
+    const message = errorMessage(error, 'Request failed');
+    // Keyed by message so polling loops update one toast instead of stacking.
+    toast.error(message, { id: `api-error:${message}` });
+    return Promise.reject(error);
+  },
+);
 
 export default api;

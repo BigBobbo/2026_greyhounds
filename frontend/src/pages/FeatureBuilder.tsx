@@ -189,21 +189,29 @@ export default function FeatureBuilder() {
           };
       await api.post('/features/', body);
       fetchFeatures();
-    } catch (err) {
-      alert(errorMessage(err, 'Failed to save feature'));
+    } catch {
+      // error toast shown by the API interceptor
     }
     setSaving(false);
   };
 
   const handleToggle = async (id: number, enabled: boolean) => {
-    await api.patch(`/features/${id}`, { enabled: !enabled });
-    fetchFeatures();
+    try {
+      await api.patch(`/features/${id}`, { enabled: !enabled });
+      fetchFeatures();
+    } catch {
+      // error toast shown by the API interceptor
+    }
   };
 
   const handleDelete = async (id: number) => {
     if (!confirm('Delete this feature?')) return;
-    await api.delete(`/features/${id}`);
-    fetchFeatures();
+    try {
+      await api.delete(`/features/${id}`);
+      fetchFeatures();
+    } catch {
+      // error toast shown by the API interceptor
+    }
   };
 
   const fetchCoverage = useCallback((versionId?: number | null) => {
@@ -241,17 +249,21 @@ export default function FeatureBuilder() {
       setNewVersionDesc('');
       setSelectedVersionId(res.data.id);
       fetchVersions();
-    } catch (err) {
-      alert(errorMessage(err, 'Failed to create version'));
+    } catch {
+      // error toast shown by the API interceptor
     }
     setCreatingVersion(false);
   };
 
   const handleDeleteVersion = async (id: number) => {
     if (!confirm('Delete this version and all its computed features?')) return;
-    await api.delete(`/features/versions/${id}`);
-    if (selectedVersionId === id) setSelectedVersionId(null);
-    fetchVersions();
+    try {
+      await api.delete(`/features/versions/${id}`);
+      if (selectedVersionId === id) setSelectedVersionId(null);
+      fetchVersions();
+    } catch {
+      // error toast shown by the API interceptor
+    }
   };
 
   const handleMaterialize = async () => {
@@ -262,7 +274,7 @@ export default function FeatureBuilder() {
       if (selectedVersionId) body.version_id = selectedVersionId;
       await api.post('/features/materialize', body);
     } catch {
-      alert('Failed to start materialization');
+      // error toast shown by the API interceptor
     }
     setMaterializing(false);
   };
@@ -281,7 +293,9 @@ export default function FeatureBuilder() {
       const params: Record<string, number> = {};
       if (selectedVersionId) params.version_id = selectedVersionId;
       const interval = setInterval(() => {
-        api.get('/features/coverage', { params }).then(res => setCoverage(res.data));
+        api.get('/features/coverage', { params })
+          .then(res => setCoverage(res.data))
+          .catch(() => {});
       }, 5000);
       w.__materializeInterval = interval;
       return () => clearInterval(interval);

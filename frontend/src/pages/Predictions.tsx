@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
-import api, { errorMessage } from '../api/client';
+import { useCallback, useEffect, useState } from 'react';
+import { toast } from 'sonner';
+import api from '../api/client';
 import {
   DEFAULT_STAKING,
   computeKelly,
@@ -216,8 +217,9 @@ export default function Predictions() {
         },
       );
       setPredictions(res.data);
-    } catch (err) {
-      alert(errorMessage(err, 'Failed to save odds'));
+      toast.success('Odds & bet plan saved');
+    } catch {
+      // error toast shown by the API interceptor
     } finally {
       setSavingOdds(false);
     }
@@ -270,16 +272,27 @@ export default function Predictions() {
   const [expandedRaceId, setExpandedRaceId] = useState<number | null>(null);
   const [cardsStatus, setCardsStatus] = useState<CardsStatusResponse | null>(null);
 
-  useEffect(() => {
+  const [loadError, setLoadError] = useState(false);
+
+  const loadInitial = useCallback(() => {
     Promise.all([
       api.get<Experiment[]>('/training/experiments?status=completed'),
       api.get<Track[]>('/tracks/'),
-    ]).then(([expRes, trackRes]) => {
-      setExperiments(expRes.data);
-      setTracks(trackRes.data);
-      if (expRes.data.length > 0) setSelectedExp(expRes.data[0].id);
-    });
+    ])
+      .then(([expRes, trackRes]) => {
+        setExperiments(expRes.data);
+        setTracks(trackRes.data);
+        if (expRes.data.length > 0) {
+          setSelectedExp((prev) => prev ?? expRes.data[0].id);
+        }
+        setLoadError(false);
+      })
+      .catch(() => setLoadError(true));
   }, []);
+
+  useEffect(() => {
+    loadInitial();
+  }, [loadInitial]);
 
   // Fetch races when date/track changes
   useEffect(() => {
@@ -333,8 +346,8 @@ export default function Predictions() {
       if (forceRefresh) params.set('refresh', 'true');
       const res = await api.get(`/predictions/race/${raceId}?${params}`);
       setPredictions(res.data);
-    } catch (err) {
-      alert(errorMessage(err, 'Failed to generate predictions'));
+    } catch {
+      // error toast shown by the API interceptor
     }
     setLoading(false);
   };
@@ -352,8 +365,8 @@ export default function Predictions() {
         `/predictions/history?${params}`,
       );
       setHistory(res.data.sessions);
-    } catch (err) {
-      alert(errorMessage(err, 'Failed to load history'));
+    } catch {
+      // error toast shown by the API interceptor
       setHistory([]);
     } finally {
       setHistoryLoading(false);
@@ -372,8 +385,8 @@ export default function Predictions() {
         `/predictions/race/${s.race_id}/saved?experiment_id=${s.experiment_id}`,
       );
       setPredictions(res.data);
-    } catch (err) {
-      alert(errorMessage(err, 'Failed to load saved prediction'));
+    } catch {
+      // error toast shown by the API interceptor
     } finally {
       setLoading(false);
     }
@@ -448,7 +461,7 @@ export default function Predictions() {
         { race_date: scrapeDate, include_form_detail: includeFormDetail },
       );
       if (res.data.log_id == null) {
-        alert(res.data.message);
+        toast.warning(res.data.message);
         return;
       }
       setScrapeStatus({
@@ -462,8 +475,8 @@ export default function Predictions() {
         completed_at: null,
       });
       setScrapeRunning(true);
-    } catch (err) {
-      alert(errorMessage(err, 'Failed to start scrape'));
+    } catch {
+      // error toast shown by the API interceptor
     }
   };
 
@@ -480,8 +493,8 @@ export default function Predictions() {
       });
       const res = await api.get<ByDateResponse>(`/predictions/by-date?${params}`);
       setByDateResult(res.data);
-    } catch (err) {
-      alert(errorMessage(err, 'Failed to predict races for date'));
+    } catch {
+      // error toast shown by the API interceptor
     }
     setByDateLoading(false);
   };
@@ -492,8 +505,8 @@ export default function Predictions() {
     try {
       const res = await api.get(`/predictions/results-comparison?experiment_id=${selectedExp}&limit=100`);
       setComparisons(res.data.results);
-    } catch (err) {
-      alert(errorMessage(err, 'Failed to load comparisons'));
+    } catch {
+      // error toast shown by the API interceptor
     }
     setLoading(false);
   };
@@ -540,7 +553,17 @@ export default function Predictions() {
     <div>
       <h1 className="text-xl sm:text-2xl font-bold mb-4 sm:mb-6">Predictions</h1>
 
-      {experiments.length === 0 ? (
+      {loadError ? (
+        <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-4 flex items-center justify-between gap-3 text-sm">
+          <span>Failed to load models and tracks. Check the backend and try again.</span>
+          <button
+            onClick={loadInitial}
+            className="shrink-0 px-3 py-1.5 border border-red-300 rounded-md text-red-700 hover:bg-red-100 font-medium"
+          >
+            Retry
+          </button>
+        </div>
+      ) : experiments.length === 0 ? (
         <div className="bg-white rounded-lg shadow p-8 text-center">
           <p className="text-gray-500 text-lg">No trained models yet</p>
           <p className="text-gray-400 text-sm mt-1">Train a model in the Training Lab first</p>

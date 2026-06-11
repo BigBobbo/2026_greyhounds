@@ -1,0 +1,1081 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Greyhound Predictor — Codebase Audit &amp; Improvement Tasks (June 2026)</title>
+<style>
+  :root {
+    --p0: #b91c1c; --p1: #c2410c; --p2: #a16207; --p3: #15803d;
+    --ink: #1f2937; --muted: #6b7280; --line: #e5e7eb; --bg: #f9fafb;
+    --card: #ffffff; --code-bg: #f3f4f6;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+         color: var(--ink); background: var(--bg); margin: 0; line-height: 1.55; }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 32px 24px 80px; }
+  h1 { font-size: 1.9rem; margin: 0 0 4px; }
+  h2 { font-size: 1.45rem; margin: 48px 0 6px; padding-top: 24px; border-top: 3px solid var(--ink); }
+  h2 .sec-pre { color: var(--muted); font-weight: 600; margin-right: 8px; }
+  h3 { font-size: 1.1rem; margin: 28px 0 8px; }
+  .subtitle { color: var(--muted); margin-bottom: 24px; }
+  .secdesc { color: var(--muted); margin: 0 0 18px; max-width: 72ch; }
+  code { background: var(--code-bg); border: 1px solid var(--line); border-radius: 4px;
+         padding: 1px 5px; font-size: 0.86em; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .badge { display: inline-block; font-size: 0.7rem; font-weight: 700; letter-spacing: .03em;
+           padding: 2px 8px; border-radius: 10px; color: #fff; vertical-align: 2px; margin-left: 6px; }
+  .b-p0 { background: var(--p0); } .b-p1 { background: var(--p1); }
+  .b-p2 { background: var(--p2); } .b-p3 { background: var(--p3); }
+  .b-eff { background: #475569; }
+  .b-area { background: #1e40af; }
+  .task { background: var(--card); border: 1px solid var(--line); border-left: 5px solid var(--line);
+          border-radius: 8px; padding: 18px 22px 14px; margin: 16px 0; }
+  .task.p0 { border-left-color: var(--p0); } .task.p1 { border-left-color: var(--p1); }
+  .task.p2 { border-left-color: var(--p2); } .task.p3 { border-left-color: var(--p3); }
+  .task h4 { margin: 0 0 4px; font-size: 1.02rem; }
+  .tid { display: inline-block; background: var(--ink); color: #fff; border-radius: 5px;
+         font-size: 0.78rem; font-weight: 700; padding: 2px 8px; margin-right: 8px; }
+  .meta { color: var(--muted); font-size: 0.82rem; margin: 0 0 12px; }
+  .task p { margin: 8px 0; }
+  .task .lbl { font-weight: 700; }
+  ul.ac { margin: 6px 0 4px; padding-left: 4px; list-style: none; }
+  ul.ac li { padding-left: 26px; position: relative; margin: 4px 0; }
+  ul.ac li::before { content: "☐"; position: absolute; left: 4px; color: var(--p3); font-size: 1rem; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.86rem; margin: 14px 0; background: var(--card); }
+  th, td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: #eef2f7; }
+  tr:nth-child(even) td { background: #fbfcfe; }
+  .summary-box { background: #eef6ee; border: 1px solid #bbd9bb; border-radius: 8px; padding: 16px 22px; margin: 18px 0; }
+  .danger-box { background: #fdf0ef; border: 1px solid #efc7c4; border-radius: 8px; padding: 16px 22px; margin: 18px 0; }
+  .legend span { margin-right: 18px; white-space: nowrap; }
+  a { color: #1d4ed8; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .toc { columns: 2; column-gap: 36px; font-size: 0.92rem; }
+  .toc div { break-inside: avoid; margin-bottom: 4px; }
+  @media (max-width: 760px) { .toc { columns: 1; } }
+  @media print { body { background: #fff; } .task { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Greyhound Predictor — Codebase Audit &amp; Improvement Tasks</h1>
+<p class="subtitle">Full-codebase audit · 11 June 2026 · branch <code>claude/codebase-audit-improvements-f7lqrf</code><br>
+Five parallel deep audits (backend API/services, ML pipeline, scraping/scheduling, frontend, infrastructure/process) plus a review of all 47 PRs, <code>PREDICTION_FEATURE_AUDIT.md</code>, <code>FEATURE_SUGGESTIONS.md</code>, and <code>backend/program.md</code>.</p>
+
+<h2 id="context">What the app is meant to do</h2>
+<p class="secdesc" style="max-width:none">
+The Greyhound Predictor is an end-to-end <strong>betting research system</strong> for Irish greyhound racing. It scrapes results and race cards from GRI Ireland into SQLite, engineers ~100+ features (form, pace, ELO, trainer/sire, race-relative), trains XGBoost / LightGBM / LambdaRank / sklearn models with Optuna tuning and Platt calibration, serves win/forecast/trio probabilities for upcoming cards, and sizes bets with fractional Kelly against a tracked bankroll. The explicit objective (per <code>backend/program.md</code>) is <strong>Kelly ROI &gt; 5% on held-out data while beating the SP-favourite baseline</strong> — i.e. the system's product is calibrated probabilities that beat the market, not raw accuracy. Backend deploys to Railway (single container, persistent volume at <code>/app/data/</code>); frontend deploys to Vercel.</p>
+
+<div class="danger-box">
+<strong>Five findings that change everything else (read these first):</strong>
+<ol style="margin:8px 0 0">
+  <li><strong>Every existing model's metrics are contaminated.</strong> Batch-computed training aggregates (trainer/trap/sire win rates, track speed baselines) are computed over <em>all</em> resulted races with no date cutoff — future and own-race outcomes leak into every training row (<a href="#c1">C1</a>). All experiments need retraining after the fix; expect honest (lower) scores.</li>
+  <li><strong>One disk failure loses everything.</strong> There are no backups of the SQLite DB or model artifacts, the fresh-database migration path is broken, and a previous WAL corruption incident already proved the risk (<a href="#a1">A1</a>, <a href="#b1">B1</a>).</li>
+  <li><strong>The API is completely unauthenticated</strong>, including endpoints that wipe bet history, swap the production database file, and trigger unbounded scrapes — behind CORS <code>allow_origins=["*"]</code> (<a href="#a2">A2</a>–<a href="#a4">A4</a>).</li>
+  <li><strong>A GRI markup change would silently zero the data feed.</strong> Parse failures, site errors, and "no racing today" are indistinguishable; scrape jobs report success either way (<a href="#e1">E1</a>, <a href="#e2">E2</a>).</li>
+  <li><strong>The staking the user sees was never backtested.</strong> Served probabilities are renormalized per race but the backtest uses unnormalized ones; the user's Kelly settings are ignored by both backend and frontend, which each hardcode their own constants (<a href="#c5">C5</a>, <a href="#d1">D1</a>).</li>
+</ol>
+</div>
+
+<h2 id="howto">How to use this document</h2>
+<p class="secdesc" style="max-width:none">Each task below is written to be handed to an LLM session as-is: it states the problem with file/line evidence, the implementation approach, and acceptance criteria. Priorities: <span class="badge b-p0">P0</span> do first — data loss, security, or invalidates results; <span class="badge b-p1">P1</span> high-value correctness; <span class="badge b-p2">P2</span> robustness/quality; <span class="badge b-p3">P3</span> opportunistic. Effort: <strong>S</strong> &lt; 1 hour, <strong>M</strong> ≈ half a day, <strong>L</strong> = a day or more. Line numbers reference the tree at commit <code>6f8d8a9</code>. Suggested sequencing: A → B → C/E (parallel) → D → F/G → H → I/J, but most tasks are independent; explicit dependencies are noted per task.</p>
+
+<h2 id="index">Task index</h2>
+<table>
+<tr><th>ID</th><th>Task</th><th>Pri</th><th>Effort</th></tr>
+<tr><td><a href="#a1">A1</a></td><td>Automated off-site backups of database and model artifacts</td><td>P0</td><td>M</td></tr>
+<tr><td><a href="#a2">A2</a></td><td>Add API-key authentication to the backend</td><td>P0</td><td>M</td></tr>
+<tr><td><a href="#a3">A3</a></td><td>Fix CORS: wire configured origins, drop wildcard + credentials</td><td>P0</td><td>S</td></tr>
+<tr><td><a href="#a4">A4</a></td><td>Remove the database rebuild/swap endpoint</td><td>P0</td><td>S</td></tr>
+<tr><td><a href="#a5">A5</a></td><td>Harden the feature sandbox (timeout is a no-op in threads)</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#b1">B1</a></td><td>Repair the migration chain; make Alembic the single schema authority</td><td>P0</td><td>L</td></tr>
+<tr><td><a href="#b2">B2</a></td><td>Alembic must read DATABASE_URL, not a hardcoded path</td><td>P0</td><td>S</td></tr>
+<tr><td><a href="#b3">B3</a></td><td>Fail startup on migration errors; make /api/health real</td><td>P1</td><td>S</td></tr>
+<tr><td><a href="#b4">B4</a></td><td>SQLite busy_timeout and write-contention hygiene</td><td>P1</td><td>S</td></tr>
+<tr><td><a href="#b5">B5</a></td><td>Reconcile ORM ↔ migration drift so autogenerate is trustworthy</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#c1">C1</a></td><td>Fix training-time leakage in batch aggregate features (+ retrain)</td><td>P0</td><td>L</td></tr>
+<tr><td><a href="#c2">C2</a></td><td>Sort datasets chronologically; fix walk-forward CV and LambdaRank groups</td><td>P0</td><td>M</td></tr>
+<tr><td><a href="#c3">C3</a></td><td>Stop autoresearch selecting on the test set</td><td>P0</td><td>M</td></tr>
+<tr><td><a href="#c4">C4</a></td><td>Classify weight_pct_of_career_avg as post-race</td><td>P0</td><td>S</td></tr>
+<tr><td><a href="#c5">C5</a></td><td>Unify probability normalization between backtest and serving</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#c6">C6</a></td><td>Fit the calibrator on data not used for Optuna selection</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#c7">C7</a></td><td>Raise minimum sample sizes for betting-metric Optuna objectives</td><td>P2</td><td>S</td></tr>
+<tr><td><a href="#c8">C8</a></td><td>Drop class-imbalance weighting defaults for probability models</td><td>P2</td><td>S</td></tr>
+<tr><td><a href="#c9">C9</a></td><td>Add early stopping to GBM trainers</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#c10">C10</a></td><td>Make the betting backtest realistic and mirror the served strategy</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#c11">C11</a></td><td>Add a beat-the-SP probability gate to evaluation</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#c12">C12</a></td><td>Invalidate stale computed features after backfills</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#c13">C13</a></td><td>Make feature versioning the default for experiments</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#c14">C14</a></td><td>Stream/hoist heavy queries to cut training memory</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#c15">C15</a></td><td>Add ML regression tests for leakage, ordering, and parity</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#d1">D1</a></td><td>Make BankrollConfig the single source of Kelly parameters</td><td>P0</td><td>M</td></tr>
+<tr><td><a href="#d2">D2</a></td><td>Handle simultaneous same-race bets correctly</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#d3">D3</a></td><td>Atomic, validated bankroll updates</td><td>P1</td><td>S</td></tr>
+<tr><td><a href="#d4">D4</a></td><td>Stop the settings form silently resetting the bankroll</td><td>P1</td><td>S</td></tr>
+<tr><td><a href="#d5">D5</a></td><td>Shrink stakes by data completeness</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#d6">D6</a></td><td>Track closing-line value (CLV) on settled bets</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#e1">E1</a></td><td>Make scrape failures loud: distinguish "no racing" from "parse failed"</td><td>P0</td><td>M</td></tr>
+<tr><td><a href="#e2">E2</a></td><td>Parse result tables by header name, not position; add sanity ranges</td><td>P0</td><td>M</td></tr>
+<tr><td><a href="#e3">E3</a></td><td>HTML-fixture test suite for all parsers</td><td>P0</td><td>M</td></tr>
+<tr><td><a href="#e4">E4</a></td><td>Recompute days_since_last corrupted by track-by-track backfill</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#e5">E5</a></td><td>Resolve dog identity by GRI id, not name</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#e6">E6</a></td><td>Reconcile dog_id on results upsert (reserve substitutions)</td><td>P1</td><td>S</td></tr>
+<tr><td><a href="#e7">E7</a></td><td>Retries with backoff and failed-day bookkeeping</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#e8">E8</a></td><td>Consolidate the five divergent scrape-loop implementations</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#e9">E9</a></td><td>Scheduler robustness: timezone, boot catch-up, automatic reapers</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#e10">E10</a></td><td>Let re-scrapes heal bad data; handle voided races</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#e11">E11</a></td><td>Per-track "scrape since last" so gaps actually heal</td><td>P2</td><td>S</td></tr>
+<tr><td><a href="#e12">E12</a></td><td>Failure visibility: partial status, logs for all jobs, daily digest</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#e13">E13</a></td><td>Dog-details enrichment scrape (birth date, sex, colour, owner)</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#e14">E14</a></td><td>Fix distance parsing (yards gate, sponsor-number trap, 0 default)</td><td>P2</td><td>S</td></tr>
+<tr><td><a href="#e15">E15</a></td><td>Scope pedigree parsing to the row (find_next escapes)</td><td>P1</td><td>S</td></tr>
+<tr><td><a href="#f1">F1</a></td><td>Betfair odds integration: populate odds_snapshots (revive PR #2)</td><td>P1</td><td>L</td></tr>
+<tr><td><a href="#g1">G1</a></td><td>Race-level conditional-logit head (Benter stack)</td><td>P2</td><td>L</td></tr>
+<tr><td><a href="#g2">G2</a></td><td>Per-field-size calibration</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#g3">G3</a></td><td>Model drift monitoring and staleness warnings</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#g4">G4</a></td><td>Validate or prune the ensemble endpoint</td><td>P3</td><td>S</td></tr>
+<tr><td><a href="#h1">H1</a></td><td>Fix Vercel SPA routing (deep links 404)</td><td>P0</td><td>S</td></tr>
+<tr><td><a href="#h2">H2</a></td><td>Fix TrainingLab resetting feature selection every 10 s</td><td>P0</td><td>S</td></tr>
+<tr><td><a href="#h3">H3</a></td><td>Surface preflight and data_completeness in the Predictions UI</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#h4">H4</a></td><td>Replace alert()-or-nothing with toasts and error states</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#h5">H5</a></td><td>Adopt TanStack Query; fix all polling loops</td><td>P1</td><td>L</td></tr>
+<tr><td><a href="#h6">H6</a></td><td>Split Predictions.tsx; shared UI components; consolidate types</td><td>P2</td><td>L</td></tr>
+<tr><td><a href="#h7">H7</a></td><td>Make lint pass and dependencies honest</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#h8">H8</a></td><td>Frontend bug bundle: stale filters, UTC parsing, env guard, settle confirm</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#h9">H9</a></td><td>Frontend resilience bundle: ErrorBoundary, 404, code splitting, pagination, a11y</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#i1">I1</a></td><td>Make state-changing GET endpoints POST</td><td>P2</td><td>S</td></tr>
+<tr><td><a href="#i2">I2</a></td><td>Return proper HTTP status codes for soft failures</td><td>P2</td><td>S</td></tr>
+<tr><td><a href="#i3">I3</a></td><td>Pagination and N+1 fixes on hot endpoints</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#i4">I4</a></td><td>Typed response models for untyped endpoints</td><td>P3</td><td>M</td></tr>
+<tr><td><a href="#i5">I5</a></td><td>Move multi-race prediction off the request thread</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#i6">I6</a></td><td>Validate and bound scrape/backfill requests</td><td>P2</td><td>S</td></tr>
+<tr><td><a href="#i7">I7</a></td><td>Fix cached-prediction bankroll parameter trap</td><td>P3</td><td>S</td></tr>
+<tr><td><a href="#i8">I8</a></td><td>Standardize on timezone-aware UTC timestamps</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#i9">I9</a></td><td>Single source of truth for the version string</td><td>P3</td><td>S</td></tr>
+<tr><td><a href="#j1">J1</a></td><td>CI pipeline and branch protection</td><td>P0</td><td>M</td></tr>
+<tr><td><a href="#j2">J2</a></td><td>Pin Python dependencies with a lockfile</td><td>P0</td><td>M</td></tr>
+<tr><td><a href="#j3">J3</a></td><td>Adopt a real main branch; delete .deploy-trigger</td><td>P1</td><td>S</td></tr>
+<tr><td><a href="#j4">J4</a></td><td>Dockerfile hardening: multi-stage, non-root, .dockerignore</td><td>P2</td><td>M</td></tr>
+<tr><td><a href="#j5">J5</a></td><td>Observability: Sentry, uptime checks, structured logging</td><td>P1</td><td>M</td></tr>
+<tr><td><a href="#j6">J6</a></td><td>Python lint/format tooling (ruff) and pre-commit</td><td>P2</td><td>S</td></tr>
+<tr><td><a href="#j7">J7</a></td><td>API and pipeline test coverage</td><td>P1</td><td>L</td></tr>
+<tr><td><a href="#j8">J8</a></td><td>Documentation and dead-code cleanup</td><td>P2</td><td>M</td></tr>
+</table>
+
+<!-- ============================ SECTION A ============================ -->
+<h2 id="seca"><span class="sec-pre">A</span>Data safety &amp; security</h2>
+<p class="secdesc">The app is internet-reachable with no authentication and no backups, and its only datastore is one SQLite file on one Railway volume holding irreplaceable scraped history (GRI pages age out). These tasks remove the existential risks.</p>
+
+<article class="task p0" id="a1">
+<h4><span class="tid">A1</span> Automated off-site backups of database and model artifacts <span class="badge b-p0">P0</span><span class="badge b-eff">M</span><span class="badge b-area">Infra</span></h4>
+<p class="meta">Files: <code>backend/app/tasks/scheduler.py</code>, new <code>backend/scripts/backup.py</code>, <code>backend/app/config.py</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> No backup mechanism exists anywhere (the only ".bak" in the codebase is created and immediately deleted inside <code>app/api/features.py:734-736</code>). The SQLite DB and trained model artifacts live solely at <code>/app/data/</code> on one Railway volume. A docstring at <code>features.py:560</code> records that WAL corruption has <em>already happened once</em>. Volume loss = all scraped history, experiments, predictions, and bankroll records gone permanently.</p>
+<p><span class="lbl">Implementation.</span> Add a nightly APScheduler job (the scheduler already runs in-process) that: (1) runs <code>PRAGMA wal_checkpoint(TRUNCATE)</code>, (2) executes <code>VACUUM INTO '/app/data/backup-tmp.db'</code> (atomic, consistent snapshot — never copy the live file), (3) uploads the snapshot plus a tar of <code>data/models/</code> to S3-compatible object storage (Cloudflare R2 or Backblaze B2 free tier) using <code>boto3</code>, (4) applies retention (keep 7 daily + 4 weekly), (5) records success/failure in a log table or ScrapeLog-style row. Credentials via new env vars (<code>BACKUP_S3_*</code>) in <code>config.py</code> and <code>.env.example</code>. Also provide <code>scripts/restore_backup.py</code> and document the restore procedure in the README (see <a href="#j8">J8</a>).</p>
+<ul class="ac">
+<li>A scheduled job produces a dated snapshot in object storage nightly; manual trigger endpoint or script exists.</li>
+<li>Restore script downloads a snapshot and produces a working DB verified by <code>PRAGMA integrity_check</code> and a row-count smoke test.</li>
+<li>Backup failure is logged loudly (and surfaces in J5 alerting once available); missing credentials disable the job with a clear startup warning rather than crashing.</li>
+<li>Model artifacts directory is included; restore round-trip loads one artifact successfully.</li>
+</ul>
+</article>
+
+<article class="task p0" id="a2">
+<h4><span class="tid">A2</span> Add API-key authentication to the backend <span class="badge b-p0">P0</span><span class="badge b-eff">M</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/main.py</code>, new <code>backend/app/auth.py</code>, <code>backend/app/config.py</code>, <code>frontend/src/api/client.ts</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> Not a single endpoint has any auth dependency (verified across all 11 routers in <code>app/api/</code>). Anonymous callers can wipe bankroll history (<code>POST /bankroll/reset</code>, <code>bankroll.py:111</code>), delete experiments/features/schedules, swap the production database file (<code>features.py:557</code>, see <a href="#a4">A4</a>), trigger unbounded multi-year scrapes of GRI (<code>scraping.py:403</code>), and start unlimited concurrent training jobs that can OOM the container (<code>training.py:62,139</code>).</p>
+<p><span class="lbl">Implementation.</span> Create a FastAPI dependency that checks an <code>X-API-Key</code> header against <code>settings.api_key</code> (new env var, generate a long random value in Railway). Apply it globally via <code>app.include_router(router, dependencies=[Depends(require_api_key)])</code> for every router; leave <code>/api/health</code> open. If <code>API_KEY</code> is unset, log a prominent warning and allow (preserves local dev ergonomics) — but document that production must set it. Frontend: read <code>VITE_API_KEY</code> in <code>client.ts</code> and attach the header via an axios default. Document both env vars.</p>
+<ul class="ac">
+<li>With <code>API_KEY</code> set, every <code>/api/*</code> route except <code>/api/health</code> returns 401 without the correct header and works with it.</li>
+<li>Frontend works end-to-end against an auth-enabled backend using <code>VITE_API_KEY</code>.</li>
+<li>A TestClient test asserts 401 on a sample of destructive endpoints (bankroll reset, experiment delete, scrape trigger) without the key.</li>
+<li><code>.env.example</code> and README document both variables.</li>
+</ul>
+</article>
+
+<article class="task p0" id="a3">
+<h4><span class="tid">A3</span> Fix CORS: wire configured origins, drop wildcard + credentials <span class="badge b-p0">P0</span><span class="badge b-eff">S</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/main.py:35-41</code>, <code>backend/app/config.py:8</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> <code>main.py</code> hardcodes <code>allow_origins=["*"]</code> together with <code>allow_credentials=True</code> — an invalid and unsafe combination. The <code>settings.cors_origins</code> setting (and the <code>CORS_ORIGINS</code> env var documented in <code>.env.example</code>) is <em>never read</em>, so an operator who sets it believes they've restricted origins when nothing changed. The config default itself also ends with <code>"*"</code>.</p>
+<p><span class="lbl">Implementation.</span> Use <code>allow_origins=settings.cors_origins</code>; remove <code>"*"</code> from the default list (keep the two localhost entries); set the real Vercel URL via the Railway env var. Keep <code>allow_credentials=True</code> only with the explicit list.</p>
+<ul class="ac">
+<li><code>grep</code> shows no <code>"*"</code> in CORS configuration; <code>settings.cors_origins</code> is the only source.</li>
+<li>Frontend on the configured Vercel origin works; a request from an unlisted origin is blocked by the browser (no ACAO header echoed).</li>
+<li>Setting <code>CORS_ORIGINS</code> env var demonstrably changes the served header.</li>
+</ul>
+</article>
+
+<article class="task p0" id="a4">
+<h4><span class="tid">A4</span> Remove the database rebuild/swap endpoint <span class="badge b-p0">P0</span><span class="badge b-eff">S</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/api/features.py:555-768</code> · Depends on: <a href="#a1">A1</a> recommended first (so an admin path to reclaim space still exists)</p>
+<p><span class="lbl">Problem.</span> <code>DELETE /api/features/computed/all</code> disposes the engine, renames the live DB aside, swaps in a rebuilt file, and <strong>deletes the backup</strong> (<code>features.py:735</code>). It hand-rolls DDL that can drift from the models, and any in-flight request can re-create pool connections to the renamed file mid-swap (split-brain/corruption). It was written for a one-off recovery incident that has passed. Combined with no auth, it is a single-request data-loss vector.</p>
+<p><span class="lbl">Implementation.</span> Delete the endpoint (and its frontend caller if any). If feature-table cleanup is still wanted, replace with a bounded <code>DELETE FROM computed_features WHERE version_id IS NULL</code> + <code>PRAGMA incremental_vacuum</code>/offline <code>VACUUM</code> admin script under <code>scripts/</code>, never deleting backups.</p>
+<ul class="ac">
+<li>The route no longer exists; OpenAPI schema confirms.</li>
+<li>Any UI affordance that called it is removed or repointed at the safe cleanup.</li>
+<li>A safe cleanup path (script or guarded endpoint) is documented for reclaiming space.</li>
+</ul>
+</article>
+
+<article class="task p1" id="a5">
+<h4><span class="tid">A5</span> Harden the feature sandbox (timeout is a no-op in threads) <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/services/feature_sandbox.py</code>, <code>backend/app/api/features.py:528-549</code> · Depends on: <a href="#a2">A2</a></p>
+<p><span class="lbl">Problem.</span> The sandbox runs user-supplied Python via RestrictedPython but re-enables <code>type</code> and a whitelisted <code>__import__</code> (<code>feature_sandbox.py:44-89</code>) — RestrictedPython is known-bypassable with these. Worse, the 5-second timeout uses <code>SIGALRM</code>, which only works on the main thread; feature materialization runs the sandbox in a <em>background thread</em>, where <code>signal.alarm</code> raises <code>ValueError</code>, is caught at <code>:138</code>, and the timeout silently does nothing. An infinite-loop feature runs forever; a memory bomb OOMs the container.</p>
+<p><span class="lbl">Implementation.</span> Execute user feature code in a subprocess (e.g. <code>multiprocessing.Process</code> or <code>subprocess</code> + JSON over stdio) with a hard <code>join(timeout)</code> kill and <code>resource.setrlimit</code> caps on CPU and address space. Remove <code>type</code> from the builtins whitelist. Batch entries per subprocess invocation to amortize startup (one process per feature per materialization batch, not per row). Auth (A2) is the prerequisite layer; this contains what authenticated users (or a leaked key) can do.</p>
+<ul class="ac">
+<li>A seeded test feature containing <code>while True: pass</code> is killed within the timeout when run through the materialization path (background thread), not just the request path.</li>
+<li>A memory-bomb feature (e.g. growing a list to GBs) is killed by the rlimit without taking down the API process.</li>
+<li>All existing seeded code features still compute identical values (regression-tested on a sample dog history).</li>
+<li><code>type</code> is no longer exposed; sandbox builtins are covered by a unit test pinning the whitelist.</li>
+</ul>
+</article>
+
+<!-- ============================ SECTION B ============================ -->
+<h2 id="secb"><span class="sec-pre">B</span>Database &amp; migrations</h2>
+<p class="secdesc">The schema currently has two competing sources of truth (Alembic and <code>create_all()</code> in seed scripts), a migration that fails on modern Alembic, and a hardcoded DB path in the migration config. Disaster recovery does not work today — verified empirically.</p>
+
+<article class="task p0" id="b1">
+<h4><span class="tid">B1</span> Repair the migration chain; make Alembic the single schema authority <span class="badge b-p0">P0</span><span class="badge b-eff">L</span><span class="badge b-area">Infra</span></h4>
+<p class="meta">Files: <code>backend/alembic/versions/c3f8a1d42b7e_*.py</code>, new catch-up migration, <code>backend/scripts/seed_tracks.py:171</code>, <code>backend/scripts/seed_features.py:598</code>, <code>backend/scraping/backfill.py:67</code> · Depends on: <a href="#j2">J2</a> (pin Alembic) recommended alongside</p>
+<p><span class="lbl">Problem.</span> Verified empirically: <code>alembic upgrade head</code> on an empty DB <strong>fails</strong> at <code>c3f8a1d42b7e</code> — <code>op.add_column</code> with an inline FK raises <code>NotImplementedError</code> on SQLite under current Alembic (1.18). Separately, <code>bankroll_config</code> and <code>bet_records</code> have <em>no migration at all</em> — they exist in production only because seed scripts call <code>Base.metadata.create_all()</code> on every boot, and migration <code>g7b8c9d0e1f2:66</code> guards its bankroll column-adds behind "if table exists", so a clean alembic-only DB silently skips them. The failure mode after volume loss is a half-built schema that boots "healthy" (because <code>start.py</code> ignores migration failures, see <a href="#b3">B3</a>).</p>
+<p><span class="lbl">Implementation.</span> (1) Rewrite the failing <code>add_column</code> in <code>c3f8a1d42b7e</code> using <code>op.batch_alter_table("computed_features")</code>. (2) Write a catch-up migration that creates <code>bankroll_config</code> and <code>bet_records</code> (with <code>inspect()</code> existence guards once, so already-converged prod is a no-op). (3) Delete every <code>Base.metadata.create_all()</code> call from seed scripts and backfill. (4) Verify the full chain on a scratch DB and compare the resulting schema against the ORM via <code>alembic revision --autogenerate</code> producing an empty diff (after <a href="#b5">B5</a>). (5) Add the fresh-DB migration run to CI (<a href="#j1">J1</a>).</p>
+<ul class="ac">
+<li><code>alembic upgrade head</code> succeeds on a brand-new empty database with currently-resolved dependency versions.</li>
+<li>The resulting schema contains all 15 tables including <code>bankroll_config</code> and <code>bet_records</code> with all current columns and indexes.</li>
+<li>No <code>create_all()</code> remains outside tests (<code>grep</code> verified); app boots and seeds correctly on both a fresh DB and a copy of the existing prod schema.</li>
+<li>CI job runs migrations against an empty SQLite file on every PR.</li>
+</ul>
+</article>
+
+<article class="task p0" id="b2">
+<h4><span class="tid">B2</span> Alembic must read DATABASE_URL, not a hardcoded path <span class="badge b-p0">P0</span><span class="badge b-eff">S</span><span class="badge b-area">Infra</span></h4>
+<p class="meta">Files: <code>backend/alembic/env.py</code>, <code>backend/alembic.ini:4</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> <code>alembic.ini</code> hardcodes <code>sqlalchemy.url = sqlite:///./data/greyhound.db</code> and <code>env.py</code> never overrides it from settings, while the app reads <code>DATABASE_URL</code>. They only coincide by luck. Change <code>DATABASE_URL</code> (Postgres move, test DB, second environment) and startup migrations silently run against a <em>different database</em> than the app uses.</p>
+<p><span class="lbl">Implementation.</span> In <code>env.py</code>: <code>from app.config import settings; config.set_main_option("sqlalchemy.url", settings.database_url)</code> (it already imports app modules for metadata).</p>
+<ul class="ac">
+<li>Setting <code>DATABASE_URL</code> to a temp path and running <code>alembic upgrade head</code> migrates that file, not <code>./data/greyhound.db</code>.</li>
+<li>Default behaviour without the env var is unchanged.</li>
+</ul>
+</article>
+
+<article class="task p1" id="b3">
+<h4><span class="tid">B3</span> Fail startup on migration errors; make /api/health real <span class="badge b-p1">P1</span><span class="badge b-eff">S</span><span class="badge b-area">Infra</span></h4>
+<p class="meta">Files: <code>backend/scripts/start.py:25-33</code>, <code>backend/app/main.py:60-62</code>, <code>backend/Procfile</code> · Depends on: <a href="#b1">B1</a></p>
+<p><span class="lbl">Problem.</span> <code>start.py</code> runs Alembic via subprocess and only <em>prints</em> the return code, then continues to seeding and uvicorn regardless — converting loud failures into silent schema drift. Meanwhile <code>/api/health</code> returns static <code>{"status": "ok"}</code> without touching the DB, so Railway's healthcheck passes while the API 500s on broken tables. Also, <code>backend/Procfile</code> is dead config (the Dockerfile CMD runs <code>start.py</code>), inviting edits to the wrong file.</p>
+<p><span class="lbl">Implementation.</span> <code>sys.exit(r.returncode)</code> when the Alembic subprocess fails (Railway's <code>ON_FAILURE</code> restart policy + healthcheck then surface it). Extend <code>/api/health</code> to execute <code>SELECT 1</code>, compare <code>alembic_version</code> to head, and return 503 with details on mismatch/failure. Delete the Procfile (or replace its content with a pointer comment).</p>
+<ul class="ac">
+<li>A deliberately broken migration causes the container to exit non-zero instead of serving.</li>
+<li><code>/api/health</code> returns 503 when the DB file is missing/locked or the migration head doesn't match; 200 includes the current revision id.</li>
+<li>Procfile no longer duplicates the startup sequence.</li>
+</ul>
+</article>
+
+<article class="task p1" id="b4">
+<h4><span class="tid">B4</span> SQLite busy_timeout and write-contention hygiene <span class="badge b-p1">P1</span><span class="badge b-eff">S</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/database.py</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> Scrape threads, training threads, APScheduler jobs, and API requests all write to one SQLite file. WAL allows concurrent readers but one writer; the pragma hook (<code>database.py:18-29</code>) sets WAL/synchronous/cache but <strong>not</strong> <code>busy_timeout</code>, so concurrent writers fail instantly with <code>database is locked</code> instead of queueing. Pool settings (<code>pool_size=10, max_overflow=20</code>) advertise parallelism SQLite can't deliver.</p>
+<p><span class="lbl">Implementation.</span> Add <code>PRAGMA busy_timeout=30000</code> in <code>set_sqlite_pragma</code>. Trim the misleading pool kwargs (SQLite file DBs gain nothing from large pools). Document the single-writer constraint at the top of <code>database.py</code>. (Larger refactors — a write queue or Postgres — are out of scope here; this removes the immediate failure mode.)</p>
+<ul class="ac">
+<li><code>PRAGMA busy_timeout</code> returns 30000 on a connection from the app engine (unit test).</li>
+<li>A two-thread concurrent-write test (insert loops) completes without <code>OperationalError: database is locked</code>.</li>
+</ul>
+</article>
+
+<article class="task p2" id="b5">
+<h4><span class="tid">B5</span> Reconcile ORM ↔ migration drift so autogenerate is trustworthy <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">Infra</span></h4>
+<p class="meta">Files: <code>backend/app/models/*.py</code>, <code>backend/app/database.py</code> · Depends on: <a href="#b1">B1</a></p>
+<p><span class="lbl">Problem.</span> Three composite indexes exist only in migrations, not in models (<code>ix_computed_features_def_entry</code>, <code>ix_races_status_track_distance</code>, <code>ix_scheduled_run_schedule_date</code>); models declare FKs the DB intentionally lacks (<code>races.last_scrape_log_id</code>, <code>race_entries.last_scrape_log_id</code>, <code>computed_features.version_id</code>). The next <code>alembic revision --autogenerate</code> will propose <em>dropping the performance indexes</em> and adding un-addable FKs — a diff a future LLM session is likely to accept verbatim. <code>Base.metadata</code> also has no naming convention, which breaks future SQLite batch migrations on unnamed constraints. Recent revision IDs are hand-typed non-hex sequences (<code>g7b8c9d0e1f2</code>, <code>h8c9d0e1f2g3</code>) inviting collisions.</p>
+<p><span class="lbl">Implementation.</span> Declare the composite indexes in <code>__table_args__</code>; resolve each phantom FK (add via batch migration or remove from the model with a comment); add the standard SQLAlchemy <code>naming_convention</code> dict to <code>Base.metadata</code>; document "always use <code>alembic revision</code> to generate IDs" in CLAUDE.md.</p>
+<ul class="ac">
+<li><code>alembic revision --autogenerate</code> against a fully-migrated DB produces an empty migration (and CI asserts this — wire into <a href="#j1">J1</a>).</li>
+<li>Composite indexes appear in model <code>__table_args__</code>; naming convention is set.</li>
+</ul>
+</article>
+
+<!-- ============================ SECTION C ============================ -->
+<h2 id="secc"><span class="sec-pre">C</span>ML correctness — leakage, evaluation, calibration</h2>
+<p class="secdesc">The prior train/serve-skew audit (PR #44) fixed the first layer of leakage; these findings are the next layer down. C1–C4 invalidate current experiment metrics and should be fixed before trusting any model comparison. A full retrain of active experiments is the final step of this section.</p>
+
+<article class="task p0" id="c1">
+<h4><span class="tid">C1</span> Fix training-time leakage in batch aggregate features (+ retrain) <span class="badge b-p0">P0</span><span class="badge b-eff">L</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/ml/race_features.py:610-861, 1435</code>, <code>backend/ml/dataset_builder.py:149</code> · Depends on: nothing; do before any new experiments</p>
+<p><span class="lbl">Problem.</span> The batch path used by training (<code>compute_builtin_features_batch</code>) builds its lookup tables — trap win rates (<code>:610-634</code>), going-conditional trap rates (<code>:641-663</code>), trainer win/place rates (<code>:669-723</code>, which also drops the 90-day window the single-entry path applies), sire stats (<code>:729-778</code>), track average times (<code>:782-800</code>), speed-figure baselines (<code>:805-861</code>) — over <strong>all resulted races with no date cutoff</strong>. Every training row's aggregate features therefore include the row's <em>own race outcome</em> and all <em>future</em> races, including the test period. The single-entry path used at predict time correctly threads <code>before_date</code>, so this is simultaneously target leakage and train/serve skew. All current CV/test metrics are inflated by an unknown amount.</p>
+<p><span class="lbl">Implementation.</span> Make each aggregate time-aware: fetch the raw event rows once (entry, date, group key, outcome), sort by date, and build cumulative counters so a lookup returns "stats strictly before this row's race_date" — the same pattern the per-dog history aggregates and ELO already use in this file. Apply the same 90/180-day windows the single-entry helpers document, so train and serve compute identical values. At minimum, the entry's own race must be excluded from every aggregate. Then retrain all active experiments (the audit script <code>scripts/audit_experiments_for_post_race_features.py</code> shows the precedent for sizing blast radius) and record the new honest baselines.</p>
+<ul class="ac">
+<li>Regression test (see <a href="#c15">C15</a>): computing batch features for a fixed entry, then adding a <em>later</em> race for the same trainer/trap/sire/track, leaves the entry's features bit-identical.</li>
+<li>For a sample of entries, batch-path values equal single-entry-path values (same windows, same cutoffs) within float tolerance.</li>
+<li>Existing tests pass; new experiments trained post-fix store a flag or version marker distinguishing them from contaminated ones.</li>
+<li>Active experiments retrained; README/experiment notes record that pre-fix metrics are not comparable.</li>
+</ul>
+</article>
+
+<article class="task p0" id="c2">
+<h4><span class="tid">C2</span> Sort datasets chronologically; fix walk-forward CV and LambdaRank groups <span class="badge b-p0">P0</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/ml/dataset_builder.py:119, 505-580</code>, <code>backend/app/services/training_service.py:575-590</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> The dataset query orders by <code>Race.race_date.desc()</code> with no secondary key and is never re-sorted. Two consequences: (1) <code>generate_walk_forward_fold_indices</code> assumes ascending order; with descending input the embargo check discards every validation race, all folds come back empty, and training silently falls back to single-split — <strong>walk-forward CV has never actually run in production</strong> (its test uses ascending data, so it passes). (2) Same-date races can interleave (no stable secondary sort), so LambdaRank group sizes computed by <code>_compute_group_sizes</code> (<code>:558-580</code>) can fragment across races — corrupting ranking groups, relevance normalization, and per-race metrics, silently.</p>
+<p><span class="lbl">Implementation.</span> After assembly, sort the dataset ascending with race contiguity — <code>entries_df.sort_values(["race_date", "race_id"])</code> (plus trap for determinism) — and reindex <code>X</code>/<code>y</code>/meta to match. Add an assertion in <code>_compute_group_sizes</code> that race_ids are grouped-contiguous, and a monotonicity assertion (or internal sort) in the fold generator.</p>
+<ul class="ac">
+<li>New test feeds a descending-date dataset through fold generation and gets non-empty, chronologically valid folds (train max date &lt; val min date, embargo respected).</li>
+<li>New test asserts group contiguity holds for a synthetic multi-race same-date dataset, and that the assertion fires on interleaved input.</li>
+<li>Walk-forward training on real data produces &gt; 0 folds (verify via training log) instead of the silent single-split fallback.</li>
+</ul>
+</article>
+
+<article class="task p0" id="c3">
+<h4><span class="tid">C3</span> Stop autoresearch selecting on the test set <span class="badge b-p0">P0</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/ml/autoresearch.py:254-266, 300-306, 333-387, 527-535</code> · Depends on: <a href="#c2">C2</a> (for walk-forward objectives)</p>
+<p><span class="lbl">Problem.</span> The autonomous experiment loop evaluates every candidate config on <code>X_test</code> and accepts/rejects on test-set metrics (<code>betting_kelly_roi</code> etc.). Running up to 100 mutation trials and keeping the test-set maximizer is textbook test-set mining: the reported best score is meaningless and the chosen config will regress live. It also burns the test set for all subsequent experiment comparisons. Bonus bug: it builds datasets with default <code>impute_missing=True</code>, so GBM configs are selected under a different NaN policy than <code>run_training</code> later uses.</p>
+<p><span class="lbl">Implementation.</span> Score proposals on the validation split (or walk-forward folds once C2 lands); keep the test set untouched during the loop; evaluate only the final winner on test, once, and report it separately. Pass <code>_nan_policy_for(algorithm)</code> through to dataset building so selection and final training match.</p>
+<ul class="ac">
+<li>No accept/reject decision in the loop reads a <code>test_*</code> metric (code inspection + a unit test on the objective extraction).</li>
+<li>Final report contains exactly one test-set evaluation, labelled as such.</li>
+<li>NaN policy during search matches the policy <code>run_training</code> would use for that algorithm.</li>
+</ul>
+</article>
+
+<article class="task p0" id="c4">
+<h4><span class="tid">C4</span> Classify <code>weight_pct_of_career_avg</code> as post-race <span class="badge b-p0">P0</span><span class="badge b-eff">S</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/ml/feature_availability.py:25-50</code>, evidence <code>backend/ml/race_features.py:1690-1698</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> The feature divides the <em>current race's</em> weigh-in (<code>ctx["weight_kg"]</code>, NULL pre-race) by career average weight. It is exactly the bug class the <code>POST_RACE_FEATURE_NAMES</code> guard was built for, but it's missing from the list — so it isn't excluded at training and isn't refused at predict time; under NaN passthrough the model silently routes it down an unlearned default branch on every scheduled race.</p>
+<p><span class="lbl">Implementation.</span> Add <code>"weight_pct_of_career_avg": "RaceEntry.weight_kg (weigh-in is on the night)"</code> to <code>POST_RACE_FEATURE_NAMES</code>. Re-run <code>scripts/audit_experiments_for_post_race_features.py</code> to size the retrain set. Add a unit test that walks <code>BUILTIN_FEATURE_NAMES</code> builders against a synthetic scheduled-race context (all current-entry result fields None) and asserts every feature not in the post-race list is computable (guards against the next such regression).</p>
+<ul class="ac">
+<li>The feature appears in <code>POST_RACE_FEATURE_NAMES</code>; preflight reports it for affected experiments.</li>
+<li>New experiments exclude it by default; predict on a scheduled race with an old affected model raises <code>PredictionDataError</code> naming it.</li>
+<li>The new "no current-entry result reads outside the list" test passes and is in CI.</li>
+</ul>
+</article>
+
+<article class="task p1" id="c5">
+<h4><span class="tid">C5</span> Unify probability normalization between backtest and serving <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/app/services/prediction_service.py:595-599, 243-293</code>, <code>backend/app/services/training_service.py:282-305</code>, <code>backend/ml/evaluation.py</code>, <code>backend/ml/trainers/lambdarank_trainer.py:227-235</code> · Depends on: pairs well with <a href="#g1">G1</a></p>
+<p><span class="lbl">Problem.</span> Serving divides calibrated probabilities by their per-race sum; training evaluation and <code>compute_betting_metrics</code> never normalize. So the backtested ROI was computed on different numbers than the Kelly stakes users see — if a race's probabilities sum to 0.85, serving inflates each by ~18%, manufacturing unvalidated edge. The LambdaRank trainer does the opposite (calibrates after softmax, refuses to renormalize, with an incorrect comment claiming renormalization could change the top pick — division by a common positive sum is monotonic). Confidence/entropy math (<code>:243-293</code>) also assumes a proper distribution it doesn't always get.</p>
+<p><span class="lbl">Implementation.</span> Standardize on per-race normalization as the final step in <em>both</em> paths: apply it inside <code>compute_betting_metrics</code> (group by race_id) and in training-eval metrics, identical to serving. Evaluate calibration (reliability/Brier) on the post-normalization probabilities. Fix the LambdaRank comment and make its output consistent with the convention. Compute entropy/margins on the normalized vector.</p>
+<ul class="ac">
+<li>A test predicts one synthetic race through the serve path and through the betting-metrics path with the same artifact and asserts identical probabilities.</li>
+<li>All races' served win probabilities sum to 1.0 ± 1e-6 across all four trainer types.</li>
+<li>Stored experiment metrics document (metadata field) that they were computed under per-race normalization, so old/new metrics aren't naively compared.</li>
+</ul>
+</article>
+
+<article class="task p1" id="c6">
+<h4><span class="tid">C6</span> Fit the calibrator on data not used for Optuna selection <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/ml/trainers/*.py</code> (calibrator fit), <code>backend/app/services/training_service.py:603-721</code> · Depends on: <a href="#c2">C2</a> for the walk-forward option</p>
+<p><span class="lbl">Problem.</span> All four trainers fit Platt scaling on <code>(X_val, y_val)</code> — the same 15% slice Optuna's objective scores and the same slice the final model is refit against. Hyperparameters are thus tuned to the fold the calibrator is fit on; the deployed calibrator inherits val-set overfit, degrading exactly the probabilities Kelly staking depends on.</p>
+<p><span class="lbl">Implementation.</span> Carve a calibration holdout out of the training period (e.g. the most recent 10% of train, untouched by Optuna), or fit calibration out-of-fold on walk-forward folds once C2 lands. Keep artifact format compatible (<code>calibrator</code> key unchanged); persist which slice was used in the artifact metadata.</p>
+<ul class="ac">
+<li>The calibrator's fit indices are disjoint from Optuna's objective indices (asserted in a test on a small synthetic run).</li>
+<li>Artifact metadata records the calibration scheme; legacy artifacts still load.</li>
+<li>Reliability curve / Brier on test reported before vs after on one real retrain (expect equal or better).</li>
+</ul>
+</article>
+
+<article class="task p2" id="c7">
+<h4><span class="tid">C7</span> Raise minimum sample sizes for betting-metric Optuna objectives <span class="badge b-p2">P2</span><span class="badge b-eff">S</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/app/services/training_service.py:627-649</code> · Depends on: <a href="#c2">C2</a></p>
+<p><span class="lbl">Problem.</span> <code>value_bet_roi</code>/<code>kelly_roi</code> objectives accept as few as 10 bets (Sharpe: 5 points). ROI on 10 bets is noise; 50 Optuna trials will reliably find a lucky config.</p>
+<p><span class="lbl">Implementation.</span> Require ≥ 100 settled bets for ROI objectives (return a strong penalty value below that); prefer SP-relative log-loss (see <a href="#c11">C11</a>) as the default objective; compute betting objectives across walk-forward folds rather than the single val slice.</p>
+<ul class="ac">
+<li>Objectives return the penalty below the threshold (unit test).</li>
+<li>Training Lab help text documents the thresholds and the recommended objective.</li>
+</ul>
+</article>
+
+<article class="task p2" id="c8">
+<h4><span class="tid">C8</span> Drop class-imbalance weighting defaults for probability models <span class="badge b-p2">P2</span><span class="badge b-eff">S</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/ml/trainers/xgboost_trainer.py:28-31</code>, <code>backend/ml/trainers/lightgbm_trainer.py:31-32</code>, <code>backend/ml/autoresearch.py:47</code> · Depends on: retrain alongside <a href="#c1">C1</a></p>
+<p><span class="lbl">Problem.</span> Defaults of <code>scale_pos_weight=5.0</code> / <code>is_unbalance=True</code> inflate raw probabilities ~5× pre-calibration. Platt fixes the mean but compresses resolution, and the autoresearch space tunes the weight 1–10, interacting badly with calibration. A ~16.7% positive rate needs no re-weighting for GBMs whose output is meant to be a probability.</p>
+<p><span class="lbl">Implementation.</span> Default both to neutral (1.0 / False); keep them available as explicit hyperparameters. Compare Brier/log-loss before vs after on one retrain to confirm.</p>
+<ul class="ac">
+<li>New experiments default to neutral weighting (visible in stored hyperparameters).</li>
+<li>Comparison run documented (Brier/log-loss equal or better after).</li>
+</ul>
+</article>
+
+<article class="task p2" id="c9">
+<h4><span class="tid">C9</span> Add early stopping to GBM trainers <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/ml/trainers/xgboost_trainer.py:49-53</code>, <code>backend/ml/trainers/lightgbm_trainer.py:50-53</code>, Optuna space in <code>training_service.py</code> · Depends on: <a href="#c6">C6</a> (keeps calibration slice separate)</p>
+<p><span class="lbl">Problem.</span> <code>eval_set</code> is passed but no early-stopping rounds/callbacks are set; <code>n_estimators</code> is a fixed Optuna parameter. Trees are over- or under-fit per config and Optuna wastes trials searching a parameter early stopping would set automatically.</p>
+<p><span class="lbl">Implementation.</span> Set a high <code>n_estimators</code> ceiling, add early stopping on the val set (e.g. 50-round patience, log-loss), remove <code>n_estimators</code> from the search space, and persist <code>best_iteration</code> in the artifact. Note in code why calibration must not reuse this same slice naively (C6 boundary).</p>
+<ul class="ac">
+<li>Training logs show early stopping engaging; artifacts record best_iteration.</li>
+<li>Optuna space no longer includes n_estimators; wall-clock per trial drops or accuracy improves on a comparison run.</li>
+</ul>
+</article>
+
+<article class="task p1" id="c10">
+<h4><span class="tid">C10</span> Make the betting backtest realistic and mirror the served strategy <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/ml/evaluation.py:121-284</code>, <code>backend/app/services/prediction_service.py:105-183, 568-575</code> · Depends on: <a href="#c5">C5</a>, <a href="#d1">D1</a></p>
+<p><span class="lbl">Problem.</span> The backtest settles at SP with no commission, computes edge against raw <code>1/SP</code> (overround left in), uses a fixed non-compounding bankroll for "Kelly ROI", and bets multiple mutually-exclusive dogs per race — none of which matches the served strategy. Separately, backtesting a model trained <em>with</em> SP features silently median-fills every <code>current_sp_*</code> column (the resulted-race path never computes them, <code>prediction_service.py:105-183</code>), making those backtests garbage.</p>
+<p><span class="lbl">Implementation.</span> De-vig SP per race before edge computation; subtract a configurable commission haircut (default ~2–5%); compound the Kelly bankroll across chronologically ordered bets; apply the exact served rule (min_edge, fraction, cap, one-bet-per-race or simultaneous-Kelly per <a href="#d2">D2</a>). For SP-feature models on resulted races, compute <code>_add_sp_features</code> from stored <code>sp_decimal</code> instead of median-filling (or refuse with a clear error).</p>
+<ul class="ac">
+<li>Backtest parameters (commission, devig method, staking rule) are recorded in experiment metrics output.</li>
+<li>Kelly simulation is compounding and chronologically ordered (unit test with a hand-computed 3-bet sequence).</li>
+<li>Backtesting an SP-feature model uses real stored SPs (test asserts no median-fill of <code>current_sp_*</code> on resulted races).</li>
+</ul>
+</article>
+
+<article class="task p1" id="c11">
+<h4><span class="tid">C11</span> Add a beat-the-SP probability gate to evaluation <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/ml/evaluation.py</code>, <code>backend/app/services/training_service.py</code> (metrics), frontend ExperimentDetail · Depends on: <a href="#c5">C5</a></p>
+<p><span class="lbl">Problem.</span> The only market baseline is favourite-backing P&amp;L. The decisive question for a betting system — does the model carry information beyond the market? — is never answered. SP is already in <code>meta_test</code>; the comparison is a few lines.</p>
+<p><span class="lbl">Implementation.</span> Compute de-vigged SP probabilities per race and report <code>sp_log_loss</code> / <code>sp_brier</code> next to the model's on the same races; additionally fit the standard blend test (logistic regression of outcome on model logit + SP logit on the validation period) and report the model's coefficient. Display both in ExperimentDetail with a plain-language verdict ("model adds/doesn't add information beyond SP"). This is the per-<code>program.md</code> success criterion made measurable.</p>
+<ul class="ac">
+<li>Every completed experiment stores <code>sp_log_loss</code>, <code>sp_brier</code>, model deltas, and the blend coefficient.</li>
+<li>ExperimentDetail renders the comparison; documentation explains how to read it.</li>
+<li>Unit test with synthetic data where the model is exactly the de-vigged SP asserts delta ≈ 0.</li>
+</ul>
+</article>
+
+<article class="task p2" id="c12">
+<h4><span class="tid">C12</span> Invalidate stale computed features after backfills <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/ml/feature_store.py:226-242, 315, 446-468</code>, <code>backend/scraping/db_pipeline.py</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> Incremental materialization skips any (entry, feature) already computed. When a backfill later adds <em>older</em> races to a dog's history, every "last 5"-style aggregate for that dog's already-computed entries is stale, and <code>data_complete</code> is never refreshed after gaps fill. Training matrices then mix stale and fresh values silently.</p>
+<p><span class="lbl">Implementation.</span> When the scrape pipeline inserts a resulted race entry for dog D dated <em>before</em> D's latest existing entry, mark D's computed features dirty (simplest: delete <code>computed_features</code> rows for D's entries with race_date &gt; the inserted date, letting the next materialization recompute; or maintain a <code>dogs.history_high_watermark</code>). Add a maintenance endpoint/script "recompute features for dogs touched since &lt;date&gt;". Fix the <code>build_feature_matrix</code> docstring (<code>only_complete</code> nulls cells, it does not drop rows).</p>
+<ul class="ac">
+<li>Integration test: materialize features, insert an older race for the dog, re-materialize, and assert the affected aggregates change to the correct values.</li>
+<li><code>data_complete</code> flags refresh for healed entries.</li>
+<li>Docstring corrected.</li>
+</ul>
+</article>
+
+<article class="task p2" id="c13">
+<h4><span class="tid">C13</span> Make feature versioning the default for experiments <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/app/services/training_service.py:198</code>, <code>backend/ml/feature_store.py:466-468</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> <code>version_id</code> defaults to <code>None</code>, meaning experiments train on the mutable unversioned feature rows that re-materialization upserts in place. The reproducibility CLAUDE.md advertises only exists when the user remembers the Training Lab dropdown.</p>
+<p><span class="lbl">Implementation.</span> Either auto-snapshot a feature version at experiment creation when none is chosen, or persist a hash of the assembled feature matrix (shape + column names + content digest) on the Experiment row so silent drift is at least detectable; surface the hash in ExperimentDetail.</p>
+<ul class="ac">
+<li>A new experiment created without an explicit version is reproducible: rebuilding its dataset after a re-materialization yields an identical matrix (or a loud drift warning, depending on chosen approach).</li>
+<li>ExperimentDetail shows the version or hash used.</li>
+</ul>
+</article>
+
+<article class="task p2" id="c14">
+<h4><span class="tid">C14</span> Stream/hoist heavy queries to cut training memory <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/ml/race_features.py:836-861, 2073-2096</code>, <code>backend/ml/dataset_builder.py:444-456</code> · Depends on: do with <a href="#c1">C1</a> (same functions)</p>
+<p><span class="lbl">Problem.</span> The speed-figure stdev pass loads every resulted <code>adjusted_time</code> row into Python; the ELO sweep loads every resulted entry in one <code>.all()</code>; and <code>_compute_builtin_features</code> re-runs all global aggregate queries <em>per 5000-entry batch</em>. Peak memory scales with total DB size regardless of <code>max_entries</code> — matching the Railway OOM history (PRs #27/#28).</p>
+<p><span class="lbl">Implementation.</span> Compute stdev in SQL (<code>AVG(x*x) − AVG(x)²</code>); stream ELO rows with <code>yield_per</code>; hoist the global aggregate tables out of the per-batch function (compute once per training run, pass in). Natural to do while rewriting the same aggregates for C1.</p>
+<ul class="ac">
+<li>Peak RSS during a full dataset build measured before/after shows a clear reduction (log it in the training log).</li>
+<li>Aggregates computed once per run (verified via query counting or log lines), not per batch.</li>
+</ul>
+</article>
+
+<article class="task p1" id="c15">
+<h4><span class="tid">C15</span> Add ML regression tests for leakage, ordering, and parity <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: new tests under <code>backend/tests/</code> · Depends on: <a href="#c1">C1</a>, <a href="#c2">C2</a>, <a href="#c5">C5</a> define the behaviours to pin</p>
+<p><span class="lbl">Problem.</span> The existing 79 tests cover feature math but nothing covers the properties that actually broke: time-cutoff invariance (C1), fold generation on descending input (C2), group contiguity, train/serve feature parity, NaN-policy mirroring, or probability normalization. Each of those bugs shipped silently because no test could catch it.</p>
+<p><span class="lbl">Implementation.</span> Add: (1) <em>future-invariance test</em> — batch features for an entry are unchanged after inserting a later race for the same trainer/trap/sire/track; (2) <em>descending-input fold test</em>; (3) <em>group-contiguity test</em>; (4) <em>train/serve parity test</em> — one synthetic race pushed through <code>build_dataset</code> and through <code>compute_features_for_entries</code> produces the same feature vector under both NaN policies; (5) <em>normalization parity test</em> (from C5). Wire into CI (J1).</p>
+<ul class="ac">
+<li>All five test classes exist, pass, and run in CI.</li>
+<li>Reverting the C1 fix makes the future-invariance test fail (verified once during development).</li>
+</ul>
+</article>
+
+<!-- ============================ SECTION D ============================ -->
+<h2 id="secd"><span class="sec-pre">D</span>Betting &amp; bankroll correctness</h2>
+<p class="secdesc">The staking layer is where model output becomes money. Today the user's configured Kelly settings are ignored by both backend and frontend, same-race bets are overstaked, and bankroll arithmetic has race conditions.</p>
+
+<article class="task p0" id="d1">
+<h4><span class="tid">D1</span> Make BankrollConfig the single source of Kelly parameters <span class="badge b-p0">P0</span><span class="badge b-eff">M</span><span class="badge b-area">Backend + Frontend</span></h4>
+<p class="meta">Files: <code>backend/app/services/prediction_service.py:296-338, 744-756</code>, <code>backend/app/api/predictions.py</code>, <code>frontend/src/pages/Predictions.tsx:42-82</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> The user edits <code>kelly_fraction</code> / <code>min_edge</code> / <code>max_stake_pct</code> in Bankroll settings, but <code>_compute_kelly_stake</code> hardcodes 0.25 / 0.05 / 0.05 and nothing ever reads <code>BankrollConfig</code> outside the bankroll API. The frontend duplicates the same hardcoded constants in its own <code>computeKelly</code> (<code>Predictions.tsx:45-47</code>, with a comment admitting the duplication). Result: a user who sets min_edge=2% still sees "PASS — need 5%", and stake recommendations ignore both their settings and their actual tracked bankroll (predictions default to <code>bankroll=100</code> query param).</p>
+<p><span class="lbl">Implementation.</span> Backend: load <code>BankrollConfig</code> in the prediction endpoints, pass <code>kelly_fraction</code>, <code>min_edge</code>, <code>max_stake_pct</code>, and <code>current_bankroll</code> into <code>_compute_kelly_stake</code>; keep the explicit <code>bankroll</code> query param as an override. Include the effective parameters in the prediction response so clients display the same basis. Frontend: fetch <code>/bankroll/config</code> on the Predictions page and parameterize <code>computeKelly</code> from it (the live-odds instant recompute can stay client-side, but seeded from server config, not constants); delete the hardcoded constants.</p>
+<ul class="ac">
+<li>Changing min_edge in Bankroll settings changes BET/PASS verdicts on the Predictions page without code changes (manual + integration test).</li>
+<li>Backend stake suggestions use <code>current_bankroll</code> by default; response payload echoes the parameters used.</li>
+<li><code>grep</code> finds no hardcoded 0.25/0.05 Kelly constants in either codebase outside config defaults.</li>
+<li>Unit tests for <code>_compute_kelly_stake</code> cover fraction/edge/cap behaviour (currently zero tests on this money-math).</li>
+</ul>
+</article>
+
+<article class="task p1" id="d2">
+<h4><span class="tid">D2</span> Handle simultaneous same-race bets correctly <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/app/services/prediction_service.py:744-756</code>, <code>backend/app/api/predictions.py:1214-1243</code>, <code>backend/ml/evaluation.py:205-243</code> · Depends on: <a href="#d1">D1</a>, <a href="#c10">C10</a></p>
+<p><span class="lbl">Problem.</span> Win bets in one race are mutually exclusive, but Kelly is computed per dog independently; <code>/best-bets</code> happily surfaces multiple dogs from the same race. Independent Kelly on exclusive outcomes systematically overstakes — and multiple "value" dogs in one race appear precisely when probabilities are miscalibrated. The backtest only ever bets the top pick, so this behaviour is never evaluated.</p>
+<p><span class="lbl">Implementation.</span> Implement simultaneous Kelly for mutually exclusive outcomes per race (closed-form water-filling allocation over the positive-edge subset), or — simpler and defensible — cap to the single highest-edge qualifying dog per race and document it. Whichever rule is chosen must be the same rule the backtest (C10) simulates.</p>
+<ul class="ac">
+<li>For a synthetic race with two positive-edge dogs, total recommended stake is ≤ the single-bet Kelly equivalent and matches the chosen rule (unit test with hand-computed values).</li>
+<li>/best-bets and the Predictions UI reflect the rule (no uncoordinated multi-bet suggestions in one race).</li>
+<li>Backtest applies the identical rule.</li>
+</ul>
+</article>
+
+<article class="task p1" id="d3">
+<h4><span class="tid">D3</span> Atomic, validated bankroll updates <span class="badge b-p1">P1</span><span class="badge b-eff">S</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/api/bankroll.py:124-279</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> <code>place_bet</code>/<code>settle_bet</code> do read-modify-write on <code>config.current_bankroll</code> across separate statements (classic lost-update race), accept stakes ≤ 0 or &gt; bankroll, allow the bankroll to go negative, and settling a "won" bet with <code>odds_decimal=None</code> silently counts as a loss.</p>
+<p><span class="lbl">Implementation.</span> Use a single SQL <code>UPDATE bankroll_config SET current_bankroll = current_bankroll - :stake WHERE current_bankroll &gt;= :stake</code> and check rowcount; validate <code>0 &lt; stake</code>; reject settling won bets without odds (422). Mirror for settlement credit.</p>
+<ul class="ac">
+<li>Concurrent place_bet test (two threads) never loses a decrement.</li>
+<li>Invalid stakes and odds-less wins return 422 with clear messages.</li>
+<li>Bankroll can no longer go negative via the API.</li>
+</ul>
+</article>
+
+<article class="task p1" id="d4">
+<h4><span class="tid">D4</span> Stop the settings form silently resetting the bankroll <span class="badge b-p1">P1</span><span class="badge b-eff">S</span><span class="badge b-area">Frontend</span></h4>
+<p class="meta">Files: <code>frontend/src/pages/BankrollDashboard.tsx:93-103</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> <code>handleSaveSettings</code> always sends <code>current_bankroll: editBankroll</code> — so changing only the Kelly fraction overwrites the P&amp;L-adjusted running bankroll back to whatever is in the input, corrupting the tracked value with no warning.</p>
+<p><span class="lbl">Implementation.</span> Omit <code>current_bankroll</code> from the settings PUT; move bankroll adjustment to a separate explicit action with a confirm dialog showing old → new.</p>
+<ul class="ac">
+<li>Saving Kelly settings leaves <code>current_bankroll</code> untouched (verified via API).</li>
+<li>Deliberate bankroll adjustment requires a distinct confirmed action.</li>
+</ul>
+</article>
+
+<article class="task p2" id="d5">
+<h4><span class="tid">D5</span> Shrink stakes by data completeness <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/app/services/prediction_service.py</code> (<code>_compute_kelly_stake</code> + callers) · Depends on: <a href="#d1">D1</a>, <a href="#h3">H3</a></p>
+<p><span class="lbl">Problem.</span> The §8 redesign in <code>PREDICTION_FEATURE_AUDIT.md</code> explicitly promised that <code>data_completeness</code> would let "Kelly staking downweight bets on thin-history dogs" — but the score is computed and never passed to staking. A debutant whose features are entirely median-filled gets the same stake confidence as a fully-profiled veteran.</p>
+<p><span class="lbl">Implementation.</span> Shrink <code>win_prob</code> toward the de-vigged market probability (or uniform 1/n when no odds) proportionally to (1 − completeness) before the Kelly computation — Baker &amp; McHale-style shrinkage, already cited in the audit doc. Make the shrinkage strength a BankrollConfig field. Report both raw and shrunk probability in the response.</p>
+<ul class="ac">
+<li>For a fixed model probability, lower completeness monotonically reduces recommended stake (unit test).</li>
+<li>Completeness 1.0 reproduces the unshrunk stake exactly.</li>
+<li>Prediction payload exposes raw prob, shrunk prob, and completeness.</li>
+</ul>
+</article>
+
+<article class="task p2" id="d6">
+<h4><span class="tid">D6</span> Track closing-line value (CLV) on settled bets <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/models/bankroll.py</code>, <code>backend/app/api/bankroll.py</code>, migration, BankrollDashboard · Depends on: <a href="#b1">B1</a> (migrations work); enhanced by <a href="#f1">F1</a></p>
+<p><span class="lbl">Problem.</span> P&amp;L converges far too slowly to tell whether the edge is real. Closing-line value — odds taken at bet time vs final SP — is the standard fast unbiased signal, and the data (bet odds, settled SP) is already in or near the schema, but never compared.</p>
+<p><span class="lbl">Implementation.</span> On settlement, store the race's SP for the bet's dog (<code>closing_sp</code> column via migration); compute <code>clv_pct = (odds_taken / closing_sp) − 1</code>; show rolling average CLV and beat-the-close rate on BankrollDashboard alongside P&amp;L.</p>
+<ul class="ac">
+<li>Settled bets carry closing SP and CLV; nullable for races where SP is missing.</li>
+<li>Dashboard shows aggregate CLV with an explanation of how to read it.</li>
+</ul>
+</article>
+
+<!-- ============================ SECTION E ============================ -->
+<h2 id="sece"><span class="sec-pre">E</span>Scraping &amp; scheduling robustness</h2>
+<p class="secdesc">The scraper is the system's single source of data and its most fragile, least-tested code. Today a GRI markup change, a transient outage, and "no racing today" are indistinguishable — all report success.</p>
+
+<article class="task p0" id="e1">
+<h4><span class="tid">E1</span> Make scrape failures loud: distinguish "no racing" from "parse failed" <span class="badge b-p0">P0</span><span class="badge b-eff">M</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: <code>backend/scraping/gri_scraper.py:89-93, 326-333</code>, consumers in <code>backfill.py:107</code>, <code>api/scraping.py:344</code>, <code>tasks/scheduler.py:56-58</code> · Depends on: <a href="#e8">E8</a> pairs naturally</p>
+<p><span class="lbl">Problem.</span> Non-200 responses, network exceptions, and pages whose expected markup is missing all return <code>[]</code> — the same value as a legitimately dark track. Every consumer treats <code>[]</code> as "no racing" and marks the job <code>success</code>. If GRI renames a CSS class, every scrape from that day forward silently returns zero races forever, and the model quietly stops getting data.</p>
+<p><span class="lbl">Implementation.</span> Introduce distinct outcomes: raise (or return a typed sentinel) for HTTP/network errors; on 200-OK, validate the page is a real GRI results/card page (presence of known structural anchors) and raise <code>ParseStructureError</code> when race-like text exists but zero races parsed — the <code>/test-track-scrape</code> endpoint (<code>api/scraping.py:814</code>) already computes exactly this signal, reuse it in the pipeline. Record failures per (track, date) in ScrapeLog (see E7). Add a weekly canary: scrape one known historical date and compare against its known race count.</p>
+<ul class="ac">
+<li>Fixture tests (E3): a valid-but-empty day parses to "no racing"; a structurally broken page raises; a 503 raises.</li>
+<li>A job with parse/network failures cannot end with <code>status="success"</code> (it becomes <code>failed</code> or <code>partial</code> with per-day detail).</li>
+<li>Canary check exists and alerts (via E12/J5) on mismatch.</li>
+</ul>
+</article>
+
+<article class="task p0" id="e2">
+<h4><span class="tid">E2</span> Parse result tables by header name, not position; add sanity ranges <span class="badge b-p0">P0</span><span class="badge b-eff">M</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: <code>backend/scraping/gri_scraper.py:160-293</code> · Depends on: <a href="#e3">E3</a> for safety net</p>
+<p><span class="lbl">Problem.</span> Row fields are read by negative index from the row tail (weight = <code>td[-8]</code>, win time = <code>td[-7]</code>…), with no header validation — and GRI already serves malformed HTML (comment at <code>:221-227</code>). One inserted/removed <code>&lt;td&gt;</code> shifts every field by one; since each is parsed with permissive regexes, shifted values mostly still parse as floats — silently corrupting weights, times, and SPs forever (upserts are fill-only-if-NULL, so wrong values stick — see E10). The inline comment at <code>:233</code> even contradicts the code on which index holds SP vs grade.</p>
+<p><span class="lbl">Implementation.</span> Parse the header row into a name→index map and address columns by header text; raise <code>ParseStructureError</code> (E1) when expected headers are absent. Add range sanity checks (weight 20–40 kg, win time 15–70 s, SP &gt; 1.0) that null the value and log a warning counter rather than storing garbage. Fix or delete the wrong comment.</p>
+<ul class="ac">
+<li>Fixture test with a column inserted mid-table either still parses correctly (header-keyed) or raises — never silently shifts.</li>
+<li>Out-of-range values are rejected with a logged warning (test).</li>
+<li>Existing fixture pages parse to identical values as before the refactor.</li>
+</ul>
+</article>
+
+<article class="task p0" id="e3">
+<h4><span class="tid">E3</span> HTML-fixture test suite for all parsers <span class="badge b-p0">P0</span><span class="badge b-eff">M</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: new <code>backend/tests/fixtures/*.html</code>, <code>backend/tests/test_gri_parsers.py</code> · Depends on: nothing — do first in this section</p>
+<p><span class="lbl">Problem.</span> Zero tests and zero HTML fixtures exist for the most fragile, externally-coupled code in the system (<code>parse_results_page</code>, <code>parse_card_page</code>, <code>parse_card_form_page</code>, <code>_parse_sp_decimal</code>). No parser change can be validated without hitting GRI live.</p>
+<p><span class="lbl">Implementation.</span> Save real GRI pages as fixtures: a results page (including an "evens" SP, a trailing-F favourite SP, a non-finisher, a hurdle race if available), a card summary page, a card form page, and an empty/no-racing day. Pin full parsed output (golden-file style) for each. Include the malformed-HTML case the code comments mention. These fixtures become the regression net for E1/E2/E15.</p>
+<ul class="ac">
+<li>≥ 4 fixture pages committed with golden-output tests covering every public parser and <code>_parse_sp_decimal</code> edge cases.</li>
+<li>Tests run in CI (J1) without network access.</li>
+</ul>
+</article>
+
+<article class="task p1" id="e4">
+<h4><span class="tid">E4</span> Recompute <code>days_since_last</code> corrupted by track-by-track backfill <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: <code>backend/scraping/db_pipeline.py:187-210</code>, new maintenance script · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> <code>days_since_last</code> is computed at insert time from the dog's history <em>so far</em> and is write-once (<code>:209-210</code>). Backfills iterate one track at a time over the whole date range, so a dog racing at two tracks gets the value computed against a partial career — often NULL or wildly wrong — and it is never corrected. Years of training rows carry a permanently wrong feature. (Also a per-entry aggregate query → backfill performance drag, see scraping M9.)</p>
+<p><span class="lbl">Implementation.</span> Add a recompute pass (script + admin endpoint) that rebuilds <code>days_since_last</code> for all entries from full chronological history per dog (single window-function-style sweep, not per-row queries). Run it once to heal existing data. Then either drop the write-once guard (allow the upsert to overwrite when recomputed value differs) or move the computation entirely to dataset-build time. Trigger the recompute automatically at the end of any backfill that inserted out-of-order races (ties into C12's watermark).</p>
+<ul class="ac">
+<li>Test: dog with races at two tracks backfilled track-by-track ends with correct <code>days_since_last</code> on every entry after the heal pass.</li>
+<li>One-off heal executed against production data (count of corrected rows logged).</li>
+<li>Future backfills cannot leave the field permanently wrong (automatic recompute or build-time computation).</li>
+</ul>
+</article>
+
+<article class="task p1" id="e5">
+<h4><span class="tid">E5</span> Resolve dog identity by GRI id, not name <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: <code>backend/scraping/gri_scraper.py:466-468</code>, <code>backend/scraping/db_pipeline.py:65</code>, <code>backend/app/models/dog.py</code>, migration for unique index · Depends on: <a href="#b1">B1</a></p>
+<p><span class="lbl">Problem.</span> Dogs are matched by normalized name only; <code>Dog.gri_id</code> exists but is never populated even though the scraper has the dog-details URL (with id) in hand. Greyhound names are recycled across years → two distinct dogs merge into one corrupted career (poisoning form, ELO, days_since_last). Conversely, concurrent scrapes can insert duplicate Dog rows (no unique constraint), splitting one dog's history.</p>
+<p><span class="lbl">Implementation.</span> Extract the GRI id from the dog link href in both results and card parsers; pass through to <code>find_or_create_dog</code>; resolve by <code>gri_id</code> first, fall back to name for legacy rows (and backfill <code>gri_id</code> on match). Add a unique index on <code>gri_id</code> (nullable-unique) and handle <code>IntegrityError</code> with re-select. Provide a one-off script to flag same-name dogs whose race-date spans look like two careers for manual review.</p>
+<ul class="ac">
+<li>New scrapes populate <code>gri_id</code>; resolution prefers it (unit test with two same-name dogs with different ids creating two rows).</li>
+<li>Unique index in place; concurrent-insert test does not produce duplicates.</li>
+<li>Suspected-merge report script exists and documents findings.</li>
+</ul>
+</article>
+
+<article class="task p1" id="e6">
+<h4><span class="tid">E6</span> Reconcile <code>dog_id</code> on results upsert (reserve substitutions) <span class="badge b-p1">P1</span><span class="badge b-eff">S</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: <code>backend/scraping/db_pipeline.py:174-214</code> · Depends on: <a href="#e5">E5</a> ideally first</p>
+<p><span class="lbl">Problem.</span> Entries are matched by <code>(race_id, trap)</code> and the update branch never compares <code>existing.dog_id</code> with the freshly resolved dog. When a reserve replaces the carded dog in the same trap (common), the result — position, time, SP — is written onto the <em>wrong dog's</em> career. Scratched dogs (carded but absent from results) are also left looking like runners with NULL positions.</p>
+<p><span class="lbl">Implementation.</span> In the update branch, if the resolved dog differs, reassign <code>existing.dog_id</code> and log the substitution. After processing a resulted race, mark carded entries whose trap is absent from results as scratched (new status/flag on RaceEntry) so they're excluded from history aggregates and <code>num_runners</code>.</p>
+<ul class="ac">
+<li>Test: card scrape inserts dog A in trap 3; results scrape with dog B in trap 3 reassigns the entry to B and logs it.</li>
+<li>Scratched entries are flagged and excluded from feature history and num_runners (assert in feature engine test).</li>
+</ul>
+</article>
+
+<article class="task p1" id="e7">
+<h4><span class="tid">E7</span> Retries with backoff and failed-day bookkeeping <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: <code>backend/scraping/gri_scraper.py:326-333</code>, <code>backend/app/models/scrape_log.py</code> + migration · Depends on: <a href="#e1">E1</a>, <a href="#e8">E8</a></p>
+<p><span class="lbl">Problem.</span> Every (track, date) gets exactly one HTTP attempt; transient 503s/timeouts silently drop that day, nothing records <em>which</em> days failed, and recovery means re-running whole ranges. The coverage tools can show gaps but can't distinguish "no meeting" from "fetch failed".</p>
+<p><span class="lbl">Implementation.</span> Add retry with exponential backoff (3 attempts: 2/4/8 s) for network errors and 5xx inside the scraper client. Add structured columns to ScrapeLog (<code>race_date</code>, <code>track_code</code> — also fixes the <code>source LIKE</code> hack at <code>api/scraping.py:186-190</code>) and persist per-(track, date) failures. Add a "retry failed days" endpoint/UI button that re-scrapes only recorded failures.</p>
+<ul class="ac">
+<li>Simulated 503-then-200 (mock transport) succeeds via retry; permanent failure records a failed (track, date) row.</li>
+<li>Retry-failed-days endpoint re-scrapes exactly the recorded failures and clears them on success.</li>
+<li>Coverage calendar distinguishes "no racing" from "failed fetch" using the structured records.</li>
+</ul>
+</article>
+
+<article class="task p1" id="e8">
+<h4><span class="tid">E8</span> Consolidate the five divergent scrape-loop implementations <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: <code>backend/scraping/backfill.py:60-141</code>, <code>backend/app/api/scraping.py:324-372, 429-527</code>, <code>backend/app/tasks/scheduler.py:31-125</code>, <code>backend/app/services/schedule_service.py:48-105</code> · Depends on: nothing; enables E1/E7/E12 cleanly</p>
+<p><span class="lbl">Problem.</span> The track×date loop + ScrapeLog lifecycle exists in five places with divergent bugs: scheduler jobs never write heartbeats and leave crashed logs "running" forever; <code>backfill.py:121-127</code> commits after a failure without rollback (poisoned session aborts remaining tracks); <code>_run_backfill</code>'s per-day except also lacks rollback; <code>_scrape_upcoming_window</code> creates no ScrapeLog at all; politeness delays differ (0.5/1.0/2.0 s). Fixes land in one copy and not the others — already observable.</p>
+<p><span class="lbl">Implementation.</span> Extract one <code>run_scrape_job(tracks, dates, scraper_fn, log)</code> helper in <code>scraping/</code> that owns: ScrapeLog lifecycle (create → heartbeat → success/partial/failed), per-day try/except <em>with rollback</em>, retries (E7), failure recording, a single politeness-delay constant, and a shared HTTP client. Port all five call sites.</p>
+<ul class="ac">
+<li>One implementation; all five entry points are thin wrappers (verified by inspection/grep).</li>
+<li>A mid-loop DB error in one day no longer aborts the remaining days (test with injected failure).</li>
+<li>Every scrape path (including schedule-driven card scrapes) produces a ScrapeLog with heartbeats.</li>
+</ul>
+</article>
+
+<article class="task p1" id="e9">
+<h4><span class="tid">E9</span> Scheduler robustness: timezone, boot catch-up, automatic reapers <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">Scraping + Backend</span></h4>
+<p class="meta">Files: <code>backend/app/tasks/scheduler.py</code>, <code>backend/app/main.py</code> (lifespan), <code>backend/app/api/scraping.py:215-251</code> · Depends on: <a href="#e8">E8</a></p>
+<p><span class="lbl">Problem.</span> Four compounding gaps: (1) the built-in 23:00/08:00 cron jobs have no timezone (run in UTC; Irish "today" diverges in summer) and compute <code>date.today()</code> in server tz; (2) a restart/deploy spanning the cron time silently skips that day's scrape with no catch-up; (3) the stale-job reaper for scrapes is manual-only (nothing schedules <code>POST /scraping/reap-stale</code>), and there is <em>no</em> reaper at all for experiments — a process death leaves <code>status="running"</code> forever; (4) the in-process scheduler duplicates every job if workers are ever scaled to &gt; 1.</p>
+<p><span class="lbl">Implementation.</span> Pass <code>timezone="Europe/Dublin"</code> to the built-in CronTriggers and compute "today" via <code>ZoneInfo("Europe/Dublin")</code> in all jobs. On startup (lifespan): mark running-with-stale/null-heartbeat experiments and scrape logs as failed ("killed by restart"); then run catch-up — if <code>max(race_date, status='resulted')</code> &lt; yesterday, trigger the existing scrape-since-last logic. Schedule the reaper hourly. Guard scheduler start behind an env flag (<code>ENABLE_SCHEDULER=1</code>, default on) so multi-process setups can disable it.</p>
+<ul class="ac">
+<li>Cron triggers carry the Dublin timezone (inspect job store in a test).</li>
+<li>Restart with a zombie "running" experiment marks it failed at boot with a clear message.</li>
+<li>Boot after ≥ 1 missed day triggers catch-up scraping (test by fixture dates).</li>
+<li>Hourly reap job registered; manual endpoint still available.</li>
+</ul>
+</article>
+
+<article class="task p2" id="e10">
+<h4><span class="tid">E10</span> Let re-scrapes heal bad data; handle voided races <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: <code>backend/scraping/db_pipeline.py:68-73, 112-124, 140, 199-210</code> · Depends on: <a href="#e2">E2</a> (so overwrites write good data)</p>
+<p><span class="lbl">Problem.</span> Almost every field is fill-only-if-NULL, so the natural recovery action — "re-scrape the bad range" — is a no-op for wrong values (including anything corrupted by the positional-parsing bug). <code>num_runners</code> is set once at creation and never updated; the <code>void</code> race status is never set, so abandoned meetings stay "scheduled" forever.</p>
+<p><span class="lbl">Implementation.</span> For results scrapes treat the results page as ground truth: overwrite result-derived fields (position, times, SP, weight, comment, going, prize) when the new value differs, logging changes. Recompute <code>num_runners</code> from actual entries post-upsert. Add a sweep that voids scheduled races older than N days with no results. Keep fill-only behaviour for card scrapes (cards are weaker provenance than results).</p>
+<ul class="ac">
+<li>Re-scraping a race with a deliberately corrupted weight corrects it (test).</li>
+<li><code>num_runners</code> matches entry count after results upsert.</li>
+<li>Old scheduled races get voided by the sweep and are excluded from prediction lists.</li>
+</ul>
+</article>
+
+<article class="task p2" id="e11">
+<h4><span class="tid">E11</span> Per-track "scrape since last" so gaps actually heal <span class="badge b-p2">P2</span><span class="badge b-eff">S</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: <code>backend/app/api/scraping.py:567-603</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> The user's main catch-up button computes the start date as the <em>global</em> max resulted race date. If Shelbourne ran yesterday but Tralee's last good scrape was 10 days ago, Tralee's gap is permanently skipped.</p>
+<p><span class="lbl">Implementation.</span> Compute <code>max(race_date)</code> per track (one GROUP BY — <code>/data-summary</code> already does it) and scrape each track from its own last date.</p>
+<ul class="ac">
+<li>Test: two tracks with different last dates produce per-track scrape ranges.</li>
+<li>Endpoint response reports the per-track ranges it will cover.</li>
+</ul>
+</article>
+
+<article class="task p2" id="e12">
+<h4><span class="tid">E12</span> Failure visibility: partial status, logs for all jobs, daily digest <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: <code>backend/app/tasks/scheduler.py:62-63, 111-112</code>, <code>backend/app/services/schedule_service.py:206-222</code> · Depends on: <a href="#e8">E8</a>, <a href="#j5">J5</a> for delivery</p>
+<p><span class="lbl">Problem.</span> A scheduled run where 21 of 22 tracks failed is recorded as <code>status="success"</code>; schedule-driven card scrapes write no ScrapeLog (stats squeezed into a string field); nothing alerts anyone about anything. "Success with 0 records" is the visible symptom of every upstream failure.</p>
+<p><span class="lbl">Implementation.</span> Via the unified job runner (E8): per-track failures set <code>status="partial"</code> with counts; all jobs produce ScrapeLogs. Add a daily digest check (APScheduler) that flags: zero records scraped on a day where racing was expected (verify-coverage signal), any failed/partial logs, and stale experiments — delivered via J5 (Sentry message or email) and shown as a Dashboard banner.</p>
+<ul class="ac">
+<li>A run with ≥ 1 failed track cannot be <code>success</code>; counts are accurate.</li>
+<li>Schedule-driven scrapes appear in ScrapingStatus like any other job.</li>
+<li>Digest fires on a simulated zero-record day (test) and is visible in the UI.</li>
+</ul>
+</article>
+
+<article class="task p2" id="e13">
+<h4><span class="tid">E13</span> Dog-details enrichment scrape (birth date, sex, colour, owner) <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: <code>backend/scraping/gri_scraper.py</code> (new parser), <code>backend/scraping/db_pipeline.py:167-172</code>, scheduler · Depends on: <a href="#e5">E5</a> (gri_id)</p>
+<p><span class="lbl">Problem.</span> <code>Dog.birth_date</code>/<code>sex</code>/<code>colour</code> are permanently NULL — so the implemented <code>dog_age_years</code>/<code>dog_age_squared</code> features (a documented performance-curve signal) never fire. The GRI dog-details page carrying them is one request away via links the scraper already sees. Scraped <code>owner_name</code> is parsed then dropped on the floor (never passed to <code>find_or_create_dog</code>); same for <code>best_time</code>.</p>
+<p><span class="lbl">Implementation.</span> Add a <code>parse_dog_details_page</code> parser (+ fixture, per E3) for birth date/sex/colour; add a low-priority enrichment job that fetches details for dogs with <code>gri_id</code> and NULL birth_date (rate-limited, e.g. 200/day). Plumb <code>owner_name</code> through the upsert. Document that GRI carries no sectionals (the <code>sectional_time</code> column is 100% NULL from this source) so sectional-dependent features rely on comment inference.</p>
+<ul class="ac">
+<li>Enrichment job fills birth_date/sex/colour for sampled dogs; <code>dog_age_years</code> becomes non-null in newly built datasets for enriched dogs.</li>
+<li><code>owner_name</code> persists from card form scrapes.</li>
+<li>Fixture test for the new parser.</li>
+</ul>
+</article>
+
+<article class="task p2" id="e14">
+<h4><span class="tid">E14</span> Fix distance parsing (yards gate, sponsor-number trap, 0 default) <span class="badge b-p2">P2</span><span class="badge b-eff">S</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: <code>backend/scraping/gri_scraper.py:144-149, 413</code>, <code>backend/scraping/db_pipeline.py:135</code> · Depends on: <a href="#e3">E3</a></p>
+<p><span class="lbl">Problem.</span> The 200–1000 gate drops Irish marathon trips (1010/1035 yds) → <code>distance_m=None</code> → written as <strong>0</strong> into a NOT NULL column; the parser takes the <em>first</em> in-range number in the header, so "The 600 Final" over 525 yds parses as 600; and the column named <code>distance_m</code> actually stores yards (documented only in a comment).</p>
+<p><span class="lbl">Implementation.</span> Widen the gate to ~1100; prefer the last matching number in results headers (the docstring notes it repeats at the end); store NULL rather than 0 (relax the column or skip the race with a logged warning); document the yards semantics on the model column.</p>
+<ul class="ac">
+<li>Fixture tests: marathon distance parses; sponsor-number header parses the true distance; no race row is created with distance 0.</li>
+<li>Model/docs state the unit explicitly.</li>
+</ul>
+</article>
+
+<article class="task p1" id="e15">
+<h4><span class="tid">E15</span> Scope pedigree parsing to the row (find_next escapes) <span class="badge b-p1">P1</span><span class="badge b-eff">S</span><span class="badge b-area">Scraping</span></h4>
+<p class="meta">Files: <code>backend/scraping/gri_scraper.py:206-219, 592-605</code> · Depends on: <a href="#e3">E3</a></p>
+<p><span class="lbl">Problem.</span> Sire/dam are extracted with <code>cells[2].find_next(...)</code>, which walks the whole document forward — if a row lacks the pedigree span, the parser silently grabs the <em>next dog's</em> dam, and the fill-only-if-NULL upsert freezes the wrong pedigree forever. The card-form parser also stores sire/dam in inconsistent case vs the results parser.</p>
+<p><span class="lbl">Implementation.</span> Search within the row's own subtree (<code>row.find(class_=...)</code>), returning None when absent; normalize sire/dam names through <code>normalize_name</code> at the pipeline layer.</p>
+<ul class="ac">
+<li>Fixture test with a missing-pedigree row returns None for that dog and the correct dam for the next.</li>
+<li>Sire/dam stored in one canonical case from both parsers.</li>
+</ul>
+</article>
+
+<!-- ============================ SECTION F ============================ -->
+<h2 id="secf"><span class="sec-pre">F</span>Market data</h2>
+
+<article class="task p1" id="f1">
+<h4><span class="tid">F1</span> Betfair odds integration: populate <code>odds_snapshots</code> (revive PR #2) <span class="badge b-p1">P1</span><span class="badge b-eff">L</span><span class="badge b-area">Scraping + ML</span></h4>
+<p class="meta">Files: open PR #2 (betfair_bsp.py, exchange odds, odds router), <code>backend/app/models/odds.py</code>, <code>backend/app/config.py:15-18</code>, scheduler · Depends on: <a href="#e5">E5</a> (name matching), <a href="#a2">A2</a>; unlocks the gated odds-drift features and live Kelly</p>
+<p><span class="lbl">Problem.</span> The single highest-value unfinished thread in the repo. The <code>odds_snapshots</code> table has existed since the initial schema and <strong>nothing has ever written to it</strong>; the Betfair credentials in config are referenced nowhere; PR #2 (Betfair BSP historical import + Exchange live odds) has been open and unmerged since early in the project. Consequences: the built odds-drift features (<code>opening_to_sp_drift</code>, <code>odds_steam_rate</code>, <code>cross_book_disagreement</code>) are dead; pre-race Kelly mostly returns "no_odds" because GRI publishes SP only after the race; and the market signal the literature (Benter; the project's own FEATURE_SUGGESTIONS.md) calls the strongest single predictor is absent.</p>
+<p><span class="lbl">Implementation.</span> Rebase/audit PR #2 rather than starting from scratch. Required pieces: (1) <em>matching</em> — Betfair markets key on venue + start time, so rely on <code>Race.race_time</code> from card scrapes plus a track→venue map; runner names matched via <code>normalize_name</code> with a manual-review log for misses; (2) <em>historical BSP import</em> from the free promo.betfair.com CSVs to backfill snapshots for resulted races (training data for drift features); (3) <em>live polling job</em> (APScheduler) writing snapshots at e.g. T-60/T-30/T-10/T-2 for today's scheduled races, with the Betfair login/keep-alive flow (cert-based non-interactive login — the three existing config fields are insufficient, add what's needed); (4) unique index on <code>(race_id, dog_id, bookmaker, scraped_at)</code>; (5) only after several weeks of both resulted-and-upcoming coverage, flip <code>include_odds_snapshot_features</code> on for a new experiment and validate — the prior audit explicitly warns enabling it while coverage is asymmetric recreates train/serve skew.</p>
+<ul class="ac">
+<li>Historical BSP rows imported and matched for ≥ 90% of resulted races in a sample month; mismatches logged for review.</li>
+<li>Live job writes snapshots for today's cards; ScrapingStatus shows the odds job like any other.</li>
+<li>Kelly recommendations on scheduled races use latest snapshot odds when present (no more blanket "no_odds").</li>
+<li>Drift features remain OFF by default until coverage parity is demonstrated; the enabling experiment documents before/after metrics vs the C11 SP gate.</li>
+</ul>
+</article>
+
+<!-- ============================ SECTION G ============================ -->
+<h2 id="secg"><span class="sec-pre">G</span>ML opportunities</h2>
+<p class="secdesc">Not bugs — upgrades with strong expected value once Section C lands.</p>
+
+<article class="task p2" id="g1">
+<h4><span class="tid">G1</span> Race-level conditional-logit head (Benter stack) <span class="badge b-p2">P2</span><span class="badge b-eff">L</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: new <code>backend/ml/conditional_logit.py</code>, trainer integration, <code>prediction_service</code> · Depends on: <a href="#c5">C5</a>, <a href="#c2">C2</a>; enhanced by <a href="#f1">F1</a></p>
+<p><span class="lbl">Problem/opportunity.</span> Probabilities are currently per-dog binary outputs squeezed into a race distribution post-hoc. The canonical architecture for this problem (Benter 1994 — already cited in the repo's own docs) is a race-level conditional logit (softmax over runners) fit on top of model scores, optionally with de-vigged log-SP as a second regressor. It constructs probabilities that sum to 1 by design (cleanly resolving C5), and the SP-blend coefficient doubles as the C11 gate.</p>
+<p><span class="lbl">Implementation.</span> Fit <code>P(win_i) = softmax(β·log(score_i) + γ·log(sp_prob_i))</code> per race on the calibration slice (C6); serve through the same head; backtest with C10's harness. Compare against the current normalize-after-Platt approach on log-loss, Brier, and Kelly ROI across walk-forward folds; adopt if it wins.</p>
+<ul class="ac">
+<li>Head implemented with tests on synthetic races (recovers known β/γ).</li>
+<li>Side-by-side walk-forward comparison vs current approach recorded in an experiment.</li>
+<li>If adopted: serving, backtest, and combo ordering all consume the head's probabilities.</li>
+</ul>
+</article>
+
+<article class="task p2" id="g2">
+<h4><span class="tid">G2</span> Per-field-size calibration <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: trainer calibration code, <code>prediction_service</code> · Depends on: <a href="#c6">C6</a></p>
+<p><span class="lbl">Problem/opportunity.</span> One global Platt model calibrates 4-, 6-, and 8-runner races identically despite different base rates (1/4 vs 1/8). Calibrate per <code>num_runners</code> bucket (or add field size as a calibrator covariate), and evaluate isotonic vs Platt once sample counts justify it.</p>
+<ul class="ac">
+<li>Reliability curves per field-size bucket before/after show improvement (stored with experiment diagnostics).</li>
+<li>Artifact format versioned so legacy single-calibrator artifacts still serve.</li>
+</ul>
+</article>
+
+<article class="task p2" id="g3">
+<h4><span class="tid">G3</span> Model drift monitoring and staleness warnings <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">ML + Frontend</span></h4>
+<p class="meta">Files: new service querying <code>predictions</code> vs results, Dashboard widget · Depends on: prediction persistence (exists, PR #45/#47)</p>
+<p><span class="lbl">Problem/opportunity.</span> <code>train_cutoff_date</code> is persisted but nothing warns when a served model is months stale, and live calibration is never tracked. The daily prediction tracker (PR #47) already stores predictions vs outcomes — computing rolling Brier/log-loss and hit-rate over the last N resulted predictions per experiment is a cheap query.</p>
+<p><span class="lbl">Implementation.</span> Nightly job computes rolling live metrics per active experiment; Dashboard shows them with thresholds ("calibration degrading", "model trained &gt; 60 days ago — consider retrain"); optionally auto-flag in the schedule UI.</p>
+<ul class="ac">
+<li>Rolling live Brier/log-loss visible per experiment and updated nightly.</li>
+<li>Staleness warning appears when cutoff age exceeds a configurable threshold.</li>
+</ul>
+</article>
+
+<article class="task p3" id="g4">
+<h4><span class="tid">G4</span> Validate or prune the ensemble endpoint <span class="badge b-p3">P3</span><span class="badge b-eff">S</span><span class="badge b-area">ML</span></h4>
+<p class="meta">Files: <code>backend/app/services/prediction_service.py</code> (<code>predict_race_ensemble</code>), <code>backend/app/api/predictions.py:575</code> · Depends on: <a href="#c10">C10</a></p>
+<p><span class="lbl">Problem.</span> <code>predict_race_ensemble</code> averages win probabilities ad-hoc, has never been backtested, and has no frontend caller. Unvalidated money-adjacent code is a liability.</p>
+<p><span class="lbl">Implementation.</span> Either backtest it with the C10 harness (and later route through G1's head) or delete the endpoint until it earns its keep.</p>
+<ul class="ac"><li>Endpoint is either covered by a backtest comparison or removed (with the route gone from OpenAPI).</li></ul>
+</article>
+
+<!-- ============================ SECTION H ============================ -->
+<h2 id="sech"><span class="sec-pre">H</span>Frontend</h2>
+<p class="secdesc">The frontend works but has drifted into 13 hand-rolled mini-apps: TanStack Query and Zustand are installed and unused, every page re-implements fetching/polling/types, and error handling is <code>alert()</code>-or-nothing. Two production-breaking bugs lead.</p>
+
+<article class="task p0" id="h1">
+<h4><span class="tid">H1</span> Fix Vercel SPA routing (deep links 404) <span class="badge b-p0">P0</span><span class="badge b-eff">S</span><span class="badge b-area">Frontend</span></h4>
+<p class="meta">Files: <code>frontend/vercel.json</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> <code>vercel.json</code> has no <code>rewrites</code>; the app uses <code>BrowserRouter</code> with deep routes. Refreshing or sharing any non-root URL (<code>/predictions</code>, <code>/training/5</code>…) returns a 404 in production.</p>
+<p><span class="lbl">Implementation.</span> Add <code>"rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]</code>. While in the file: drop the redundant <code>npm install &amp;&amp;</code> from buildCommand (Vercel installs automatically; plain <code>npm run build</code> keeps lockfile fidelity).</p>
+<ul class="ac"><li>Hard-refreshing a deep route on the deployed site renders the app.</li><li>Build still succeeds on Vercel.</li></ul>
+</article>
+
+<article class="task p0" id="h2">
+<h4><span class="tid">H2</span> Fix TrainingLab resetting feature selection every 10 s <span class="badge b-p0">P0</span><span class="badge b-eff">S</span><span class="badge b-area">Frontend</span></h4>
+<p class="meta">Files: <code>frontend/src/pages/TrainingLab.tsx:67-87</code> · Depends on: nothing (or fold into <a href="#h5">H5</a>)</p>
+<p><span class="lbl">Problem.</span> The polling <code>setInterval</code> captures a stale closure where <code>selectedFeatures</code> is permanently <code>[]</code>, so the "seed defaults" guard re-selects <em>all</em> features on every 10-second tick. Any features the user un-checks while configuring an experiment are silently re-checked — experiments train with the wrong feature set. ESLint's exhaustive-deps already flags it.</p>
+<p><span class="lbl">Implementation.</span> Use a functional update with a ref-based "seeded once" guard (<code>setSelectedFeatures(prev =&gt; prev.length ? prev : ids)</code> plus an initialized flag), or migrate this page to useQuery first (H5) and derive defaults once.</p>
+<ul class="ac"><li>Unchecking a feature stays unchecked across poll ticks (manual test with the form open &gt; 30 s).</li><li>The exhaustive-deps warning for this effect is resolved, not suppressed.</li></ul>
+</article>
+
+<article class="task p1" id="h3">
+<h4><span class="tid">H3</span> Surface preflight and data_completeness in the Predictions UI <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">Frontend</span></h4>
+<p class="meta">Files: <code>frontend/src/pages/Predictions.tsx</code>, <code>frontend/src/types/models.ts</code> · Depends on: nothing (backend exists)</p>
+<p><span class="lbl">Problem.</span> The backend built a full pre-bet safety system — <code>GET /api/predictions/preflight/{race_id}</code> with per-entry <code>data_completeness</code>, missing-feature reasons, and would-fail verdicts — and the frontend never calls any of it (zero grep hits). Users see BET verdicts on dogs whose features are entirely median-filled debutant guesses.</p>
+<p><span class="lbl">Implementation.</span> When a race + experiment is selected, call preflight; render a race-level data-quality banner (would_fail, post-race features in use) and per-dog completeness badges (e.g. traffic-light on the prediction table rows); de-emphasize or annotate Kelly verdicts for low-completeness dogs (&lt; 0.5). Pairs with D5 server-side shrinkage.</p>
+<ul class="ac">
+<li>Selecting a race shows completeness per dog and a banner when preflight reports problems.</li>
+<li>A would-fail experiment/race combination explains <em>why</em> (reasons from the endpoint) instead of failing opaquely on Predict.</li>
+<li>Types for the preflight response live in <code>models.ts</code>.</li>
+</ul>
+</article>
+
+<article class="task p1" id="h4">
+<h4><span class="tid">H4</span> Replace alert()-or-nothing with toasts and error states <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">Frontend</span></h4>
+<p class="meta">Files: all pages; notably <code>BankrollDashboard.tsx:93-120</code>, <code>FeatureBuilder.tsx:200-257</code>, <code>TrainingLab.tsx:133-137</code>, <code>Predictions.tsx:309-318</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> 18 <code>alert()</code> calls and — worse — many mutations with no error handling at all: settle/delete bet and save-bankroll-settings (money operations) fail silently; several initial loads swallow errors so failure renders as permanent "Loading…" indistinguishable from empty data.</p>
+<p><span class="lbl">Implementation.</span> Add a toast library (e.g. <code>sonner</code>); create an axios response interceptor that toasts API errors with the backend's detail message; replace alerts; add distinct error states (message + retry button) for initial loads. Every mutation gets success/failure feedback.</p>
+<ul class="ac">
+<li><code>grep</code> finds zero <code>alert(</code> in <code>src/</code>.</li>
+<li>Killing the backend and clicking each mutation shows an error toast (spot-check the money paths: place/settle/delete bet, save settings).</li>
+<li>Initial-load failures render an error state with retry, not a permanent spinner.</li>
+</ul>
+</article>
+
+<article class="task p1" id="h5">
+<h4><span class="tid">H5</span> Adopt TanStack Query; fix all polling loops <span class="badge b-p1">P1</span><span class="badge b-eff">L</span><span class="badge b-area">Frontend</span></h4>
+<p class="meta">Files: all pages; worst offenders <code>ExperimentDetail.tsx:14-24</code>, <code>TrainingLab.tsx:83-87</code>, <code>FeatureBuilder.tsx:273-288</code>, <code>Predictions.tsx:412-449</code> · Depends on: do after <a href="#h2">H2</a>/<a href="#h4">H4</a> or absorb them</p>
+<p><span class="lbl">Problem.</span> A QueryClient is mounted but <code>useQuery</code>/<code>useMutation</code> appear in zero files — every page hand-rolls axios + useState + setInterval. Resulting defects: ExperimentDetail polls every 5 s forever (even completed); FeatureBuilder stores an interval on <code>window.__materializeInterval</code> with uncaught rejections each failed tick; the Predictions scrape-poll spins forever if its log id scrolls out of the recent-logs list; no caching, dedup, or invalidation anywhere.</p>
+<p><span class="lbl">Implementation.</span> Migrate page reads to <code>useQuery</code> with status-conditional polling (<code>refetchInterval: (q) =&gt; q.state.data?.status === "running" ? 5000 : false</code>) and mutations to <code>useMutation</code> + <code>invalidateQueries</code>. Start with the polling pages (TrainingLab, ExperimentDetail, ScrapingStatus, FeatureBuilder), then Predictions. Backend assist: add <code>GET /scraping/logs/{id}</code> so pollers don't search the recent-logs list. Delete the window-global hack.</p>
+<ul class="ac">
+<li>Zero hand-rolled <code>setInterval</code> polling remains in pages (grep).</li>
+<li>Polling stops when jobs reach terminal states (observe network tab).</li>
+<li>Mutations invalidate affected queries (e.g. deleting an experiment updates the list without manual refetch).</li>
+<li>The stuck-scrape-poll scenario is impossible (poll by log id endpoint).</li>
+</ul>
+</article>
+
+<article class="task p2" id="h6">
+<h4><span class="tid">H6</span> Split Predictions.tsx; shared UI components; consolidate types <span class="badge b-p2">P2</span><span class="badge b-eff">L</span><span class="badge b-area">Frontend</span></h4>
+<p class="meta">Files: <code>frontend/src/pages/Predictions.tsx</code> (1554 lines), new <code>src/components/ui/</code>, <code>src/lib/</code>, <code>src/types/models.ts</code> · Depends on: <a href="#h5">H5</a> first (don't refactor twice)</p>
+<p><span class="lbl">Problem.</span> Predictions.tsx contains four tabs, a client-side Kelly engine, 11 locally defined interfaces, scrape polling, and three table renderers (~20 useState hooks); every keystroke in live-odds re-renders everything. Across pages: <code>STAGE_LABELS</code>/heartbeat code duplicated verbatim, <code>TRAP_COLORS</code> duplicated with diverging shapes, four status-badge maps, ~40 copies of the card shell. <code>models.ts</code> has dead types while pages re-declare their own drifting copies (two different <code>ScrapeLog</code>s exist).</p>
+<p><span class="lbl">Implementation.</span> Extract <code>PredictTab</code>/<code>ByDateTab</code>/<code>HistoryTab</code>/<code>CompareTab</code> + a shared <code>PredictionsTable</code>; move Kelly math to <code>src/lib/kelly.ts</code> (single client copy, parameterized per D1); build <code>src/components/ui/</code> (StatusBadge, TrapBadge, StatCard) and <code>src/lib/format.ts</code>; consolidate all response types into <code>models.ts</code> — ideally generated from the FastAPI OpenAPI schema via <code>openapi-typescript</code> so drift is structural rather than manual.</p>
+<ul class="ac">
+<li>No page file exceeds ~500 lines; Predictions tabs are separate components.</li>
+<li>One definition each for status badges, trap colours, stage labels, ScrapeLog type (grep-verified).</li>
+<li>Types are imported from <code>models.ts</code> (or generated client) — no page-local API interface declarations.</li>
+</ul>
+</article>
+
+<article class="task p2" id="h7">
+<h4><span class="tid">H7</span> Make lint pass and dependencies honest <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">Frontend</span></h4>
+<p class="meta">Files: <code>frontend/eslint.config.js</code>, <code>frontend/package.json</code> · Depends on: feeds <a href="#j1">J1</a></p>
+<p><span class="lbl">Problem.</span> <code>npm run lint</code> currently fails with 36 errors (33 explicit <code>any</code>s, render-impurity warnings), so lint is decorative. Zustand is listed and never imported; <code>@types/react-router-dom@5</code> is dead weight against react-router-dom v7; zero tests exist.</p>
+<p><span class="lbl">Implementation.</span> Fix the violations (type the <code>any</code>s against models.ts; move <code>Date.now()</code> out of render); remove zustand (or adopt it deliberately for shared selected-experiment state) and the stale types package; treat <code>react-hooks/exhaustive-deps</code> as error; add vitest with tests for <code>lib/kelly.ts</code> (the money math) as the seed of a test suite.</p>
+<ul class="ac">
+<li><code>npm run lint</code> exits 0 and runs in CI.</li>
+<li>Unused deps removed; <code>npm ls zustand</code> fails or imports exist.</li>
+<li>≥ 1 vitest suite (Kelly math) runs in CI.</li>
+</ul>
+</article>
+
+<article class="task p2" id="h8">
+<h4><span class="tid">H8</span> Frontend bug bundle: stale filters, UTC parsing, env guard, settle confirm <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">Frontend</span></h4>
+<p class="meta">Files: <code>RaceList.tsx:65</code>, <code>ScrapingStatus.tsx:416-420</code> vs <code>TrainingLab.tsx:172</code>, <code>api/client.ts:3-5</code>, <code>BankrollDashboard.tsx:353-357</code>, <code>Schedule.tsx:166-179, 365-415</code> · Depends on: <a href="#i8">I8</a> for the timestamp convention</p>
+<p><span class="lbl">Problem.</span> Four independent small bugs: (1) RaceList "Clear" refetches with the <em>old</em> filters (stale closure via <code>setTimeout(fetchRaces, 0)</code>); (2) naive backend timestamps are parsed <em>with</em> a forced <code>'Z'</code> in two pages and <em>without</em> in ScrapingStatus — one is wrong, making stale-job detection off by an hour in Irish summer time; (3) a missing <code>VITE_API_URL</code> in production silently points every request at the static host's <code>/api</code>; (4) settling a bet Won/Lost is a single unconfirmed click that adjusts the bankroll, and "Lost" hardcodes <code>position: 2</code>; Schedule's cron inputs PATCH on every keystroke.</p>
+<p><span class="lbl">Implementation.</span> (1) pass filter args into <code>fetchRaces</code> or derive from a query key; (2) centralize a <code>parseUtc()</code> helper consistent with the I8 backend convention; (3) <code>console.error</code>/throw in PROD when <code>VITE_API_URL</code> is absent; (4) confirm settle actions (or make them re-settable), send a real position or null, debounce schedule inputs.</p>
+<ul class="ac">
+<li>Clear resets results to unfiltered (manual test).</li>
+<li>All timestamp parsing goes through one helper; stale detection verified against a known-offset fixture.</li>
+<li>Production build without the env var fails loudly at startup.</li>
+<li>Settle requires confirmation; schedule edits are debounced.</li>
+</ul>
+</article>
+
+<article class="task p2" id="h9">
+<h4><span class="tid">H9</span> Frontend resilience bundle: ErrorBoundary, 404, code splitting, pagination, a11y <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">Frontend</span></h4>
+<p class="meta">Files: <code>App.tsx</code>, <code>main.tsx</code>, list pages · Depends on: <a href="#i3">I3</a> for paginated endpoints</p>
+<p><span class="lbl">Problem.</span> Any render exception white-screens the whole app (no ErrorBoundary); unknown routes render an empty layout (no 404); all 12 pages ship in one bundle (no React.lazy; Recharts in 4 pages); every list caps at a fixed limit with no pager (history grows daily); accessibility basics are missing (bare "×" buttons, colour-only status, non-focusable clickable divs).</p>
+<p><span class="lbl">Implementation.</span> Wrap routes in an error boundary with a reset action; add a catch-all route; <code>React.lazy</code> each page with a suspense fallback; add offset pagination to RaceList/bets/history (with backend support from I3); add aria-labels, real buttons, and label associations on the worst offenders.</p>
+<ul class="ac">
+<li>A thrown render error shows a recovery screen, not a blank page.</li>
+<li>Unknown URL shows a 404 page.</li>
+<li>Build output shows per-route chunks; initial bundle shrinks measurably.</li>
+<li>History/bets/races lists can page beyond the first N rows.</li>
+</ul>
+</article>
+
+<!-- ============================ SECTION I ============================ -->
+<h2 id="seci"><span class="sec-pre">I</span>API quality</h2>
+
+<article class="task p2" id="i1">
+<h4><span class="tid">I1</span> Make state-changing GET endpoints POST <span class="badge b-p2">P2</span><span class="badge b-eff">S</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/api/features.py:397</code>, <code>backend/app/api/predictions.py:280, 393, 970, 1169</code>, <code>backend/app/api/scraping.py:257-307</code> · Depends on: coordinate with frontend callers</p>
+<p><span class="lbl">Problem.</span> <code>GET /features/start-materialize</code> launches a background job from a URL bar; the prediction GETs run models and <em>persist</em> predictions; <code>GET /test-scrape</code> writes scraped rows to production. Crawlers/prefetchers can trigger all of it; GETs are also cacheable.</p>
+<p><span class="lbl">Implementation.</span> Convert to POST (keep GET briefly with a deprecation 308 if needed); make test-scrape dry-run by default with an explicit <code>persist=true</code> flag. Update frontend calls.</p>
+<ul class="ac"><li>No GET endpoint mutates state (route audit test asserting verb conventions).</li><li>Frontend updated; smoke flows pass.</li></ul>
+</article>
+
+<article class="task p2" id="i2">
+<h4><span class="tid">I2</span> Return proper HTTP status codes for soft failures <span class="badge b-p2">P2</span><span class="badge b-eff">S</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/api/scraping.py:380, 415, 586, 594</code> and similar · Depends on: <a href="#h4">H4</a> consumes the result</p>
+<p><span class="lbl">Problem.</span> Unknown track codes, empty track lists, etc. return HTTP 200 with a message body — clients can't distinguish success from failure, and the frontend's error handling never fires.</p>
+<p><span class="lbl">Implementation.</span> Raise <code>HTTPException(404/422)</code> for genuine errors; reserve 200 for success (empty result sets may stay 200 with explicit empty payloads).</p>
+<ul class="ac"><li>Unknown track code returns 404 (test).</li><li>Frontend toasts surface these via the H4 interceptor.</li></ul>
+</article>
+
+<article class="task p2" id="i3">
+<h4><span class="tid">I3</span> Pagination and N+1 fixes on hot endpoints <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/api/schedule.py:97-132</code>, <code>backend/app/api/bankroll.py:298, 367</code>, <code>backend/app/api/tracks.py:11</code>, <code>backend/app/api/features.py:76</code>, track lookups across <code>predictions.py</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> <code>list_schedules</code> does two extra queries per row; bankroll summary loads <em>all</em> settled bets into memory for cumulative P&amp;L; several list endpoints are unbounded or capped without offset; six prediction endpoints copy-paste per-response Track lookups.</p>
+<p><span class="lbl">Implementation.</span> Batch/join the schedule serialization; compute bankroll aggregates in SQL (window or running totals) and window the chart payload; add uniform <code>limit/offset</code> to tracks/features/schedules/bets (matching races/dogs); extract a shared track-name helper.</p>
+<ul class="ac"><li>Query counts measured per endpoint drop to O(1) per request (assert with a SQLAlchemy event counter in tests).</li><li>All list endpoints accept limit/offset documented in OpenAPI.</li></ul>
+</article>
+
+<article class="task p3" id="i4">
+<h4><span class="tid">I4</span> Typed response models for untyped endpoints <span class="badge b-p3">P3</span><span class="badge b-eff">M</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/api/predictions.py</code> (history/by-date/best-bets/combos), <code>scraping.py</code> (coverage/data-summary), <code>features.py</code> (auto-injected) · Depends on: enables H6's generated client</p>
+<p><span class="lbl">Problem.</span> Large endpoints return raw dicts — no OpenAPI schema, no response validation, and the frontend's manual interfaces drift invisibly (see H6).</p>
+<p><span class="lbl">Implementation.</span> Define Pydantic response models and attach via <code>response_model=</code>. Then H6 can generate the TypeScript client from OpenAPI.</p>
+<ul class="ac"><li>OpenAPI schema shows typed responses for the listed endpoints.</li><li><code>openapi-typescript</code> generates without falling back to <code>unknown</code> for them.</li></ul>
+</article>
+
+<article class="task p2" id="i5">
+<h4><span class="tid">I5</span> Move multi-race prediction off the request thread <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/api/predictions.py:970-1108, 1169-1257</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> <code>/by-date</code> and <code>/best-bets</code> run full-card prediction loops inside the request, holding the request DB session for potentially minutes — pool exhaustion and gateway timeouts on big cards. (Also fix <code>predict_upcoming_races</code> re-running the full ELO sweep per race — <code>prediction_service.py:1173-1191</code> — by batching like /by-date already does.)</p>
+<p><span class="lbl">Implementation.</span> Either cap races per call with explicit chunked client iteration, or convert to the existing background-job pattern (thread + status row + polling endpoint) like training/materialization. Batch the upcoming path's feature computation.</p>
+<ul class="ac"><li>No request handler runs &gt; ~30 s for a full card day (measured).</li><li><code>/upcoming</code> computes ELO once per call, not per race (log/query-count assertion).</li></ul>
+</article>
+
+<article class="task p2" id="i6">
+<h4><span class="tid">I6</span> Validate and bound scrape/backfill requests <span class="badge b-p2">P2</span><span class="badge b-eff">S</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/api/scraping.py:375-470</code> · Depends on: <a href="#a2">A2</a></p>
+<p><span class="lbl">Problem.</span> Backfill accepts arbitrary date ranges (a 50-year request would run for days hammering GRI); the configured <code>scrape_delay</code> setting is ignored by these paths; nothing refuses overlapping concurrent jobs for the same range (TOCTOU duplicate-insert risk).</p>
+<p><span class="lbl">Implementation.</span> Validate max span (e.g. 366 days) and track count; honour <code>settings.scrape_delay</code> everywhere (one constant via E8); refuse to start when a running ScrapeLog overlaps the requested source.</p>
+<ul class="ac"><li>Out-of-bounds ranges return 422.</li><li>Second identical trigger while one runs returns 409 with the running log id.</li></ul>
+</article>
+
+<article class="task p3" id="i7">
+<h4><span class="tid">I7</span> Fix cached-prediction bankroll parameter trap <span class="badge b-p3">P3</span><span class="badge b-eff">S</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/api/predictions.py:308-322</code> · Depends on: <a href="#d1">D1</a> may subsume</p>
+<p><span class="lbl">Problem.</span> With <code>refresh=false</code> and a cache hit, the passed <code>bankroll</code> param is silently ignored — stakes reflect the old bankroll with no indication.</p>
+<p><span class="lbl">Implementation.</span> If the requested bankroll differs from <code>bankroll_used</code>, recompute the Kelly fields on the cached probabilities (cheap) or return the cached bankroll explicitly so clients can decide.</p>
+<ul class="ac"><li>Cache hit with a different bankroll returns stakes consistent with the requested bankroll, or an explicit <code>bankroll_used</code> the UI displays.</li></ul>
+</article>
+
+<article class="task p2" id="i8">
+<h4><span class="tid">I8</span> Standardize on timezone-aware UTC timestamps <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: pervasive (<code>models/*.py</code> defaults, <code>api/scraping.py</code>, <code>training_service.py</code>, <code>db_pipeline.py</code>, schemas) · Depends on: coordinate with <a href="#h8">H8</a></p>
+<p><span class="lbl">Problem.</span> <code>datetime.utcnow()</code> everywhere — deprecated in Python 3.12 (the deploy target) and naive; heartbeat/reaper math relies on an undocumented naive-UTC invariant, and API responses serialize without offsets, which is exactly why the frontend guesses inconsistently (H8).</p>
+<p><span class="lbl">Implementation.</span> One <code>utcnow()</code> helper returning <code>datetime.now(timezone.utc)</code>; replace all call sites and column defaults; serialize with offset in schemas (Pydantic will emit <code>+00:00</code>/<code>Z</code>). SQLite stores naive — strip/attach consistently at the boundary and document the invariant in <code>database.py</code>.</p>
+<ul class="ac"><li><code>grep</code> finds no <code>datetime.utcnow()</code>.</li><li>API timestamps include timezone designators (schema test).</li><li>Reaper/heartbeat math covered by a test with tz-aware inputs.</li></ul>
+</article>
+
+<article class="task p3" id="i9">
+<h4><span class="tid">I9</span> Single source of truth for the version string <span class="badge b-p3">P3</span><span class="badge b-eff">S</span><span class="badge b-area">Backend</span></h4>
+<p class="meta">Files: <code>backend/app/main.py:33</code>, <code>backend/pyproject.toml:3</code>, frontend sidebar · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> pyproject says 0.1.3, FastAPI says 0.1.0, the sidebar displayed "v0.1.01".</p>
+<p><span class="lbl">Implementation.</span> Read the package version via <code>importlib.metadata</code> in <code>main.py</code>; expose it on <code>/api/health</code>; frontend displays the served value.</p>
+<ul class="ac"><li>One bump in pyproject propagates to API and sidebar.</li></ul>
+</article>
+
+<!-- ============================ SECTION J ============================ -->
+<h2 id="secj"><span class="sec-pre">J</span>Process, tooling &amp; documentation</h2>
+
+<article class="task p0" id="j1">
+<h4><span class="tid">J1</span> CI pipeline and branch protection <span class="badge b-p0">P0</span><span class="badge b-eff">M</span><span class="badge b-area">Process</span></h4>
+<p class="meta">Files: new <code>.github/workflows/ci.yml</code>, GitHub settings · Depends on: <a href="#j3">J3</a> for the protected branch; <a href="#h7">H7</a> for lint to pass</p>
+<p><span class="lbl">Problem.</span> No CI of any kind exists. 79 backend tests pass in 6.6 s but nothing ever runs them; 29 commits were pushed directly to the auto-deploy trunk — each an unreviewed, untested instant production deploy. The broken fresh-DB migration (B1) shipped precisely because nothing exercised it.</p>
+<p><span class="lbl">Implementation.</span> GitHub Actions workflow with three jobs: (1) backend — install from the lockfile (J2), <code>pytest</code>; (2) migrations — <code>alembic upgrade head</code> against an empty SQLite file, then <code>alembic revision --autogenerate</code> asserting an empty diff (after B5); (3) frontend — <code>npm ci &amp;&amp; npm run lint &amp;&amp; npx tsc -b &amp;&amp; npm run build</code> (+ vitest once H7 lands). Enable branch protection on the deploy branch requiring green checks.</p>
+<ul class="ac">
+<li>CI runs on every PR and push; all three jobs green on the current tree (after prerequisite fixes).</li>
+<li>Direct pushes to the deploy branch are blocked by protection rules.</li>
+<li>A PR that breaks a test or migration is visibly red.</li>
+</ul>
+</article>
+
+<article class="task p0" id="j2">
+<h4><span class="tid">J2</span> Pin Python dependencies with a lockfile <span class="badge b-p0">P0</span><span class="badge b-eff">M</span><span class="badge b-area">Process</span></h4>
+<p class="meta">Files: <code>backend/pyproject.toml</code>, new <code>backend/requirements.lock</code>, <code>Dockerfile</code> · Depends on: nothing</p>
+<p><span class="lbl">Problem.</span> Every dependency is an unbounded <code>&gt;=</code> range with no lockfile; today's resolve pulls pandas 3.x / numpy 2.4 / xgboost 3.2 — major versions past what the code was written against. Every Docker rebuild (including <code>.deploy-trigger</code> bumps) silently adopts new majors; the B1 migration failure is a realized instance. Pickled model artifacts may not load (or may score differently) across silent xgboost/sklearn upgrades.</p>
+<p><span class="lbl">Implementation.</span> Add upper bounds in pyproject (<code>pandas&gt;=2.2,&lt;3</code> style); generate a lock (<code>uv pip compile</code> or pip-tools); install from the lock in the Dockerfile; record library versions inside each saved model artifact at training time and warn at load when they mismatch the runtime.</p>
+<ul class="ac">
+<li>Lockfile committed; Docker build installs from it; two consecutive builds resolve identically.</li>
+<li>New artifacts embed library versions; loading under a different xgboost major logs a warning.</li>
+<li>CI uses the lockfile.</li>
+</ul>
+</article>
+
+<article class="task p1" id="j3">
+<h4><span class="tid">J3</span> Adopt a real main branch; delete .deploy-trigger <span class="badge b-p1">P1</span><span class="badge b-eff">S</span><span class="badge b-area">Process</span></h4>
+<p class="meta">Files: repo settings, Railway settings, <code>.deploy-trigger</code>, <code>CLAUDE.md</code> · Depends on: coordinates with <a href="#j1">J1</a></p>
+<p><span class="lbl">Problem.</span> Production deploys from <code>claude/greyhound-prediction-app-4vNeO</code> — an ephemeral-looking session-branch name that a future "clean up claude/* branches" pass could delete. Redeploys are forced by committing timestamp bumps to a <code>.deploy-trigger</code> file, polluting history and conflating "redeploy" with "code change".</p>
+<p><span class="lbl">Implementation.</span> Create <code>main</code> from the current deploy branch head; point Railway at it; enable protection (J1); update CLAUDE.md; delete <code>.deploy-trigger</code> and use Railway's redeploy button/CLI for manual redeploys. Keep the old branch frozen until cutover is verified.</p>
+<ul class="ac">
+<li>Railway deploys from <code>main</code>; a test deploy succeeds.</li>
+<li><code>.deploy-trigger</code> is gone; CLAUDE.md documents the new flow.</li>
+</ul>
+</article>
+
+<article class="task p2" id="j4">
+<h4><span class="tid">J4</span> Dockerfile hardening: multi-stage, non-root, .dockerignore <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">Infra</span></h4>
+<p class="meta">Files: <code>Dockerfile</code>, new <code>.dockerignore</code> · Depends on: <a href="#j2">J2</a></p>
+<p><span class="lbl">Problem.</span> Runs as root (poor pairing with a user-code sandbox, A5); ships <code>build-essential</code> in the final image (~250 MB bloat); installs the project as a package from pyproject alone <em>before</em> sources are copied (a stale empty stub lands in site-packages); no <code>.dockerignore</code> — the whole repo including <code>frontend/</code> and <code>.git/</code> is build context.</p>
+<p><span class="lbl">Implementation.</span> Multi-stage build (builder installs from lockfile; runtime copies site-packages); copy <code>backend/</code> then install <code>--no-deps</code>; add <code>USER app</code> with volume permissions handled; add <code>.dockerignore</code> (frontend/, .git/, *.db, node_modules).</p>
+<ul class="ac">
+<li>Image runs as non-root (verify <code>whoami</code>); app boots and writes to the volume.</li>
+<li>Image size reduced (record before/after); build context &lt; 10 MB.</li>
+</ul>
+</article>
+
+<article class="task p1" id="j5">
+<h4><span class="tid">J5</span> Observability: Sentry, uptime checks, structured logging <span class="badge b-p1">P1</span><span class="badge b-eff">M</span><span class="badge b-area">Infra</span></h4>
+<p class="meta">Files: <code>backend/app/main.py</code>, <code>config.py</code>, external services · Depends on: <a href="#b3">B3</a> for the deep health endpoint</p>
+<p><span class="lbl">Problem.</span> Zero error tracking, metrics, or uptime monitoring for a system that takes scheduled money-relevant actions. Railway's restart policy gives up after 3 retries and the service <em>stays down silently</em>. Errors in scheduler threads vanish into stdout.</p>
+<p><span class="lbl">Implementation.</span> Add <code>sentry-sdk[fastapi]</code> gated on a DSN env var (captures API exceptions, scheduler-thread errors, and the E12 digest events); point a free uptime monitor at the deep <code>/api/health</code>; switch <code>basicConfig</code> to structured (JSON or key=value) logging so Railway log search works; include last-successful-scrape timestamp in health output.</p>
+<ul class="ac">
+<li>A deliberate test exception appears in Sentry from both a request handler and a scheduler job.</li>
+<li>Uptime monitor alerts when health returns 503 (tested once).</li>
+<li>Logs are structured; scrape/training job ids appear as fields.</li>
+</ul>
+</article>
+
+<article class="task p2" id="j6">
+<h4><span class="tid">J6</span> Python lint/format tooling (ruff) and pre-commit <span class="badge b-p2">P2</span><span class="badge b-eff">S</span><span class="badge b-area">Process</span></h4>
+<p class="meta">Files: <code>backend/pyproject.toml</code>, new <code>.pre-commit-config.yaml</code> · Depends on: feeds <a href="#j1">J1</a></p>
+<p><span class="lbl">Problem.</span> No linter, formatter, or type-checker config for the backend. Dead imports, the unused-settings bug (A3), and unused config (Betfair) are exactly what ruff flags for free; 47 LLM-authored PRs landed with no static gate.</p>
+<p><span class="lbl">Implementation.</span> Add <code>[tool.ruff]</code> (lint + format, sensible select set including F401/F841/ARG), fix or noqa the initial violations, add pre-commit hooks (ruff, ruff-format, eslint), wire into CI.</p>
+<ul class="ac"><li><code>ruff check backend/</code> exits 0 and runs in CI.</li><li>Pre-commit config works locally (documented in README).</li></ul>
+</article>
+
+<article class="task p1" id="j7">
+<h4><span class="tid">J7</span> API and pipeline test coverage <span class="badge b-p1">P1</span><span class="badge b-eff">L</span><span class="badge b-area">Process</span></h4>
+<p class="meta">Files: new tests under <code>backend/tests/</code> · Depends on: <a href="#b1">B1</a> (migrations in test setup), complements <a href="#c15">C15</a>/<a href="#e3">E3</a></p>
+<p><span class="lbl">Problem.</span> The existing suite covers ML feature math only. Zero tests exist for: any API route, <code>db_pipeline</code> upserts, the training service, the prediction service, Kelly/bankroll math (financial code!), or the sandbox. The most deployment-critical code is the least tested.</p>
+<p><span class="lbl">Implementation.</span> Add a TestClient fixture backed by a temp SQLite DB built via <code>alembic upgrade head</code> (doubles as the B1 regression test). Priority order: (1) Kelly stake unit tests (with D1 parameters); (2) bankroll place/settle/reset flows including the D3 races; (3) <code>upsert_race_results</code> idempotency + status transition + E6 substitution; (4) smoke tests per router (200/401/404 contract); (5) a tiny end-to-end: seed two races → materialize → train logistic regression → predict resulted race.</p>
+<ul class="ac">
+<li>Coverage exists for all five priority areas and runs in CI.</li>
+<li>Test DB is built by migrations, not <code>create_all</code>.</li>
+<li>The end-to-end smoke completes in under ~2 minutes in CI.</li>
+</ul>
+</article>
+
+<article class="task p2" id="j8">
+<h4><span class="tid">J8</span> Documentation and dead-code cleanup <span class="badge b-p2">P2</span><span class="badge b-eff">M</span><span class="badge b-area">Process</span></h4>
+<p class="meta">Files: new <code>README.md</code>, <code>CLAUDE.md</code>, <code>.env.example</code>, deletions · Depends on: after <a href="#a1">A1</a>/<a href="#j3">J3</a> so docs describe the new reality</p>
+<p><span class="lbl">Problem.</span> No README exists for humans (the frontend README is the untouched Vite template); CLAUDE.md — the operating manual for the LLM sessions building this app — is materially wrong (claims 13 tables, actual 15; "24 tracks", actual 22; points to the dead Procfile; implies Betfair is integrated; <code>main.py</code> still claims the scraper "uses Playwright"). <code>.env.example</code>'s <code>MODEL_ARTIFACTS_DIR=./artifacts/models</code> would put trained models <em>off the persistent volume</em> — silently vanishing on redeploy. Dead code: <code>scraping/spiders/</code> (empty Scrapy leftover), <code>_raise_for_missing_features</code> (zero call sites), trainer docstrings claiming isotonic calibration with unused imports, Betfair config vars (decide per F1), root-level scratch docs.</p>
+<p><span class="lbl">Implementation.</span> Write a root README: what the app is, local setup for both halves, deploy topology (Railway main branch + volume, Vercel envs incl. API key), and the backup/restore runbook (A1). Correct CLAUDE.md's counts, entrypoint chain, and stale claims. Fix <code>.env.example</code> (<code>./data/models</code>; document scrape settings; remove or annotate Betfair vars per F1's status). Delete the listed dead code; move scratch docs into <code>docs/</code>.</p>
+<ul class="ac">
+<li>README covers setup, deploy, and restore; a newcomer can boot both halves from it alone.</li>
+<li>CLAUDE.md statements verified against the tree (table count, track count, entrypoint, no Playwright/Betfair claims).</li>
+<li>Copying <code>.env.example</code> verbatim yields a working, volume-safe config.</li>
+<li>Dead code removed (grep-verified for each item).</li>
+</ul>
+</article>
+
+<h2 id="seq">Suggested execution order</h2>
+<table>
+<tr><th>Wave</th><th>Tasks</th><th>Theme</th></tr>
+<tr><td>1 — Stop the bleeding</td><td>A1, A2, A3, A4, H1, H2, J2</td><td>Backups, auth, production-breaking frontend bugs, pinned deps. All independent; ship within days.</td></tr>
+<tr><td>2 — Restore trust in the foundation</td><td>B1, B2, B3, J1, J3, E3</td><td>Working disaster recovery, CI gate, real main branch, parser fixtures.</td></tr>
+<tr><td>3 — Make the numbers honest</td><td>C1, C2, C3, C4, C15, then retrain</td><td>Leakage fixes. Everything model-related before this wave is unreliable; expect honest metrics to drop.</td></tr>
+<tr><td>4 — Make the betting real</td><td>C5, C6, C10, C11, D1, D2, D3, D4, H3, H4</td><td>One probability convention, one Kelly source of truth, realistic backtests, surfaced data quality.</td></tr>
+<tr><td>5 — Make the data feed durable</td><td>E1, E2, E4, E5, E6, E7, E8, E9, E15, B4, J5</td><td>Scraper robustness, identity, scheduling, alerting.</td></tr>
+<tr><td>6 — Compounding upgrades</td><td>F1, G1, G2, G3, D5, D6, C7–C9, C12–C14, H5–H9, I1–I9, E10–E14, J4, J6, J7, J8, B5</td><td>Market data, Benter stack, monitoring, refactors, hygiene.</td></tr>
+</table>
+
+<p style="color:var(--muted); font-size:0.85rem; margin-top:36px">Generated from a five-track parallel audit of the repository at commit <code>6f8d8a9</code> (11 June 2026). Companion to <code>PREDICTION_FEATURE_AUDIT.md</code> and <code>FEATURE_SUGGESTIONS.md</code>; supersedes neither.</p>
+
+</div>
+</body>
+</html>

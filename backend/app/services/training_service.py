@@ -342,6 +342,22 @@ def run_training(db: Session, experiment_id: int) -> None:
                 all_metrics["betting_favourite_roi"] = betting["favourite_roi"]
                 all_metrics["betting_kelly_pnl"] = betting.get("kelly_pnl", 0)
                 all_metrics["betting_kelly_roi"] = betting.get("kelly_roi", 0)
+
+                # Beat-the-SP gate: the decisive baseline. A model that
+                # can't beat de-vigged SP probabilities carries no
+                # information beyond the market.
+                from ml.evaluation import compute_sp_baseline_metrics
+                sp_baseline = compute_sp_baseline_metrics(
+                    y_binary,
+                    test_proba,
+                    meta_test["sp_decimal"].values,
+                    meta_test["race_id"].values,
+                )
+                if "error" not in sp_baseline:
+                    for k, v in sp_baseline.items():
+                        if isinstance(v, (int, float)) and not isinstance(v, bool):
+                            all_metrics[f"sp_gate_{k}"] = v
+                    all_metrics["sp_gate_beats_sp"] = 1.0 if sp_baseline.get("beats_sp") else 0.0
                 logger.info(
                     "Betting metrics: top_pick_pnl=$%.2f (ROI %.1f%%), value_pnl=$%.2f, kelly_pnl=$%.2f",
                     betting["top_pick_pnl"], betting["top_pick_roi"],
@@ -835,6 +851,22 @@ def run_optuna_optimization(
                 all_metrics["betting_favourite_roi"] = betting["favourite_roi"]
                 all_metrics["betting_kelly_pnl"] = betting.get("kelly_pnl", 0)
                 all_metrics["betting_kelly_roi"] = betting.get("kelly_roi", 0)
+
+                # Beat-the-SP gate: the decisive baseline. A model that
+                # can't beat de-vigged SP probabilities carries no
+                # information beyond the market.
+                from ml.evaluation import compute_sp_baseline_metrics
+                sp_baseline = compute_sp_baseline_metrics(
+                    y_binary_bet,
+                    test_proba,
+                    meta_test["sp_decimal"].values,
+                    meta_test["race_id"].values,
+                )
+                if "error" not in sp_baseline:
+                    for k, v in sp_baseline.items():
+                        if isinstance(v, (int, float)) and not isinstance(v, bool):
+                            all_metrics[f"sp_gate_{k}"] = v
+                    all_metrics["sp_gate_beats_sp"] = 1.0 if sp_baseline.get("beats_sp") else 0.0
             except Exception as e:
                 logger.warning("Optuna betting metrics failed: %s", e)
 

@@ -223,13 +223,46 @@ export default function ExperimentDetail() {
           <h2 className="font-semibold mb-3">Metrics</h2>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {Object.entries(exp.metrics)
-              .filter(([key]) => !key.startsWith('optuna_') && !key.startsWith('betting_'))
+              .filter(([key]) => !key.startsWith('optuna_') && !key.startsWith('betting_') && !key.startsWith('sp_gate_'))
               .map(([key, val]) => (
               <div key={key} className="border rounded-md p-3">
                 <p className="text-xs text-gray-500">{key}</p>
                 <p className="font-mono text-lg">{typeof val === 'number' ? val.toFixed(4) : String(val)}</p>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Beat-the-SP gate */}
+      {exp.metrics && typeof exp.metrics['sp_gate_log_loss_vs_sp'] === 'number' && (
+        <div className="bg-white rounded-lg shadow p-5 mb-6">
+          <h2 className="font-semibold mb-1">Market Baseline (de-vigged SP)</h2>
+          <p className="text-sm text-gray-500 mb-3">
+            The decisive test: does this model carry information beyond the market?
+            Negative log-loss delta = model better than SP probabilities on the same races.
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className={`border rounded-md p-3 ${exp.metrics['sp_gate_beats_sp'] ? 'border-green-300 bg-green-50' : 'border-red-300 bg-red-50'}`}>
+              <p className="text-xs text-gray-500">Verdict</p>
+              <p className={`font-bold ${exp.metrics['sp_gate_beats_sp'] ? 'text-green-700' : 'text-red-700'}`}>
+                {exp.metrics['sp_gate_beats_sp'] ? 'BEATS the market' : 'Does NOT beat the market'}
+              </p>
+            </div>
+            <div className="border rounded-md p-3">
+              <p className="text-xs text-gray-500">Log-loss vs SP</p>
+              <p className="font-mono text-lg">{Number(exp.metrics['sp_gate_log_loss_vs_sp']).toFixed(4)}</p>
+              <p className="text-xs text-gray-400">model {Number(exp.metrics['sp_gate_model_log_loss']).toFixed(4)} vs SP {Number(exp.metrics['sp_gate_sp_log_loss']).toFixed(4)}</p>
+            </div>
+            <div className="border rounded-md p-3">
+              <p className="text-xs text-gray-500">Brier vs SP</p>
+              <p className="font-mono text-lg">{Number(exp.metrics['sp_gate_brier_vs_sp']).toFixed(4)}</p>
+            </div>
+            <div className="border rounded-md p-3">
+              <p className="text-xs text-gray-500">Model blend weight</p>
+              <p className="font-mono text-lg">{exp.metrics['sp_gate_model_blend_coef'] != null ? Number(exp.metrics['sp_gate_model_blend_coef']).toFixed(3) : '-'}</p>
+              <p className="text-xs text-gray-400">weight assigned to the model on top of SP (0 = nothing)</p>
+            </div>
           </div>
         </div>
       )}

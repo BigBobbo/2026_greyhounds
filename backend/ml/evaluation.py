@@ -343,3 +343,83 @@ def compute_shap_summary(model: Any, X: np.ndarray, feature_names: list[str], ma
     except Exception as e:
         logger.warning("SHAP computation failed: %s", e)
         return None
+
+
+def compute_sp_baseline_metrics(
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    sp_decimal: np.ndarray,
+    race_ids: np.ndarray,
+) -> dict[str, Any]:
+    """Beat-the-SP gate: does the model carry information beyond the market?
+
+    Compares the model's probabilities against de-vigged SP probabilities on
+    the same entries (the standard Benter-style test). Favourite-backing P&L
+    is a weak baseline; this is the decisive one — a model that cannot beat
+    de-vigged SP on log-loss has no business recommending bets.
+
+    Returns:
+        sp_log_loss / sp_brier:        market baseline scores
+        model_log_loss / model_brier:  model scores on the SAME entries
+        log_loss_vs_sp / brier_vs_sp:  model minus SP (negative = model better)
+        model_blend_coef:              coefficient on the model logit in a
+                                       logistic blend of model + SP — how much
+                                       weight the data assigns the model on
+                                       top of the market (0 = nothing)
+        n_entries:                     rows with usable SP
+        beats_sp:                      bool, log_loss_vs_sp < 0
+    """
+    import pandas as pd
+
+    df = pd.DataFrame({
+        "won": np.asarray(y_true, dtype=float),
+        "prob": normalize_probs_per_race(y_proba, race_ids),
+        "sp": np.asarray(sp_decimal, dtype=float),
+        "race_id": np.asarray(race_ids),
+    })
+    df = df[df["sp"].notna() & (df["sp"] > 1)]
+    if df.empty or df["won"].nunique() < 2:
+        return {"error": "insufficient SP data for baseline comparison"}
+
+    # De-vig: raw implied probs normalized within each race so the
+    # bookmaker's overround doesn't inflate the baseline's log-loss.
+    df["sp_raw"] = 1.0 / df["sp"]
+    df["sp_prob"] = df.groupby("race_id")["sp_raw"].transform(
+        lambda p: p / p.sum() if p.sum() > 0 else p
+    )
+
+    eps = 1e-6
+    model_p = np.clip(df["prob"].values, eps, 1 - eps)
+    sp_p = np.clip(df["sp_prob"].values, eps, 1 - eps)
+    y = df["won"].values
+
+    out: dict[str, Any] = {
+        "sp_log_loss": round(float(log_loss(y, sp_p, labels=[0, 1])), 5),
+        "sp_brier": round(float(brier_score_loss(y, sp_p)), 5),
+        "model_log_loss": round(float(log_loss(y, model_p, labels=[0, 1])), 5),
+        "model_brier": round(float(brier_score_loss(y, model_p)), 5),
+        "n_entries": int(len(df)),
+    }
+    out["log_loss_vs_sp"] = round(out["model_log_loss"] - out["sp_log_loss"], 5)
+    out["brier_vs_sp"] = round(out["model_brier"] - out["sp_brier"], 5)
+    out["beats_sp"] = bool(out["log_loss_vs_sp"] < 0)
+
+    # Blend test: y ~ logit(model) + logit(SP). The model's coefficient
+    # measures incremental information beyond the market.
+    try:
+        from sklearn.linear_model import LogisticRegression
+
+        features = np.column_stack([
+            np.log(model_p / (1 - model_p)),
+            np.log(sp_p / (1 - sp_p)),
+        ])
+        blend = LogisticRegression(max_iter=1000)
+        blend.fit(features, y)
+        out["model_blend_coef"] = round(float(blend.coef_[0][0]), 4)
+        out["sp_blend_coef"] = round(float(blend.coef_[0][1]), 4)
+    except Exception as e:  # degenerate inputs
+        logger.warning("Blend test failed: %s", e)
+        out["model_blend_coef"] = None
+        out["sp_blend_coef"] = None
+
+    return out

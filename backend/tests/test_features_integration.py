@@ -45,7 +45,7 @@ def db():
 
 
 def _seed_simple(db):
-    """Seed: 1 track, 4 dogs, ~12 races mostly at 525m with a few 480m."""
+    """Seed: 1 track, 4 dogs, 24 races mostly at 525m with a few 480m."""
     track = Track(name="Testville", code="TST", active=True)
     db.add(track)
     db.commit()
@@ -62,10 +62,13 @@ def _seed_simple(db):
     race_no = 0
     races = []
 
-    # Generate 12 races over 12 days, 4 runners each, with stable skill ranking
+    # Generate 24 races over 24 days, 4 runners each, with stable skill ranking
     # (Alpha > Bravo > Charlie > Delta) so ELO should rank them in that order
     # by the end.  A handful of races run at a different distance (480m).
-    for i in range(12):
+    # The count is sized so the speed-figure (track, distance) bucket clears
+    # _SPEED_FIGURE_MIN_BUCKET *as of* the later races' dates — baselines are
+    # time-aware and only count runs strictly before each history row.
+    for i in range(24):
         race_no += 1
         d_m = 525 if i % 4 != 0 else 480
         race = Race(
@@ -144,8 +147,8 @@ def test_elo_orders_dogs_by_skill(db):
     # Alpha (consistently fastest) should outrate Delta (consistently slowest)
     assert elo_alpha > elo_delta
 
-    # Pre-race counts: each dog should have raced 11 times before the last race
-    assert df.loc[name_to_entry["Alpha"], "dog_elo_races"] == 11
+    # Pre-race counts: each dog should have raced 23 times before the last race
+    assert df.loc[name_to_entry["Alpha"], "dog_elo_races"] == 23
 
     # Field aggregates are constant within a race
     assert df["field_avg_elo"].nunique() == 1
@@ -291,10 +294,10 @@ def test_h2h_tracks_wins_and_losses_within_field(db):
         name_to_entry[dog.name] = e.id
 
     # Every dog has raced with the other three in every prior race, so
-    # meetings should be: 11 prior races * 3 opponents = 33
+    # meetings should be: 23 prior races * 3 opponents = 69
     for dog_name in ("Alpha", "Bravo", "Charlie", "Delta"):
         meetings = df.loc[name_to_entry[dog_name], "h2h_meetings_vs_field"]
-        assert meetings == 33
+        assert meetings == 69
 
     # Alpha (fastest) should have the highest win rate vs field
     win_rate_alpha = df.loc[name_to_entry["Alpha"], "h2h_win_rate_vs_field"]

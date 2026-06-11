@@ -43,7 +43,6 @@ from ml.feature_availability import (
     PredictionDataError,
     post_race_features_in_use,
 )
-from ml.race_features import compute_race_context_features
 
 logger = logging.getLogger(__name__)
 

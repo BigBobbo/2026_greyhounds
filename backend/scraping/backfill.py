@@ -97,23 +97,36 @@ async def run_backfill(
 
             track_races = 0
             track_entries = 0
+            failed_days: list[str] = []
             current = start_date
 
             try:
                 while current <= end_date:
-                    races = await scrape_results(track.code, current)
+                    # Per-day failures are recorded but don't stop the loop —
+                    # the rest of the date range is still scraped.
+                    try:
+                        races = await scrape_results(track.code, current)
 
-                    if races:
-                        stats = upsert_race_results(db, races, scrape_log_id=log.id)
-                        track_races += stats["races_new"]
-                        track_entries += stats["entries_new"]
+                        if races:
+                            stats = upsert_race_results(db, races, scrape_log_id=log.id)
+                            track_races += stats["races_new"]
+                            track_entries += stats["entries_new"]
+                    except Exception as e:
+                        logger.error("Error scraping %s %s: %s", track.code, current, e)
+                        failed_days.append(f"{track.code} {current}")
 
                     log.heartbeat_at = datetime.utcnow()
                     db.commit()
                     current += timedelta(days=1)
                     await asyncio.sleep(delay)
 
-                log.status = "success"
+                if failed_days:
+                    shown = ", ".join(failed_days[:20])
+                    extra = f" (+{len(failed_days) - 20} more)" if len(failed_days) > 20 else ""
+                    log.status = "partial"
+                    log.error_message = f"Failed (track, date): {shown}{extra}"
+                else:
+                    log.status = "success"
                 log.records_scraped = track_races
                 log.records_new = track_entries
 

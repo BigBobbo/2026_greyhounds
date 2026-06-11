@@ -30,6 +30,20 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
+
+class ScrapeFetchError(Exception):
+    """Raised when a GRI page cannot be fetched (network error or non-200)."""
+
+
+class ParseStructureError(Exception):
+    """Raised when a fetched GRI page no longer matches the expected markup.
+
+    This is deliberately loud: a silent `return []` here looks identical to a
+    quiet no-racing day and lets scrape jobs report success while storing
+    nothing.
+    """
+
+
 GRI_BASE_URL = "https://www.grireland.ie"
 VIEW_RESULTS_URL = f"{GRI_BASE_URL}/results/view-results/"
 VIEW_CARD_URL = f"{GRI_BASE_URL}/racing/upcoming-race-cards/upcoming-race-card-summary/"
@@ -72,6 +86,29 @@ def format_date(d: date) -> str:
     return d.strftime("%d-%b-%Y")
 
 
+def _has_gri_page_anchor(soup: BeautifulSoup) -> bool:
+    """True if the page carries GRI structural anchors.
+
+    A genuine GRI results/card page always renders the search form with its
+    track dropdown (ASP.NET select whose id/name contains 'track') and/or
+    `igb-tbl` tables. A 200 page with neither is not a GRI racing page at
+    all (error page, redirect target, site redesign) and must not be treated
+    as a quiet "no racing today".
+    """
+    if soup.find("select", attrs={"name": re.compile("track", re.IGNORECASE)}):
+        return True
+    if soup.find("select", id=re.compile("track", re.IGNORECASE)):
+        return True
+    if soup.find("table", class_="igb-tbl"):
+        return True
+    return False
+
+
+def _has_race_like_text(html: str) -> bool:
+    """True if the raw HTML mentions race content ('Race 1' etc.)."""
+    return re.search(r"Race\s+\d+", html, re.IGNORECASE) is not None
+
+
 def parse_results_page(html: str, track_code: str, race_date: date) -> list[dict[str, Any]]:
     """
     Parse a GRI results page. Race data is server-rendered HTML with tables.
@@ -81,6 +118,11 @@ def parse_results_page(html: str, track_code: str, race_date: date) -> list[dict
     - A <table class='igb-tbl'> with rows for each dog
 
     Trap numbers are <img alt="Trap N"> tags.
+
+    Raises ParseStructureError when the page contains race-like content (or
+    lacks GRI page anchors entirely) but no races could be parsed — i.e. the
+    markup changed and the parser is broken, which must be loud rather than
+    look like a quiet no-racing day.
     """
     soup = BeautifulSoup(html, "html.parser")
     races: list[dict[str, Any]] = []
@@ -89,6 +131,16 @@ def parse_results_page(html: str, track_code: str, race_date: date) -> list[dict
     race_headers = soup.find_all("h4", string=re.compile(r"Race\s+\d+", re.IGNORECASE))
 
     if not race_headers:
+        if _has_race_like_text(html):
+            raise ParseStructureError(
+                f"Results page for {track_code} {race_date} contains race-like "
+                "text but no <h4> race headers were found — markup has changed"
+            )
+        if not _has_gri_page_anchor(soup):
+            raise ParseStructureError(
+                f"Page for {track_code} {race_date} lacks GRI structural "
+                "anchors (track dropdown / igb-tbl) — not a GRI results page"
+            )
         logger.debug("No race headers found for %s %s", track_code, race_date)
         return []
 
@@ -122,6 +174,13 @@ def parse_results_page(html: str, track_code: str, race_date: date) -> list[dict
             "entries": entries,
         })
 
+    if not races:
+        raise ParseStructureError(
+            f"Results page for {track_code} {race_date} has "
+            f"{len(race_headers)} race header(s) but 0 races could be parsed "
+            "— markup has changed"
+        )
+
     logger.info("Parsed %d races from %s on %s", len(races), track_code, race_date)
     return races
 
@@ -140,11 +199,14 @@ def _parse_race_header(text: str) -> dict[str, Any]:
     if grade_match:
         info["grade"] = grade_match.group(1).strip()
 
-    # Distance: last 3-4 digit number in the header (appears twice, take any)
+    # Distance: the true distance repeats at the END of the header, while
+    # sponsor/race names can inject bogus in-range numbers earlier (e.g.
+    # "The 600 Final" run over 525) — so prefer the LAST in-range match.
+    # Range extends to 1100: Irish marathons run 1010/1035 yards.
     distances = re.findall(r"\b(\d{3,4})\b", text)
-    for d in distances:
+    for d in reversed(distances):
         val = int(d)
-        if 200 <= val <= 1000:
+        if 200 <= val <= 1100:
             info["distance_m"] = val
             break
 
@@ -154,11 +216,102 @@ def _parse_race_header(text: str) -> dict[str, Any]:
     return info
 
 
+# Sanity ranges applied at parse time — out-of-range values are dropped (None)
+# rather than stored as garbage.
+WEIGHT_RANGE_KG = (20.0, 40.0)
+TIME_RANGE_S = (15.0, 70.0)
+
+# Legacy positional mapping for header-less tables, counted from the END of
+# the row because the malformed greyhound cell (missing </td>) makes leading
+# indices unreliable. Tail order per the documented columns:
+# ... Prize | Wt. | Win Time | By | Going | Est Time | SP. | Grade | Comm.
+_LEGACY_TAIL_OFFSETS = {
+    "prize": -9,
+    "weight": -8,
+    "win_time": -7,
+    "by": -6,
+    "going": -5,
+    "est_time": -4,
+    "sp": -3,
+    "grade": -2,
+    "comment": -1,
+}
+
+_REQUIRED_RESULT_COLUMNS = {"position", "trap", "greyhound", "weight", "sp", "grade", "comment"}
+
+
+def _sanity_check(value: float | None, lo: float, hi: float, label: str) -> float | None:
+    """Return value if within [lo, hi], else None with a warning."""
+    if value is None:
+        return None
+    if lo <= value <= hi:
+        return value
+    logger.warning("Discarding out-of-range %s: %s (expected %s-%s)", label, value, lo, hi)
+    return None
+
+
+def _match_result_header(text: str) -> str | None:
+    """Map a header cell's text onto a canonical column name."""
+    norm = re.sub(r"[.\s]+", " ", text).strip().lower()
+    if not norm:
+        return None
+    if norm.startswith("pos"):
+        return "position"
+    if "trap" in norm:
+        return "trap"
+    if "greyhound" in norm or norm == "dog":
+        return "greyhound"
+    if "sire" in norm:
+        return "sire"
+    if "dam" in norm:
+        return "dam"
+    if "prize" in norm:
+        return "prize"
+    if norm == "wt" or "weight" in norm:
+        return "weight"
+    if "win time" in norm or "wintime" in norm:
+        return "win_time"
+    if norm == "by":
+        return "by"
+    if "going" in norm:
+        return "going"
+    if norm.startswith("est"):
+        return "est_time"
+    if norm == "sp":
+        return "sp"
+    if "grade" in norm:
+        return "grade"
+    if norm.startswith("comm"):
+        return "comment"
+    return None
+
+
+def _build_result_column_map(header_cells) -> dict[str, int] | None:
+    """Build a column-name -> index map from a results table header row.
+
+    Returns None when the required columns can't all be located.
+    """
+    col_map: dict[str, int] = {}
+    for idx, cell in enumerate(header_cells):
+        name = _match_result_header(cell.get_text(" ", strip=True))
+        if name and name not in col_map:
+            col_map[name] = idx
+    if not _REQUIRED_RESULT_COLUMNS.issubset(col_map):
+        return None
+    return col_map
+
+
 def _parse_result_table(table) -> list[dict[str, Any]]:
     """
     Parse a GRI result table. Columns:
     Pos. | Trap | Greyhound | SIRE NAME | DAM NAME | Prize | Wt. |
     Win Time | By | Going | Est Time | SP. | Grade | Comm.
+
+    Columns are addressed by header text (name -> index map built from the
+    header row), so an inserted/reordered column cannot silently shift
+    values. If the table has a header row but the expected columns are
+    missing, ParseStructureError is raised. Only when no header row exists
+    at all do we fall back to the legacy positional mapping.
 
     Trap is an <img alt="Trap N"> tag.
     """
@@ -166,129 +319,160 @@ def _parse_result_table(table) -> list[dict[str, Any]]:
     if len(rows) < 2:
         return []
 
+    th_cells = rows[0].find_all("th")
+    header_cells = th_cells or rows[0].find_all("td")
+    col_map = _build_result_column_map(header_cells)
+    if col_map is None:
+        if th_cells:
+            raise ParseStructureError(
+                "Results table header row found but expected columns "
+                f"({', '.join(sorted(_REQUIRED_RESULT_COLUMNS))}) could not "
+                f"be matched in: {[c.get_text(strip=True) for c in th_cells]}"
+            )
+        logger.warning(
+            "Results table has no header row — falling back to legacy "
+            "positional column mapping"
+        )
+
     entries = []
     for row in rows[1:]:  # skip header
         cells = row.find_all("td")
-        if len(cells) < 10:
+        if col_map is None and len(cells) < 10:
+            continue
+        if not cells:
             continue
 
-        entry = _parse_row(cells)
+        entry = _parse_row(row, cells, col_map)
         if entry and entry.get("dog_name"):
             entries.append(entry)
 
     return entries
 
 
-def _parse_row(cells) -> dict[str, Any]:
-    """Parse a single result row from known column positions."""
-    entry: dict[str, Any] = {}
+def _parse_row(row, cells, col_map: dict[str, int] | None) -> dict[str, Any]:
+    """Parse a single result row.
 
-    # Col 0: Position (e.g. "1.", "2.")
-    pos_text = cells[0].get_text(strip=True)
-    pos_match = re.match(r"(\d+)", pos_text)
+    With a header-derived `col_map` (the normal path) columns are addressed
+    by name. NOTE: GRI emits malformed HTML — the greyhound cell is missing
+    its closing </td>, so the pedigree cells end up NESTED inside it — but
+    `find_all("td")` still returns every cell in document order, so the
+    header indices line up.
+
+    With `col_map=None` (legacy header-less fallback) the head columns are
+    Pos=0 / Trap=1 / Greyhound=2 and tail columns are counted from the end
+    of the row per `_LEGACY_TAIL_OFFSETS`.
+    """
+    entry: dict[str, Any] = {}
+    num_tds = len(cells)
+
+    def get_cell(field: str):
+        if col_map is not None:
+            idx = col_map.get(field)
+        else:
+            idx = {"position": 0, "trap": 1, "greyhound": 2}.get(field)
+            if idx is None:
+                offset = _LEGACY_TAIL_OFFSETS.get(field)
+                idx = num_tds + offset if offset is not None else None
+        if idx is None or not (0 <= idx < num_tds):
+            return None
+        return cells[idx]
+
+    def get_text(field: str) -> str:
+        cell = get_cell(field)
+        return cell.get_text(strip=True) if cell is not None else ""
+
+    # Position (e.g. "1.", "2."). Non-finishers have no numeric position.
+    pos_match = re.match(r"(\d+)", get_text("position"))
     if pos_match:
         entry["finish_position"] = int(pos_match.group(1))
 
-    # Col 1: Trap — encoded as <img alt="Trap 4">
-    trap_img = cells[1].find("img")
+    # Trap — encoded as <img alt="Trap 4">
+    trap_cell = get_cell("trap")
+    trap_img = trap_cell.find("img") if trap_cell is not None else None
     if trap_img:
-        alt = trap_img.get("alt", "")
-        trap_match = re.search(r"Trap\s*(\d+)", alt)
+        trap_match = re.search(r"Trap\s*(\d+)", trap_img.get("alt", ""))
         if trap_match:
             entry["trap"] = int(trap_match.group(1))
 
-    # Col 2: Greyhound name (contains <a> link)
-    dog_link = cells[2].find("a")
+    # Greyhound name (contains <a> link). With the malformed markup the
+    # pedigree cells are nested inside this cell, but the dog's own link
+    # comes first in document order.
+    dog_cell = get_cell("greyhound")
+    dog_link = dog_cell.find("a") if dog_cell is not None else None
     if dog_link:
         entry["dog_name"] = dog_link.get_text(strip=True).upper()
 
-    # Col 3: Sire name (in next <td> with pedigree-sire span)
-    sire_cell = cells[2].find_next("td")
-    if sire_cell:
-        sire_span = sire_cell.find(class_="viewresults-pedigree-sire")
-        if sire_span:
-            sire_link = sire_span.find("a")
-            if sire_link:
-                entry["sire_name"] = sire_link.get_text(strip=True)
+    # Sire / Dam — search within THIS ROW's subtree only. (The old code used
+    # cells[2].find_next(...), which walks the whole document forward: a row
+    # missing its pedigree span silently grabbed the NEXT dog's pedigree.)
+    # Names are uppercased to match how dog names are stored.
+    sire_span = row.find(class_="viewresults-pedigree-sire")
+    if sire_span:
+        sire_link = sire_span.find("a")
+        if sire_link:
+            sire_name = sire_link.get_text(strip=True).upper()
+            if sire_name:
+                entry["sire_name"] = sire_name
 
-    # Col 4: Dam name
-    dam_span = cells[2].find_next(class_="viewresults-pedigree-dam")
+    dam_span = row.find(class_="viewresults-pedigree-dam")
     if dam_span:
         dam_link = dam_span.find("a")
         if dam_link:
-            entry["dam_name"] = dam_link.get_text(strip=True)
-
-    # Now handle the remaining columns — but the sire/dam cells are embedded
-    # oddly in the HTML (missing closing </td> on greyhound cell).
-    # The actual separate <td> cells after the pedigree section are:
-    # Prize | Wt. | WinTime | By | Going | EstTime | SP. | Grade | Comm.
-    #
-    # Because of the broken HTML, let's find all <td> in the row and count
-    # from the end, since the last columns are consistent.
-    all_tds = cells
-    num_tds = len(all_tds)
-
-    # Work backwards from the known tail columns
-    # Last column = Comm (index -1)
-    # SP = -2, Grade = -3, EstTime = -4, Going = -5, By = -6
-    # WinTime = -7, Wt = -8, Prize = -9
-
-    def get_td_text(idx: int) -> str:
-        if idx < 0:
-            idx = num_tds + idx
-        if 0 <= idx < num_tds:
-            return all_tds[idx].get_text(strip=True)
-        return ""
+            dam_name = dam_link.get_text(strip=True).upper()
+            if dam_name:
+                entry["dam_name"] = dam_name
 
     # Comment
-    comment = get_td_text(-1)
+    comment = get_text("comment")
     if comment:
         entry["comment"] = comment
 
     # Grade at entry
-    grade = get_td_text(-2)
+    grade = get_text("grade")
     if grade:
         entry["grade_at_entry"] = grade
 
     # SP
-    sp_text = get_td_text(-3)
+    sp_text = get_text("sp")
     if sp_text:
         entry["starting_price"] = sp_text
         entry["sp_decimal"] = _parse_sp_decimal(sp_text)
 
     # Est Time (individual dog's time)
-    est_text = get_td_text(-4)
-    est_match = re.match(r"([\d.]+)", est_text)
+    est_match = re.match(r"([\d.]+)", get_text("est_time"))
     if est_match:
-        entry["finish_time"] = float(est_match.group(1))
+        entry["finish_time"] = _sanity_check(
+            float(est_match.group(1)), *TIME_RANGE_S, "finish_time (s)"
+        )
 
     # Going
-    going_text = get_td_text(-5)
+    going_text = get_text("going")
     if going_text:
         entry["going"] = going_text
 
     # By (beaten distance)
-    by_text = get_td_text(-6)
+    by_text = get_text("by")
     if by_text and by_text.strip() not in ("", "&nbsp;"):
         dist_match = re.match(r"([\d.]+)", by_text)
         if dist_match:
             entry["beaten_distance"] = float(dist_match.group(1))
 
     # Win Time
-    wt_text = get_td_text(-7)
-    wt_match = re.match(r"([\d.]+)", wt_text)
+    wt_match = re.match(r"([\d.]+)", get_text("win_time"))
     if wt_match:
-        entry["win_time"] = float(wt_match.group(1))
+        entry["win_time"] = _sanity_check(
+            float(wt_match.group(1)), *TIME_RANGE_S, "win_time (s)"
+        )
 
     # Weight
-    weight_text = get_td_text(-8)
-    weight_match = re.match(r"(\d+\.?\d*)", weight_text)
+    weight_match = re.match(r"(\d+\.?\d*)", get_text("weight"))
     if weight_match:
-        entry["weight_kg"] = float(weight_match.group(1))
+        entry["weight_kg"] = _sanity_check(
+            float(weight_match.group(1)), *WEIGHT_RANGE_KG, "weight (kg)"
+        )
 
     # Prize
-    prize_text = get_td_text(-9)
-    prize_match = re.search(r"([\d,]+\.?\d*)", prize_text)
+    prize_match = re.search(r"([\d,]+\.?\d*)", get_text("prize"))
     if prize_match:
         entry["prize_money"] = float(prize_match.group(1).replace(",", ""))
 
@@ -296,7 +480,7 @@ def _parse_row(cells) -> dict[str, Any]:
 
 
 def _parse_sp_decimal(sp_text: str) -> float | None:
-    """Convert SP text to decimal odds."""
+    """Convert SP text to decimal odds (e.g. 'evens' -> 2.0, '5/2F' -> 3.5)."""
     sp_clean = re.sub(r"[FfJj]+$", "", sp_text).strip()
     if sp_clean.lower() in ("evens", "evs"):
         return 2.0
@@ -304,7 +488,11 @@ def _parse_sp_decimal(sp_text: str) -> float | None:
     if match:
         num, den = int(match.group(1)), int(match.group(2))
         if den > 0:
-            return round(num / den + 1, 2)
+            decimal = round(num / den + 1, 2)
+            if decimal <= 1.0:
+                logger.warning("Discarding non-sensical SP %r -> %s", sp_text, decimal)
+                return None
+            return decimal
     return None
 
 
@@ -313,7 +501,12 @@ async def scrape_results(
     race_date: date,
     client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
-    """Scrape race results for a specific track and date."""
+    """Scrape race results for a specific track and date.
+
+    Raises ScrapeFetchError on network failure or non-200 response, and
+    propagates ParseStructureError from the parser — callers record these
+    as failed (track, date) pairs instead of silently logging success.
+    """
     date_str = format_date(race_date)
     url = f"{VIEW_RESULTS_URL}?track={track_code}&date={date_str}"
 
@@ -323,14 +516,13 @@ async def scrape_results(
         close_client = True
 
     try:
-        resp = await client.get(url)
+        try:
+            resp = await client.get(url)
+        except Exception as e:
+            raise ScrapeFetchError(f"Failed to fetch {url}: {e}") from e
         if resp.status_code != 200:
-            logger.warning("Got %d for %s", resp.status_code, url)
-            return []
+            raise ScrapeFetchError(f"Got {resp.status_code} for {url}")
         html = resp.text
-    except Exception as e:
-        logger.error("Failed to fetch %s: %s", url, e)
-        return []
     finally:
         if close_client:
             await client.aclose()
@@ -344,7 +536,12 @@ async def scrape_date_range(
     end_date: date,
     delay: float = 1.0,
 ) -> list[dict[str, Any]]:
-    """Scrape results for a track across a date range. Fast — no browser needed."""
+    """Scrape results for a track across a date range. Fast — no browser needed.
+
+    NOTE: ScrapeFetchError/ParseStructureError from any single day propagate
+    and abort the range — callers needing per-day fault tolerance should loop
+    over `scrape_results` themselves (as the API/scheduler jobs do).
+    """
     all_races: list[dict[str, Any]] = []
 
     async with httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30) as client:
@@ -410,16 +607,18 @@ def _parse_card_header(text: str) -> dict[str, Any]:
         info["grade"] = grade_match.group(1).strip()
 
     # Distance: stored in yards on Irish cards but convention here is the raw number.
+    # Range extends to 1100: Irish marathons run 1010/1035 yards.
     dist_match = re.search(r"\(\s*(\d{3,4})\s*(?:Yds|Yards|m)\b", text, re.IGNORECASE)
     if dist_match:
         val = int(dist_match.group(1))
-        if 200 <= val <= 1000:
+        if 200 <= val <= 1100:
             info["distance_m"] = val
     if info["distance_m"] is None:
-        # Fallback: first 3-4 digit number
-        for d in re.findall(r"\b(\d{3,4})\b", text):
+        # Fallback: prefer the LAST in-range 3-4 digit number — sponsor/race
+        # names can inject bogus numbers earlier (e.g. "The 600 Final").
+        for d in reversed(re.findall(r"\b(\d{3,4})\b", text)):
             v = int(d)
-            if 200 <= v <= 1000:
+            if 200 <= v <= 1100:
                 info["distance_m"] = v
                 break
 
@@ -491,6 +690,19 @@ def parse_card_page(html: str, track_code: str, race_date: date) -> list[dict[st
             "entries": entries,
         })
 
+    if not races:
+        if _has_race_like_text(html):
+            raise ParseStructureError(
+                f"Card page for {track_code} {race_date} contains race-like "
+                "text but 0 races could be parsed — markup has changed"
+            )
+        if not _has_gri_page_anchor(soup):
+            raise ParseStructureError(
+                f"Page for {track_code} {race_date} lacks GRI structural "
+                "anchors (track dropdown / igb-tbl) — not a GRI card page"
+            )
+        return []
+
     logger.info("Parsed %d card races from %s on %s", len(races), track_code, race_date)
     return races
 
@@ -500,7 +712,10 @@ async def scrape_card(
     race_date: date,
     client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
-    """Scrape the card summary (Tier 1) for a track + future date."""
+    """Scrape the card summary (Tier 1) for a track + future date.
+
+    Raises ScrapeFetchError on network failure or non-200 response.
+    """
     date_str = format_date(race_date)
     url = f"{VIEW_CARD_URL}?track={track_code}&date={date_str}"
 
@@ -510,14 +725,13 @@ async def scrape_card(
         close_client = True
 
     try:
-        resp = await client.get(url)
+        try:
+            resp = await client.get(url)
+        except Exception as e:
+            raise ScrapeFetchError(f"Failed to fetch {url}: {e}") from e
         if resp.status_code != 200:
-            logger.warning("Got %d for %s", resp.status_code, url)
-            return []
+            raise ScrapeFetchError(f"Got {resp.status_code} for {url}")
         html = resp.text
-    except Exception as e:
-        logger.error("Failed to fetch %s: %s", url, e)
-        return []
     finally:
         if close_client:
             await client.aclose()
@@ -600,9 +814,11 @@ def parse_card_form_page(html: str) -> dict[int, dict[str, Any]]:
                     )
                     # First link in the breeding row is the running dog name itself
                     # when it appears in the SAME row; sire/dam are the trailing two.
+                    # Uppercased for consistency with the results parser and how
+                    # dog names are stored.
                     if len(dog_links) >= 2:
-                        info["sire_name"] = dog_links[-2].get_text(strip=True).title()
-                        info["dam_name"] = dog_links[-1].get_text(strip=True).title()
+                        info["sire_name"] = dog_links[-2].get_text(strip=True).upper()
+                        info["dam_name"] = dog_links[-1].get_text(strip=True).upper()
 
             # Best time: bracketed [29.01-ECY] notation
             if info["best_time"] is None:
@@ -621,7 +837,10 @@ async def scrape_card_form(
     race_number: int,
     client: httpx.AsyncClient | None = None,
 ) -> dict[int, dict[str, Any]]:
-    """Scrape per-race form detail (Tier 2) and return enrichment by trap."""
+    """Scrape per-race form detail (Tier 2) and return enrichment by trap.
+
+    Raises ScrapeFetchError on network failure or non-200 response.
+    """
     date_str = format_date(race_date)
     url = (
         f"{VIEW_CARD_FORM_URL}?Track={track_code}&Date={date_str}"
@@ -634,14 +853,13 @@ async def scrape_card_form(
         close_client = True
 
     try:
-        resp = await client.get(url)
+        try:
+            resp = await client.get(url)
+        except Exception as e:
+            raise ScrapeFetchError(f"Failed to fetch {url}: {e}") from e
         if resp.status_code != 200:
-            logger.warning("Got %d for %s", resp.status_code, url)
-            return {}
+            raise ScrapeFetchError(f"Got {resp.status_code} for {url}")
         html = resp.text
-    except Exception as e:
-        logger.error("Failed to fetch %s: %s", url, e)
-        return {}
     finally:
         if close_client:
             await client.aclose()

@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<!--
+SYNTHETIC fixture (grireland.ie unreachable from sandbox): a structurally
+valid GRI results page — search form with track dropdown present — for a
+date with no racing. Must parse to [] WITHOUT raising.
+-->
+<html>
+<head><title>View Results - Greyhound Racing Ireland</title></head>
+<body>
+<form method="post" action="./view-results">
+  <select name="ctl00$ContentPlaceHolder1$ddlTrack" id="ContentPlaceHolder1_ddlTrack">
+    <option value="SPK" selected="selected">Shelbourne Park</option>
+    <option value="CRK">Curraheen Park</option>
+  </select>
+  <input name="ctl00$ContentPlaceHolder1$txtDate" type="text" id="ContentPlaceHolder1_txtDate" value="08-Jun-2026" />
+</form>
+
+<div class="results-content">
+  <p>There are no results matching your search criteria.</p>
+</div>
+</body>
+</html>

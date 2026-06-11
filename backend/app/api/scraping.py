@@ -307,6 +307,13 @@ async def test_scrape(track_code: str = "TRL", date_str: str = "04-Apr-2026"):
     return result
 
 
+def _format_failed_days(failed: list[str], limit: int = 20) -> str:
+    """Summarize failed (track, date) pairs for ScrapeLog.error_message."""
+    shown = ", ".join(failed[:limit])
+    extra = f" (+{len(failed) - limit} more)" if len(failed) > limit else ""
+    return f"Failed (track, date): {shown}{extra}"
+
+
 def _heartbeat(log_id: int) -> None:
     """Mark a running ScrapeLog as alive. Best-effort — swallows errors."""
     db_log = SessionLocal()
@@ -333,6 +340,7 @@ def _run_scrape_in_thread(track_code: str, date_from: date, date_to: date, log_i
         log = db.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
         total_races = 0
         total_new = 0
+        failed_days: list[str] = []
 
         async def _run():
             nonlocal total_races, total_new
@@ -347,6 +355,7 @@ def _run_scrape_in_thread(track_code: str, date_from: date, date_to: date, log_i
                             total_new += stats["races_new"]
                     except Exception as e:
                         logger.error("Error on %s %s: %s", track_code, current, e)
+                        failed_days.append(f"{track_code} {current}")
                     _heartbeat(log_id)
                     current += timedelta(days=1)
                     if current <= date_to:
@@ -357,7 +366,11 @@ def _run_scrape_in_thread(track_code: str, date_from: date, date_to: date, log_i
             _asyncio.set_event_loop(loop)
             loop.run_until_complete(_run())
             loop.close()
-            log.status = "success"
+            if failed_days:
+                log.status = "partial"
+                log.error_message = _format_failed_days(failed_days)
+            else:
+                log.status = "success"
             log.records_scraped = total_races
             log.records_new = total_new
         except Exception as e:
@@ -436,6 +449,7 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
         total_races = 0
         total_new = 0
         failed_tracks = []
+        failed_days: list[str] = []
 
         for tc in track_codes:
             track_races = 0
@@ -458,6 +472,7 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
                                     track_new += stats["races_new"]
                             except Exception as e:
                                 logger.error("Error %s %s: %s", tc, current, e)
+                                failed_days.append(f"{tc} {current}")
 
                             # Commit + update log every 50 days
                             if day_count % 50 == 0:
@@ -498,16 +513,24 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
         try:
             log_final = db_final.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
             if log_final:
-                log_final.status = "success" if not failed_tracks else "partial"
+                log_final.status = "success" if not (failed_tracks or failed_days) else "partial"
                 log_final.records_scraped = total_races
                 log_final.records_new = total_new
                 log_final.completed_at = datetime.utcnow()
+                error_parts = []
                 if failed_tracks:
-                    log_final.error_message = f"Failed tracks: {', '.join(failed_tracks)}"
+                    error_parts.append(f"Failed tracks: {', '.join(failed_tracks)}")
+                if failed_days:
+                    error_parts.append(_format_failed_days(failed_days))
+                if error_parts:
+                    log_final.error_message = "; ".join(error_parts)
                 db_final.commit()
         finally:
             db_final.close()
-        logger.info("Backfill complete: %d races, %d new. Failed: %s", total_races, total_new, failed_tracks or "none")
+        logger.info(
+            "Backfill complete: %d races, %d new. Failed tracks: %s. Failed days: %d",
+            total_races, total_new, failed_tracks or "none", len(failed_days),
+        )
 
     def _update_log(scraped: int, new: int):
         """Update the scrape log with current progress and heartbeat."""
@@ -710,7 +733,10 @@ def _run_scrape_date_in_thread(
                         f"tracks_with_races={','.join(tracks_with_races) or 'none'}",
                     ]
                     if tracks_failed:
-                        parts.append(f"failed={','.join(tracks_failed)}")
+                        parts.append(
+                            "failed (track, date): "
+                            + ", ".join(f"{tc} {race_date_val}" for tc in tracks_failed)
+                        )
                     log_final.error_message = "; ".join(parts) if tracks_failed else None
                     db_final.commit()
             finally:

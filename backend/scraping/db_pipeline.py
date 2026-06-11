@@ -91,8 +91,12 @@ def upsert_race(
     race_data: dict[str, Any],
     scrape_log_id: int | None = None,
     scraped_at: datetime | None = None,
-) -> Race:
-    """Upsert a race record. Returns existing or new Race."""
+) -> Race | None:
+    """Upsert a race record. Returns existing or new Race.
+
+    Returns None (and does not create a race) when a NEW race has no parsed
+    distance — storing distance_m=0 would poison distance-based features.
+    """
     race_date_val = race_data["race_date"]
     race_number = race_data.get("race_number")
     stamp = scraped_at or datetime.utcnow()
@@ -127,12 +131,20 @@ def upsert_race(
             existing.last_scrape_log_id = scrape_log_id
         return existing
 
+    distance_val = race_data.get("distance_m")
+    if not distance_val:
+        logger.warning(
+            "Skipping race with no parsed distance: track=%s date=%s race=%s",
+            track.code, race_date_val, race_number,
+        )
+        return None
+
     race = Race(
         track_id=track.id,
         race_date=race_date_val,
         race_number=race_number,
         race_time=race_data.get("race_time"),
-        distance_m=race_data.get("distance_m") or 0,
+        distance_m=distance_val,
         grade=race_data.get("grade"),
         race_type=race_data.get("race_type", "flat"),
         going=race_data.get("going"),
@@ -282,6 +294,10 @@ def upsert_race_results(
         )
 
         race = upsert_race(db, track, race_data, scrape_log_id=scrape_log_id, scraped_at=stamp)
+        if race is None:
+            # Race skipped (e.g. missing distance) — don't count it or
+            # attempt to write its entries.
+            continue
 
         if existing_race:
             stats["races_updated"] += 1

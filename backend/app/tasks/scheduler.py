@@ -50,6 +50,7 @@ def _scrape_all_tracks_today():
 
             total_races = 0
             total_new = 0
+            failed: list[str] = []
 
             for track in tracks:
                 try:
@@ -61,8 +62,13 @@ def _scrape_all_tracks_today():
                     await asyncio.sleep(2.0)
                 except Exception as e:
                     logger.error("Error scraping %s: %s", track.code, e)
+                    failed.append(f"{track.code} {today}")
 
-            log.status = "success"
+            if failed:
+                log.status = "partial"
+                log.error_message = f"Failed (track, date): {', '.join(failed)}"
+            else:
+                log.status = "success"
             log.records_scraped = total_races
             log.records_new = total_new
             log.completed_at = datetime.utcnow()
@@ -101,6 +107,7 @@ def _scrape_yesterday_results():
             db.commit()
 
             total_races = 0
+            failed: list[str] = []
             for track in tracks:
                 try:
                     races = await scrape_results(track.code, yesterday)
@@ -110,8 +117,13 @@ def _scrape_yesterday_results():
                     await asyncio.sleep(2.0)
                 except Exception as e:
                     logger.error("Error scraping %s: %s", track.code, e)
+                    failed.append(f"{track.code} {yesterday}")
 
-            log.status = "success"
+            if failed:
+                log.status = "partial"
+                log.error_message = f"Failed (track, date): {', '.join(failed)}"
+            else:
+                log.status = "success"
             log.records_scraped = total_races
             log.completed_at = datetime.utcnow()
             db.commit()

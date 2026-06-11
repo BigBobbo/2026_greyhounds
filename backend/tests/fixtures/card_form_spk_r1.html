@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<!--
+SYNTHETIC fixture (grireland.ie unreachable from sandbox): a per-race
+form-detail page matching parse_card_form_page's expectations — each dog
+block anchored by an <img alt="Trap N"> row followed by sibling rows
+carrying owner (owners-page link), trainer (trainers-page link), the dog's
+best time in [SS.ss-TRK] notation, and a breeding row (whelped ".Mon-YY"
+date + sire/dam greyhound-details links, deliberately mixed-case to verify
+uppercasing).
+-->
+<html>
+<head><title>View Race Form - Greyhound Racing Ireland</title></head>
+<body>
+<form method="post" action="./view-race-form">
+  <select name="ctl00$ContentPlaceHolder1$ddlTrack" id="ContentPlaceHolder1_ddlTrack">
+    <option value="SPK" selected="selected">Shelbourne Park</option>
+  </select>
+</form>
+
+<table class="igb-tbl">
+  <tr>
+    <td rowspan="8"><img src="/img/trap1.gif" alt="Trap 1" /></td>
+    <td colspan="4">&nbsp;</td>
+  </tr>
+  <tr>
+    <td colspan="4">Owner: <a href="/results/greyhound-search/owners-page/?oid=11">Mr John Murphy</a>
+        Trainer: <a href="/results/trainers-page/?tid=21">Pat Guiry</a></td>
+  </tr>
+  <tr>
+    <td colspan="4"><a href="/results/greyhound-search/greyhound-details/?gid=401">CLONBRIEN ROCKET</a> [28.55-SPK]</td>
+  </tr>
+  <tr>
+    <td colspan="4">bd d .Mar-23
+        <a href="/results/greyhound-search/greyhound-details/?gid=951">Droopys Sydney</a> /
+        <a href="/results/greyhound-search/greyhound-details/?gid=952">Clonbrien Treacle</a></td>
+  </tr>
+
+  <tr>
+    <td rowspan="8"><img src="/img/trap2.gif" alt="Trap 2" /></td>
+    <td colspan="4">&nbsp;</td>
+  </tr>
+  <tr>
+    <td colspan="4">Owner: <a href="/results/greyhound-search/owners-page/?oid=12">Tyrur Syndicate</a>
+        Trainer: <a href="/results/trainers-page/?tid=22">P J Fahy</a></td>
+  </tr>
+  <tr>
+    <td colspan="4"><a href="/results/greyhound-search/greyhound-details/?gid=402">TYRUR BLUEBELL</a> [28.91-SPK]</td>
+  </tr>
+  <tr>
+    <td colspan="4">be b .Jan-24
+        <a href="/results/greyhound-search/greyhound-details/?gid=953">Ballymac Best</a> /
+        <a href="/results/greyhound-search/greyhound-details/?gid=954">Tyrur Peggy Sue</a></td>
+  </tr>
+</table>
+</body>
+</html>

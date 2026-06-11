@@ -343,13 +343,19 @@ def delete_bet(bet_id: int, db: Session = Depends(get_db)):
 def list_bets(
     status: str | None = None,
     limit: int = Query(default=100, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """List all bet records, optionally filtered by status."""
+    """List bet records, newest first, optionally filtered by status."""
     query = db.query(BetRecord)
     if status:
         query = query.filter(BetRecord.outcome == status)
-    bets = query.order_by(BetRecord.created_at.desc()).limit(limit).all()
+    bets = (
+        query.order_by(BetRecord.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
     import json as _json
     out: list[dict[str, Any]] = []
@@ -407,28 +413,48 @@ def get_summary(db: Session = Depends(get_db)):
     total_profit = db.query(func.sum(BetRecord.profit)).filter(BetRecord.outcome != "pending").scalar() or 0
     total_staked = db.query(func.sum(BetRecord.stake)).filter(BetRecord.outcome != "pending").scalar() or 0
 
-    # Cumulative P&L over time
-    settled = (
-        db.query(BetRecord)
+    # Cumulative P&L chart: window to the most recent N settled bets so the
+    # payload doesn't grow without bound. The running total starts from the
+    # profit sum of everything BEFORE the window so the curve stays truthful.
+    CHART_WINDOW = 500
+    window_rows = (
+        db.query(
+            BetRecord.id, BetRecord.profit, BetRecord.race_date,
+            BetRecord.dog_name, BetRecord.outcome,
+        )
         .filter(BetRecord.outcome != "pending")
-        .order_by(BetRecord.settled_at)
+        .order_by(BetRecord.settled_at.desc(), BetRecord.id.desc())
+        .limit(CHART_WINDOW)
         .all()
     )
+    window_rows.reverse()  # chronological
+    pre_window_profit = 0.0
+    if settled_bets > len(window_rows) and window_rows:
+        first_ids = {r.id for r in window_rows}
+        pre_window_profit = float(
+            db.query(func.sum(BetRecord.profit))
+            .filter(BetRecord.outcome != "pending", BetRecord.id.notin_(first_ids))
+            .scalar()
+            or 0
+        )
+
     cumulative_pnl = []
-    running = 0.0
-    for b in settled:
+    running = pre_window_profit
+    offset = settled_bets - len(window_rows)
+    for b in window_rows:
         running += (b.profit or 0)
         cumulative_pnl.append({
-            "bet": len(cumulative_pnl) + 1,
+            "bet": offset + len(cumulative_pnl) + 1,
             "pnl": round(running, 2),
             "date": b.race_date,
             "dog": b.dog_name,
         })
 
-    # Current streak
+    # Current streak (windowed rows are the most recent, so this is exact
+    # unless a streak exceeds the window — acceptable)
     streak_type = None
     streak_count = 0
-    for b in reversed(settled):
+    for b in reversed(window_rows):
         if streak_type is None:
             streak_type = b.outcome
             streak_count = 1

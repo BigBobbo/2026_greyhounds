@@ -1169,3 +1169,27 @@ def add_race_relative_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataF
     )
 
     return X
+
+
+def dataset_fingerprint(dataset: dict) -> str:
+    """Stable digest of an assembled dataset for reproducibility checks.
+
+    Experiments default to training on unversioned feature rows that
+    re-materialization mutates in place, so 'the same experiment' can
+    silently see different data later. The fingerprint (feature names +
+    per-split shapes + content hashes) is persisted on the experiment;
+    rebuilding the dataset and comparing fingerprints detects drift
+    without snapshotting the full matrix.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(",".join(dataset.get("feature_names", [])).encode())
+    for key in ("X_train", "X_val", "X_test"):
+        X = dataset.get(key)
+        if X is None or len(X) == 0:
+            h.update(f"{key}:empty".encode())
+            continue
+        content = int(pd.util.hash_pandas_object(X.fillna(-1.0), index=True).sum())
+        h.update(f"{key}:{X.shape}:{content}".encode())
+    return h.hexdigest()[:16]

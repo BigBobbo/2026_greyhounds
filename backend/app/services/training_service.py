@@ -245,6 +245,11 @@ def run_training(db: Session, experiment_id: int) -> None:
         split_config = dict(experiment.split_config or {})
         split_config["train_cutoff_date"] = dataset["stats"].get("train_cutoff_date")
         split_config["test_cutoff_date"] = dataset["stats"].get("test_cutoff_date")
+        # Reproducibility: experiments default to unversioned (mutable)
+        # feature rows, so fingerprint what was actually trained on —
+        # rebuilding later and comparing detects silent drift (audit C13).
+        from ml.dataset_builder import dataset_fingerprint
+        split_config["dataset_fingerprint"] = dataset_fingerprint(dataset)
         experiment.split_config = split_config
         db.commit()
 
@@ -578,6 +583,11 @@ def run_optuna_optimization(
         split_config = dict(experiment.split_config or {})
         split_config["train_cutoff_date"] = dataset["stats"].get("train_cutoff_date")
         split_config["test_cutoff_date"] = dataset["stats"].get("test_cutoff_date")
+        # Reproducibility: experiments default to unversioned (mutable)
+        # feature rows, so fingerprint what was actually trained on —
+        # rebuilding later and comparing detects silent drift (audit C13).
+        from ml.dataset_builder import dataset_fingerprint
+        split_config["dataset_fingerprint"] = dataset_fingerprint(dataset)
         experiment.split_config = split_config
         db.commit()
 

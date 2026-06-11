@@ -94,14 +94,23 @@ def _serialize_run(run: ScheduledPredictionRun) -> dict[str, Any]:
     }
 
 
-def _serialize_schedule(db: Session, sched: ModelSchedule) -> dict[str, Any]:
-    exp = db.query(Experiment).filter(Experiment.id == sched.experiment_id).first()
-    last_run = (
-        db.query(ScheduledPredictionRun)
-        .filter(ScheduledPredictionRun.model_schedule_id == sched.id)
-        .order_by(desc(ScheduledPredictionRun.started_at))
-        .first()
-    )
+def _serialize_schedule(
+    db: Session,
+    sched: ModelSchedule,
+    exp: Experiment | None = None,
+    last_run: "ScheduledPredictionRun | None | bool" = False,
+) -> dict[str, Any]:
+    # exp/last_run may be supplied by batch callers (list endpoint) to avoid
+    # two extra queries per row; single-row callers omit them.
+    if exp is None:
+        exp = db.query(Experiment).filter(Experiment.id == sched.experiment_id).first()
+    if last_run is False:
+        last_run = (
+            db.query(ScheduledPredictionRun)
+            .filter(ScheduledPredictionRun.model_schedule_id == sched.id)
+            .order_by(desc(ScheduledPredictionRun.started_at))
+            .first()
+        )
     return {
         "id": sched.id,
         "experiment_id": sched.experiment_id,
@@ -132,7 +141,34 @@ def _clear_other_main(db: Session, keep_id: int | None) -> None:
 @router.get("", response_model=list[ScheduleResponse])
 def list_schedules(db: Session = Depends(get_db)):
     schedules = db.query(ModelSchedule).order_by(ModelSchedule.id).all()
-    return [_serialize_schedule(db, s) for s in schedules]
+    if not schedules:
+        return []
+
+    # Batch the lookups the per-row serializer would otherwise repeat
+    # (two queries per schedule -> three queries total).
+    exp_ids = {s.experiment_id for s in schedules}
+    experiments = {
+        e.id: e
+        for e in db.query(Experiment).filter(Experiment.id.in_(exp_ids)).all()
+    }
+    sched_ids = [s.id for s in schedules]
+    latest_runs: dict[int, ScheduledPredictionRun] = {}
+    for run in (
+        db.query(ScheduledPredictionRun)
+        .filter(ScheduledPredictionRun.model_schedule_id.in_(sched_ids))
+        .order_by(ScheduledPredictionRun.started_at)
+        .all()
+    ):
+        latest_runs[run.model_schedule_id] = run  # later rows overwrite earlier
+
+    return [
+        _serialize_schedule(
+            db, s,
+            exp=experiments.get(s.experiment_id),
+            last_run=latest_runs.get(s.id),
+        )
+        for s in schedules
+    ]
 
 
 @router.post("", response_model=ScheduleResponse, status_code=201)

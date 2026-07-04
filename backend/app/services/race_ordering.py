@@ -252,7 +252,7 @@ def compute_ordering(
 
     n = len(win_arr)
     win_dict = {
-        eid: float(p) for eid, p in zip(entry_id_list, _normalise_strengths(win_arr))
+        eid: float(p) for eid, p in zip(entry_id_list, _normalise_strengths(win_arr), strict=False)
     }
 
     if n == 0:

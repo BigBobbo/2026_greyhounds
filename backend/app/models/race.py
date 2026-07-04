@@ -12,6 +12,8 @@ class Race(Base):
     race_date = Column(Date, nullable=False, index=True)
     race_time = Column(Time)
     race_number = Column(Integer)
+    # NOTE: despite the column name, values are YARDS as printed on Irish
+    # (GRI) race cards/results (e.g. 525, 575, 1010) — not metres.
     distance_m = Column(Integer, nullable=False)
     grade = Column(String)  # "A1", "A2", "S1", "OR", etc.
     race_type = Column(String, default="flat")  # "flat", "hurdle"

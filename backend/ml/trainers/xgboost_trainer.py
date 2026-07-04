@@ -1,9 +1,8 @@
-"""XGBoost trainer implementation with isotonic calibration."""
+"""XGBoost trainer implementation with Platt-scaling calibration."""
 
 from typing import Any
 
 import numpy as np
-import pandas as pd
 from sklearn.linear_model import LogisticRegression as _PlattLR
 from xgboost import XGBClassifier, XGBRegressor
 
@@ -25,10 +24,11 @@ class XGBoostTrainer(BaseTrainer):
         }
         model_params.setdefault("verbosity", 0)
         model_params.setdefault("random_state", 42)
-        if target_type == "classification":
-            # Handle class imbalance: win is ~16.7% in 6-dog races
-            # scale_pos_weight = neg_count / pos_count ≈ 5.0
-            model_params.setdefault("scale_pos_weight", 5.0)
+        # No class re-weighting by default: a ~16.7% positive rate needs
+        # none for GBMs, and scale_pos_weight inflates the raw probability
+        # scale ~5x pre-calibration — Platt then corrects the mean but
+        # compresses resolution. Still settable as an explicit
+        # hyperparameter for experiments that want it.
         self._model_params = model_params
         self.model = None
 
@@ -41,6 +41,14 @@ class XGBoostTrainer(BaseTrainer):
             # XGBoost accepts either a tuple or a string like "(0,1,-1,...)"
             model_params["monotone_constraints"] = tuple(constraints)
 
+        # Early stopping on val with a high tree ceiling: the optimal
+        # n_estimators is set per-config by the data instead of being a
+        # searched hyperparameter. NOTE the val-usage boundary: val is used
+        # for stopping AND (in the calibration-half scheme) calibration —
+        # never for Optuna objectives, which score the objective half.
+        model_params.setdefault("n_estimators", 2000)
+        model_params.setdefault("early_stopping_rounds", 50)
+
         if self.target_type == "classification":
             self.model = XGBClassifier(**model_params)
         else:
@@ -51,6 +59,7 @@ class XGBoostTrainer(BaseTrainer):
             eval_set=[(X_val, y_val)],
             verbose=False,
         )
+        self.best_iteration = getattr(self.model, "best_iteration", None)
 
         from ml.evaluation import compute_metrics
         if self.target_type == "classification":
@@ -88,5 +97,5 @@ class XGBoostTrainer(BaseTrainer):
 
     def get_feature_importance(self) -> dict[str, float]:
         if hasattr(self.model, "feature_importances_") and hasattr(self.model, "feature_names_in_"):
-            return dict(zip(self.model.feature_names_in_, self.model.feature_importances_.tolist()))
+            return dict(zip(self.model.feature_names_in_, self.model.feature_importances_.tolist(), strict=False))
         return {}

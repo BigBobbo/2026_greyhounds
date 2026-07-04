@@ -6,16 +6,13 @@ sees the full competitive field at once.
 
 At prediction time the raw ranking scores are converted to win
 probabilities via softmax over the race, then calibrated using
-isotonic regression fitted on the validation set.
+Platt scaling fitted on the validation set.
 """
 
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import lightgbm as lgb
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
 from ml.monotonic_constraints import build_monotone_constraints
@@ -48,7 +45,7 @@ class LambdaRankTrainer(BaseTrainer):
         }
         self.model: lgb.LGBMRanker | None = None
         self._feature_names: list[str] = []
-        self.calibrator: IsotonicRegression | None = None
+        self.calibrator: LogisticRegression | None = None
 
     def train(self, X_train, y_train, X_val, y_val,
               group_train=None, group_val=None) -> TrainResult:
@@ -191,7 +188,7 @@ class LambdaRankTrainer(BaseTrainer):
                          calibrate: bool = True) -> np.ndarray:
         """Convert raw ranking scores to win probabilities via softmax per race.
 
-        If a calibrator is fitted (isotonic regression), applies calibration
+        If a calibrator is fitted (Platt scaling), applies calibration
         to map softmax outputs to true win rates, then re-normalizes within
         each race so probabilities still sum to 1.0.
 
@@ -229,16 +226,29 @@ class LambdaRankTrainer(BaseTrainer):
             log_odds = np.log(np.clip(proba, 1e-6, 1 - 1e-6) /
                               (1 - np.clip(proba, 1e-6, 1 - 1e-6)))
             proba = self.calibrator.predict_proba(log_odds.reshape(-1, 1))[:, 1]
-            # Note: we intentionally do NOT re-normalize after Platt scaling.
-            # Re-normalizing can change which dog is the top pick, contradicting
-            # the ranking model's ordering and destroying edge signals.
+            # Step 3: re-normalize per race so probabilities sum to 1 — the
+            # convention every other trainer's serving path follows. Division
+            # by the per-race sum is monotonic, so it cannot change which dog
+            # is the top pick or reorder the field (the previous comment here
+            # claimed otherwise and left ranking-model probabilities summing
+            # to anything but 1, diverging from the pointwise models and the
+            # betting backtest).
+            idx = 0
+            for g_size in group_sizes:
+                if g_size == 0:
+                    continue
+                g = proba[idx:idx + g_size]
+                total = g.sum()
+                if total > 0:
+                    proba[idx:idx + g_size] = g / total
+                idx += g_size
 
         return proba
 
     def get_feature_importance(self) -> dict[str, float]:
         if self.model is not None and hasattr(self.model, "feature_importances_"):
             names = self._feature_names or [f"f{i}" for i in range(len(self.model.feature_importances_))]
-            return dict(zip(names, self.model.feature_importances_.tolist()))
+            return dict(zip(names, self.model.feature_importances_.tolist(), strict=False))
         return {}
 
     @staticmethod

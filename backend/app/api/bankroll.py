@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -124,6 +124,9 @@ def reset_bankroll(db: Session = Depends(get_db)):
 @router.post("/bets")
 def place_bet(bet: PlaceBetRequest, db: Session = Depends(get_db)):
     """Record a new bet."""
+    if bet.stake <= 0:
+        raise HTTPException(status_code=422, detail="stake must be > 0")
+
     config = db.query(BankrollConfig).first()
     if not config:
         config = BankrollConfig(initial_bankroll=100.0, current_bankroll=100.0)
@@ -207,11 +210,30 @@ def place_bet(bet: PlaceBetRequest, db: Session = Depends(get_db)):
     )
     db.add(record)
 
-    # Deduct stake from bankroll
-    config.current_bankroll -= bet.stake
+    # Deduct the stake atomically: a single guarded UPDATE instead of
+    # read-modify-write, so concurrent placements can neither lose a
+    # decrement nor drive the bankroll negative.
+    result = db.execute(
+        update(BankrollConfig)
+        .where(
+            BankrollConfig.id == config.id,
+            BankrollConfig.current_bankroll >= bet.stake,
+        )
+        .values(current_bankroll=BankrollConfig.current_bankroll - bet.stake)
+    )
+    if result.rowcount == 0:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"stake {bet.stake} exceeds current bankroll "
+                f"{config.current_bankroll}"
+            ),
+        )
 
     db.commit()
     db.refresh(record)
+    db.refresh(config)
     return {"id": record.id, "status": "placed", "bankroll": config.current_bankroll}
 
 
@@ -254,7 +276,15 @@ def settle_bet(bet_id: int, settle: SettleBetRequest, db: Session = Depends(get_
         if len(settle.actual_finishing_order) >= n and len(legs) == n:
             won = list(settle.actual_finishing_order[:n]) == list(legs)
 
-    if won and record.odds_decimal:
+    if won and not record.odds_decimal:
+        # Silently settling a winner as a loss corrupted P&L; the caller
+        # must supply odds (via PATCH or re-placing) before settling a win.
+        raise HTTPException(
+            status_code=422,
+            detail="cannot settle a winning bet without odds_decimal on the record",
+        )
+
+    if won:
         profit = record.stake * (record.odds_decimal - 1)
         record.outcome = "won"
     else:
@@ -264,10 +294,20 @@ def settle_bet(bet_id: int, settle: SettleBetRequest, db: Session = Depends(get_
     record.profit = round(profit, 2)
     record.settled_at = datetime.utcnow()
 
-    # Update bankroll: add back stake + profit if won, nothing if lost (stake already deducted)
+    # Credit winnings atomically (stake was already deducted at placement)
     if config:
         if won:
-            config.current_bankroll += record.stake + profit  # return stake + winnings
+            db.execute(
+                update(BankrollConfig)
+                .where(BankrollConfig.id == config.id)
+                .values(
+                    current_bankroll=BankrollConfig.current_bankroll
+                    + record.stake
+                    + profit
+                )
+            )
+        db.flush()
+        db.refresh(config)
         record.bankroll_after = config.current_bankroll
 
     db.commit()
@@ -288,7 +328,11 @@ def delete_bet(bet_id: int, db: Session = Depends(get_db)):
 
     config = db.query(BankrollConfig).first()
     if record.outcome == "pending" and config:
-        config.current_bankroll += record.stake
+        db.execute(
+            update(BankrollConfig)
+            .where(BankrollConfig.id == config.id)
+            .values(current_bankroll=BankrollConfig.current_bankroll + record.stake)
+        )
 
     db.delete(record)
     db.commit()
@@ -299,13 +343,19 @@ def delete_bet(bet_id: int, db: Session = Depends(get_db)):
 def list_bets(
     status: str | None = None,
     limit: int = Query(default=100, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """List all bet records, optionally filtered by status."""
+    """List bet records, newest first, optionally filtered by status."""
     query = db.query(BetRecord)
     if status:
         query = query.filter(BetRecord.outcome == status)
-    bets = query.order_by(BetRecord.created_at.desc()).limit(limit).all()
+    bets = (
+        query.order_by(BetRecord.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
     import json as _json
     out: list[dict[str, Any]] = []
@@ -363,28 +413,48 @@ def get_summary(db: Session = Depends(get_db)):
     total_profit = db.query(func.sum(BetRecord.profit)).filter(BetRecord.outcome != "pending").scalar() or 0
     total_staked = db.query(func.sum(BetRecord.stake)).filter(BetRecord.outcome != "pending").scalar() or 0
 
-    # Cumulative P&L over time
-    settled = (
-        db.query(BetRecord)
+    # Cumulative P&L chart: window to the most recent N settled bets so the
+    # payload doesn't grow without bound. The running total starts from the
+    # profit sum of everything BEFORE the window so the curve stays truthful.
+    CHART_WINDOW = 500
+    window_rows = (
+        db.query(
+            BetRecord.id, BetRecord.profit, BetRecord.race_date,
+            BetRecord.dog_name, BetRecord.outcome,
+        )
         .filter(BetRecord.outcome != "pending")
-        .order_by(BetRecord.settled_at)
+        .order_by(BetRecord.settled_at.desc(), BetRecord.id.desc())
+        .limit(CHART_WINDOW)
         .all()
     )
+    window_rows.reverse()  # chronological
+    pre_window_profit = 0.0
+    if settled_bets > len(window_rows) and window_rows:
+        first_ids = {r.id for r in window_rows}
+        pre_window_profit = float(
+            db.query(func.sum(BetRecord.profit))
+            .filter(BetRecord.outcome != "pending", BetRecord.id.notin_(first_ids))
+            .scalar()
+            or 0
+        )
+
     cumulative_pnl = []
-    running = 0.0
-    for b in settled:
+    running = pre_window_profit
+    offset = settled_bets - len(window_rows)
+    for b in window_rows:
         running += (b.profit or 0)
         cumulative_pnl.append({
-            "bet": len(cumulative_pnl) + 1,
+            "bet": offset + len(cumulative_pnl) + 1,
             "pnl": round(running, 2),
             "date": b.race_date,
             "dog": b.dog_name,
         })
 
-    # Current streak
+    # Current streak (windowed rows are the most recent, so this is exact
+    # unless a streak exceeds the window — acceptable)
     streak_type = None
     streak_count = 0
-    for b in reversed(settled):
+    for b in reversed(window_rows):
         if streak_type is None:
             streak_type = b.outcome
             streak_count = 1

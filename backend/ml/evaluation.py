@@ -25,6 +25,27 @@ from sklearn.metrics import (
 logger = logging.getLogger(__name__)
 
 
+def normalize_probs_per_race(y_proba: np.ndarray, race_ids: np.ndarray) -> np.ndarray:
+    """Normalize win probabilities to sum to 1 within each race.
+
+    This is the convention the serving path uses for every model type, so
+    any evaluation of betting strategies must be computed on the same
+    numbers — otherwise the backtest measures a quantity that is never bet
+    with (e.g. a race whose calibrated probs sum to 0.85 gets every
+    probability inflated ~18% at serve time, manufacturing edge the
+    backtest never validated). Division by the per-race sum is monotonic,
+    so rankings/top picks are unchanged.
+    """
+    proba = np.asarray(y_proba, dtype=float).copy()
+    ids = np.asarray(race_ids)
+    for rid in np.unique(ids):
+        mask = ids == rid
+        total = proba[mask].sum()
+        if total > 0:
+            proba[mask] = proba[mask] / total
+    return proba
+
+
 def compute_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -123,12 +144,24 @@ def compute_betting_metrics(
     y_proba: np.ndarray,
     sp_decimal: np.ndarray,
     race_ids: np.ndarray,
+    kelly_fraction: float = 0.25,
+    kelly_min_edge: float = 0.05,
+    max_stake_pct: float = 0.05,
+    commission: float = 0.02,
 ) -> dict[str, Any]:
     """
     Compute betting P&L metrics.
 
     Simulates betting $1 on the model's top pick in each race.
     Also evaluates value betting (bet when model prob > implied prob).
+
+    The Kelly simulation mirrors the served staking rule exactly
+    (_compute_kelly_stake's defaults: quarter Kelly, 5% min edge, 5% cap,
+    one bet per race on the top pick) and COMPOUNDS the bankroll in
+    chronological order — a fixed-bankroll "Kelly" sim measures nothing
+    Kelly-like. Winning returns are shaved by `commission` to approximate
+    exchange commission / SP spread; passing 0 reproduces frictionless
+    settlement. Assumptions are echoed in the result.
 
     Returns:
         {
@@ -147,6 +180,11 @@ def compute_betting_metrics(
         }
     """
     import pandas as pd
+
+    # Match the serving convention BEFORE any filtering: normalize over the
+    # full field of each race, then drop no-SP rows (serving normalizes over
+    # all runners regardless of SP availability).
+    y_proba = normalize_probs_per_race(y_proba, race_ids)
 
     df = pd.DataFrame({
         "won": y_true.astype(bool),
@@ -202,24 +240,24 @@ def compute_betting_metrics(
     value_pnl = float(value_profit.sum()) if len(value_profit) > 0 else 0
     value_winners = int(value_bets["won"].sum())
 
-    # --- Strategy 3: Kelly criterion staking (fractional Kelly) ---
-    # Use a hybrid approach: bet on the model's top pick per race,
-    # but size the bet using Kelly based on the probability edge.
-    # We use a lower min-edge threshold than value betting since we're
-    # already filtering to the model's top pick (higher conviction).
-    kelly_fraction = 0.25  # Quarter Kelly for safety
-    kelly_min_edge = 0.02  # 2% min edge (lower than value betting's 5%)
-    bankroll = 100.0
+    # --- Strategy 3: Kelly criterion staking (mirrors the served rule) ---
+    # One bet per race on the model's top pick, quarter-Kelly sized with the
+    # same min-edge and stake cap _compute_kelly_stake serves, COMPOUNDING
+    # the bankroll race by race in chronological order (race_ids arrive
+    # date-sorted from the dataset builder; sort=False preserves that).
+    # Edge is measured against raw 1/SP — same convention as serving —
+    # which keeps the overround as a conservative hurdle.
+    starting_bankroll = 100.0
+    bankroll = starting_bankroll
     kelly_results = []
-    for race_id, group in df.groupby("race_id"):
-        if len(group) == 0:
+    for race_id, group in df.groupby("race_id", sort=False):
+        if len(group) == 0 or bankroll <= 0:
             continue
         top = group.loc[group["prob"].idxmax()]
         b = top["sp"] - 1
         if b <= 0:
             continue
 
-        # Check if there's a minimum probability edge
         edge = top["prob"] - top["implied_prob"]
         if edge < kelly_min_edge:
             continue
@@ -227,15 +265,20 @@ def compute_betting_metrics(
         f_star = (b * top["prob"] - (1 - top["prob"])) / b
         if f_star <= 0:
             continue
-        stake_pct = min(f_star * kelly_fraction, 0.05)  # Cap at 5% of bankroll
+        stake_pct = min(f_star * kelly_fraction, max_stake_pct)
         stake = bankroll * stake_pct
-        profit = stake * (top["sp"] - 1) if top["won"] else -stake
+        if top["won"]:
+            profit = stake * (top["sp"] - 1) * (1.0 - commission)
+        else:
+            profit = -stake
+        bankroll += profit
         kelly_results.append({
             "race_id": int(race_id),
             "won": bool(top["won"]),
             "stake": round(float(stake), 2),
             "profit": round(float(profit), 2),
             "edge": round(float(edge), 4),
+            "bankroll": round(float(bankroll), 2),
         })
 
     kelly_total_staked = sum(r["stake"] for r in kelly_results) if kelly_results else 0
@@ -277,6 +320,16 @@ def compute_betting_metrics(
         "kelly_roi": round(kelly_pnl / max(kelly_total_staked, 1) * 100, 2),
         "kelly_races": len(kelly_results),
         "kelly_total_staked": round(kelly_total_staked, 2),
+        "kelly_final_bankroll": round(bankroll, 2),
+        "kelly_growth_pct": round((bankroll / starting_bankroll - 1) * 100, 2),
+        "assumptions": {
+            "kelly_fraction": kelly_fraction,
+            "kelly_min_edge": kelly_min_edge,
+            "max_stake_pct": max_stake_pct,
+            "commission": commission,
+            "staking": "compounding, one bet per race (top pick)",
+            "settlement": "SP minus commission on winnings",
+        },
         "kelly_pnl_by_race": kelly_cumulative,
         "favourite_pnl": round(fav_pnl, 2),
         "favourite_roi": round(fav_pnl / max(len(fav_profits), 1) * 100, 2),
@@ -290,7 +343,8 @@ def compute_shap_summary(model: Any, X: np.ndarray, feature_names: list[str], ma
         import shap
 
         if X.shape[0] > max_samples:
-            indices = np.random.choice(X.shape[0], max_samples, replace=False)
+            rng = np.random.default_rng(42)
+            indices = rng.choice(X.shape[0], max_samples, replace=False)
             X_sample = X.iloc[indices] if hasattr(X, "iloc") else X[indices]
         else:
             X_sample = X
@@ -307,7 +361,7 @@ def compute_shap_summary(model: Any, X: np.ndarray, feature_names: list[str], ma
             shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
 
         mean_abs = np.abs(shap_values).mean(axis=0)
-        feature_shap = dict(zip(feature_names, mean_abs.tolist()))
+        feature_shap = dict(zip(feature_names, mean_abs.tolist(), strict=False))
 
         # Sort by importance
         feature_shap = dict(sorted(feature_shap.items(), key=lambda x: x[1], reverse=True))
@@ -317,3 +371,83 @@ def compute_shap_summary(model: Any, X: np.ndarray, feature_names: list[str], ma
     except Exception as e:
         logger.warning("SHAP computation failed: %s", e)
         return None
+
+
+def compute_sp_baseline_metrics(
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    sp_decimal: np.ndarray,
+    race_ids: np.ndarray,
+) -> dict[str, Any]:
+    """Beat-the-SP gate: does the model carry information beyond the market?
+
+    Compares the model's probabilities against de-vigged SP probabilities on
+    the same entries (the standard Benter-style test). Favourite-backing P&L
+    is a weak baseline; this is the decisive one — a model that cannot beat
+    de-vigged SP on log-loss has no business recommending bets.
+
+    Returns:
+        sp_log_loss / sp_brier:        market baseline scores
+        model_log_loss / model_brier:  model scores on the SAME entries
+        log_loss_vs_sp / brier_vs_sp:  model minus SP (negative = model better)
+        model_blend_coef:              coefficient on the model logit in a
+                                       logistic blend of model + SP — how much
+                                       weight the data assigns the model on
+                                       top of the market (0 = nothing)
+        n_entries:                     rows with usable SP
+        beats_sp:                      bool, log_loss_vs_sp < 0
+    """
+    import pandas as pd
+
+    df = pd.DataFrame({
+        "won": np.asarray(y_true, dtype=float),
+        "prob": normalize_probs_per_race(y_proba, race_ids),
+        "sp": np.asarray(sp_decimal, dtype=float),
+        "race_id": np.asarray(race_ids),
+    })
+    df = df[df["sp"].notna() & (df["sp"] > 1)]
+    if df.empty or df["won"].nunique() < 2:
+        return {"error": "insufficient SP data for baseline comparison"}
+
+    # De-vig: raw implied probs normalized within each race so the
+    # bookmaker's overround doesn't inflate the baseline's log-loss.
+    df["sp_raw"] = 1.0 / df["sp"]
+    df["sp_prob"] = df.groupby("race_id")["sp_raw"].transform(
+        lambda p: p / p.sum() if p.sum() > 0 else p
+    )
+
+    eps = 1e-6
+    model_p = np.clip(df["prob"].values, eps, 1 - eps)
+    sp_p = np.clip(df["sp_prob"].values, eps, 1 - eps)
+    y = df["won"].values
+
+    out: dict[str, Any] = {
+        "sp_log_loss": round(float(log_loss(y, sp_p, labels=[0, 1])), 5),
+        "sp_brier": round(float(brier_score_loss(y, sp_p)), 5),
+        "model_log_loss": round(float(log_loss(y, model_p, labels=[0, 1])), 5),
+        "model_brier": round(float(brier_score_loss(y, model_p)), 5),
+        "n_entries": int(len(df)),
+    }
+    out["log_loss_vs_sp"] = round(out["model_log_loss"] - out["sp_log_loss"], 5)
+    out["brier_vs_sp"] = round(out["model_brier"] - out["sp_brier"], 5)
+    out["beats_sp"] = bool(out["log_loss_vs_sp"] < 0)
+
+    # Blend test: y ~ logit(model) + logit(SP). The model's coefficient
+    # measures incremental information beyond the market.
+    try:
+        from sklearn.linear_model import LogisticRegression
+
+        features = np.column_stack([
+            np.log(model_p / (1 - model_p)),
+            np.log(sp_p / (1 - sp_p)),
+        ])
+        blend = LogisticRegression(max_iter=1000)
+        blend.fit(features, y)
+        out["model_blend_coef"] = round(float(blend.coef_[0][0]), 4)
+        out["sp_blend_coef"] = round(float(blend.coef_[0][1]), 4)
+    except Exception as e:  # degenerate inputs
+        logger.warning("Blend test failed: %s", e)
+        out["model_blend_coef"] = None
+        out["sp_blend_coef"] = None
+
+    return out

@@ -22,7 +22,6 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from app.models.experiment import Experiment
@@ -35,7 +34,6 @@ from app.services.feature_engine import get_dog_history, get_race_context, compu
 from app.services.feature_sandbox import execute_feature_code
 from app.services.race_ordering import (
     OrderingResult,
-    compute_combo_kelly,
     compute_ordering,
 )
 from app.models.feature_definition import FeatureDefinition
@@ -43,7 +41,6 @@ from ml.feature_availability import (
     PredictionDataError,
     post_race_features_in_use,
 )
-from ml.race_features import compute_race_context_features
 
 logger = logging.getLogger(__name__)
 
@@ -183,47 +180,6 @@ def compute_features_for_entries(
     return df
 
 
-def _raise_for_missing_features(
-    X: pd.DataFrame,
-    race_id: int,
-    entries: list[Any],
-) -> None:
-    """Raise PredictionDataError listing every (entry, feature) NaN cell.
-
-    Used on scheduled (upcoming) races where silent imputation would
-    produce a distribution shift between train and serve. We list up to a
-    handful of (trap, dog_name) pairs per offending feature so the user
-    can see immediately which dogs the scrape didn't cover.
-    """
-    if not X.isna().any().any():
-        return
-
-    # Map entry_id -> (trap, dog_name) for friendly error output.
-    entry_lookup: dict[int, tuple[int | None, str | None]] = {}
-    for row in entries:
-        entry = row.RaceEntry
-        entry_lookup[entry.id] = (entry.trap, getattr(row, "dog_name", None))
-
-    missing_summary: dict[str, list[str]] = {}
-    for col in X.columns[X.isna().any()]:
-        offenders = []
-        for entry_id in X.index[X[col].isna()].tolist()[:6]:
-            trap, dog_name = entry_lookup.get(int(entry_id), (None, None))
-            label = f"trap{trap} {dog_name}" if dog_name else f"entry_id={entry_id}"
-            offenders.append(label)
-        missing_summary[str(col)] = offenders
-
-    pretty = "; ".join(
-        f"{feat} -> {', '.join(rows)}" for feat, rows in missing_summary.items()
-    )
-    raise PredictionDataError(
-        f"Refusing to silently impute missing features for scheduled race "
-        f"{race_id}. Missing cells: {pretty}. Either backfill the upstream "
-        f"data (dog history, sectional times, comments) or retrain without "
-        f"these features."
-    )
-
-
 def _get_train_cutoff(experiment: Experiment) -> date | None:
     """Extract the training data cutoff date from an experiment's split config."""
     split_config = experiment.split_config or {}
@@ -293,12 +249,74 @@ def _compute_confidence(probs: np.ndarray) -> dict[str, float]:
     }
 
 
+DEFAULT_STAKING = {
+    "kelly_fraction": 0.25,
+    "min_edge": 0.05,
+    "max_stake_pct": 0.05,
+    "current_bankroll": 100.0,
+}
+
+
+def get_staking_params(db: Session) -> dict[str, float]:
+    """User staking settings from BankrollConfig, with safe defaults.
+
+    Single source of truth for Kelly parameters: the user edits these on the
+    Bankroll page; the previous hardcoded constants meant those settings
+    silently did nothing to the recommendations they were supposed to drive.
+    """
+    from app.models.bankroll import BankrollConfig
+
+    cfg = db.query(BankrollConfig).first()
+    if cfg is None:
+        return dict(DEFAULT_STAKING)
+    return {
+        "kelly_fraction": float(cfg.kelly_fraction),
+        "min_edge": float(cfg.min_edge),
+        "max_stake_pct": float(cfg.max_stake_pct),
+        "current_bankroll": float(cfg.current_bankroll),
+    }
+
+
+# Strength of the completeness shrinkage applied to win probabilities
+# before Kelly staking. 1.0 = a dog with zero real features is staked as
+# if its probability equals the market's; 0.0 disables shrinkage.
+COMPLETENESS_SHRINKAGE = 1.0
+
+
+def shrink_toward_market(
+    win_prob: float,
+    odds_decimal: float | None,
+    completeness: float | None,
+    strength: float = COMPLETENESS_SHRINKAGE,
+) -> float:
+    """Shrink a model probability toward the market prior by data thinness.
+
+    A debutant whose features were entirely imputed gets the same model
+    output treatment as a fully-profiled veteran unless staking accounts
+    for input quality. Baker & McHale-style shrinkage: pull win_prob
+    toward the odds-implied probability proportionally to the missing
+    fraction of real features, so Kelly bets on thin-history dogs shrink
+    toward zero edge instead of betting full size on a guess.
+    """
+    if (
+        completeness is None
+        or odds_decimal is None
+        or odds_decimal <= 1.0
+        or win_prob is None
+    ):
+        return win_prob
+    anchor = 1.0 / odds_decimal
+    lam = strength * (1.0 - max(0.0, min(1.0, completeness)))
+    return float(win_prob - lam * (win_prob - anchor))
+
+
 def _compute_kelly_stake(
     win_prob: float,
     odds_decimal: float | None,
     bankroll: float = 100.0,
     kelly_fraction: float = 0.25,
     min_edge: float = 0.05,
+    max_stake_pct: float = 0.05,
 ) -> dict[str, Any]:
     """Compute Kelly criterion stake for a bet.
 
@@ -308,11 +326,18 @@ def _compute_kelly_stake(
         bankroll: Current bankroll
         kelly_fraction: Fraction of full Kelly to use (0.25 = quarter Kelly, safer)
         min_edge: Minimum edge required to place a bet (default 5%)
+        max_stake_pct: Absolute cap on stake as a fraction of bankroll
 
-    Returns dict with stake info or None if no bet recommended.
+    The returned dict echoes the parameters used so clients (and saved
+    predictions) can show which settings produced the verdict.
     """
+    params_used = {
+        "kelly_fraction": kelly_fraction,
+        "min_edge": min_edge,
+        "max_stake_pct": max_stake_pct,
+    }
     if odds_decimal is None or odds_decimal <= 1.0:
-        return {"bet": False, "reason": "no_odds"}
+        return {"bet": False, "reason": "no_odds", "params_used": params_used}
 
     implied_prob = 1.0 / odds_decimal
     edge = win_prob - implied_prob
@@ -323,6 +348,7 @@ def _compute_kelly_stake(
             "reason": "insufficient_edge",
             "edge": round(edge, 4),
             "implied_prob": round(implied_prob, 4),
+            "params_used": params_used,
         }
 
     # Kelly formula: f* = (bp - q) / b
@@ -333,8 +359,7 @@ def _compute_kelly_stake(
     # Cap at kelly_fraction of full Kelly for safety
     fractional_kelly = max(0, f_star * kelly_fraction)
 
-    # Also cap at 5% of bankroll as absolute max
-    max_stake_pct = 0.05
+    # Absolute cap as fraction of bankroll
     stake_pct = min(fractional_kelly, max_stake_pct)
     stake = round(bankroll * stake_pct, 2)
 
@@ -346,6 +371,7 @@ def _compute_kelly_stake(
         "edge": round(edge, 4),
         "implied_prob": round(implied_prob, 4),
         "expected_value": round(win_prob * (odds_decimal - 1) - (1 - win_prob), 4),
+        "params_used": params_used,
     }
 
 
@@ -353,7 +379,7 @@ def predict_race(
     db: Session,
     experiment_id: int,
     race_id: int,
-    bankroll: float = 100.0,
+    bankroll: float | None = None,
     precomputed_features: pd.DataFrame | None = None,
 ) -> list[dict[str, Any]]:
     """
@@ -371,6 +397,12 @@ def predict_race(
     experiment = db.query(Experiment).filter(Experiment.id == experiment_id).first()
     if not experiment or experiment.status != "completed":
         raise ValueError(f"Experiment {experiment_id} not found or not completed")
+
+    # Staking parameters come from the user's BankrollConfig; an explicit
+    # bankroll argument overrides the tracked bankroll only.
+    staking = get_staking_params(db)
+    if bankroll is None:
+        bankroll = staking["current_bankroll"]
 
     # Load model artifact (trainer + preprocessing info + calibrator)
     artifact = load_trained_model(experiment)
@@ -617,9 +649,9 @@ def predict_race(
     eid_to_win_prob: dict[int, float] = {}
     eid_to_raw_score: dict[int, float] = {}
     if win_probs is not None:
-        eid_to_win_prob = {int(eid): float(p) for eid, p in zip(X.index, win_probs)}
+        eid_to_win_prob = {int(eid): float(p) for eid, p in zip(X.index, win_probs, strict=True)}
     if raw_scores is not None:
-        eid_to_raw_score = {int(eid): float(s) for eid, s in zip(X.index, raw_scores)}
+        eid_to_raw_score = {int(eid): float(s) for eid, s in zip(X.index, raw_scores, strict=True)}
 
     # Forecast / trio layer: take the calibrated win probabilities and
     # expand them into ordered multi-position probabilities via the
@@ -683,7 +715,7 @@ def predict_race(
 
     # Build prediction list
     predictions = []
-    for entry_row, entry_id in zip(entries, entry_ids):
+    for entry_row, entry_id in zip(entries, entry_ids, strict=True):
         entry = entry_row.RaceEntry
         dog_name = entry_row.dog_name
 
@@ -740,11 +772,25 @@ def predict_race(
                 pred_data["margin"] = race_confidence["margin"]
                 pred_data["entropy"] = race_confidence["entropy"]
 
-            # Kelly staking recommendation
+            # Kelly staking recommendation — staked on the
+            # completeness-shrunk probability so thin-history dogs are
+            # downweighted; the displayed win_probability stays the raw
+            # model output and the kelly dict discloses what it staked on.
             if win_prob is not None:
-                kelly = _compute_kelly_stake(
-                    win_prob, entry.sp_decimal, bankroll=bankroll,
+                staking_prob = shrink_toward_market(
+                    win_prob, entry.sp_decimal, completeness
                 )
+                kelly = _compute_kelly_stake(
+                    staking_prob,
+                    entry.sp_decimal,
+                    bankroll=bankroll,
+                    kelly_fraction=staking["kelly_fraction"],
+                    min_edge=staking["min_edge"],
+                    max_stake_pct=staking["max_stake_pct"],
+                )
+                if staking_prob != win_prob:
+                    kelly["staking_win_probability"] = round(staking_prob, 4)
+                    kelly["completeness_shrinkage_applied"] = True
                 pred_data["kelly"] = kelly
             else:
                 pred_data["kelly"] = {"bet": False, "reason": "no_probability"}
@@ -790,6 +836,7 @@ def compute_kelly_stake(
     bankroll: float = 100.0,
     kelly_fraction: float = 0.25,
     min_edge: float = 0.05,
+    max_stake_pct: float = 0.05,
 ) -> dict[str, Any]:
     """Public wrapper around the Kelly calculation. Same math used at
     prediction time — exposed so endpoints recomputing against
@@ -797,6 +844,7 @@ def compute_kelly_stake(
     return _compute_kelly_stake(
         win_prob, odds_decimal, bankroll=bankroll,
         kelly_fraction=kelly_fraction, min_edge=min_edge,
+        max_stake_pct=max_stake_pct,
     )
 
 
@@ -828,6 +876,7 @@ def recompute_kelly_for_saved_predictions(
     if not rows:
         return []
 
+    staking = get_staking_params(db)
     now = datetime.utcnow()
     updated: list[dict[str, Any]] = []
     for pred, dog_name, trap in rows:
@@ -835,7 +884,12 @@ def recompute_kelly_for_saved_predictions(
         wp = pred.win_probability
 
         if wp is not None:
-            kelly = compute_kelly_stake(wp, odds, bankroll=bankroll)
+            kelly = compute_kelly_stake(
+                wp, odds, bankroll=bankroll,
+                kelly_fraction=staking["kelly_fraction"],
+                min_edge=staking["min_edge"],
+                max_stake_pct=staking["max_stake_pct"],
+            )
         else:
             kelly = {"bet": False, "reason": "no_probability"}
 
@@ -1037,7 +1091,7 @@ def predict_race_ensemble(
     experiment_ids: list[int],
     race_id: int,
     weights: list[float] | None = None,
-    bankroll: float = 100.0,
+    bankroll: float | None = None,
 ) -> list[dict[str, Any]]:
     """
     Generate ensemble predictions by combining multiple trained models.
@@ -1054,6 +1108,10 @@ def predict_race_ensemble(
     """
     if len(experiment_ids) < 2:
         raise ValueError("Ensemble requires at least 2 experiments")
+
+    staking = get_staking_params(db)
+    if bankroll is None:
+        bankroll = staking["current_bankroll"]
 
     if weights is None:
         weights = [1.0 / len(experiment_ids)] * len(experiment_ids)
@@ -1121,7 +1179,12 @@ def predict_race_ensemble(
         sp_decimal = sp_map.get(eid)
 
         if win_prob is not None and win_prob > 0:
-            kelly = _compute_kelly_stake(win_prob, sp_decimal, bankroll=bankroll)
+            kelly = _compute_kelly_stake(
+                win_prob, sp_decimal, bankroll=bankroll,
+                kelly_fraction=staking["kelly_fraction"],
+                min_edge=staking["min_edge"],
+                max_stake_pct=staking["max_stake_pct"],
+            )
             pred["kelly"] = kelly
 
             if sp_decimal and sp_decimal > 1:
@@ -1150,7 +1213,7 @@ def predict_race_ensemble(
 def predict_upcoming_races(
     db: Session,
     experiment_id: int,
-    bankroll: float = 100.0,
+    bankroll: float | None = None,
 ) -> list[dict[str, Any]]:
     """
     Generate predictions for all scheduled (upcoming) races.
@@ -1169,11 +1232,46 @@ def predict_upcoming_races(
         .all()
     )
 
+    # Batch the feature computation across every scheduled entry once —
+    # the ELO pass walks the full resulted history regardless of target
+    # count, so running it per race multiplied the cost by the number of
+    # races (the by-date endpoint already worked this way; this path
+    # didn't).
+    precomputed = None
+    race_id_list = [row.Race.id for row in scheduled_races]
+    if race_id_list:
+        all_entry_ids = [
+            eid for (eid,) in db.query(RaceEntry.id)
+            .filter(RaceEntry.race_id.in_(race_id_list))
+            .all()
+        ]
+        if all_entry_ids:
+            try:
+                split_cfg = experiment.split_config or {}
+                include_builtin = split_cfg.get("include_builtin_features", True)
+                feature_defs = (
+                    db.query(FeatureDefinition)
+                    .filter(FeatureDefinition.id.in_(experiment.feature_set))
+                    .all()
+                )
+                precomputed = compute_features_for_entries(
+                    db, all_entry_ids, feature_defs, include_builtin=include_builtin,
+                )
+            except Exception:
+                logger.exception(
+                    "upcoming: batched feature compute failed — falling back "
+                    "to per-race computation"
+                )
+                precomputed = None
+
     results = []
     for race_row in scheduled_races:
         race = race_row.Race
         try:
-            preds = predict_race(db, experiment_id, race.id, bankroll=bankroll)
+            preds = predict_race(
+                db, experiment_id, race.id, bankroll=bankroll,
+                precomputed_features=precomputed,
+            )
             if preds:
                 save_predictions(db, preds)
                 results.append({

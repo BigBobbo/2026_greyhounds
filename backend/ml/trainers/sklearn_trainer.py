@@ -20,7 +20,14 @@ class SklearnTrainer(BaseTrainer):
         self.scaler = StandardScaler()
         self.calibrator: _PlattLR | None = None
 
-        model_params = {k: v for k, v in params.items() if k not in ("algorithm", "target_type")}
+        # Strip pipeline-meta keys that create_trainer injects for the GBM
+        # trainers (monotonic-constraint plumbing); sklearn estimators reject
+        # unknown kwargs, so leaving them in broke every sklearn experiment.
+        model_params = {
+            k: v
+            for k, v in params.items()
+            if k not in ("algorithm", "target_type", "_target", "apply_monotone_constraints")
+        }
 
         if algorithm == "logistic_regression":
             model_params.setdefault("max_iter", 1000)
@@ -91,8 +98,8 @@ class SklearnTrainer(BaseTrainer):
     def get_feature_importance(self) -> dict[str, float]:
         if hasattr(self.model, "feature_importances_"):
             names = self.model.feature_names_in_ if hasattr(self.model, "feature_names_in_") else [f"f{i}" for i in range(len(self.model.feature_importances_))]
-            return dict(zip(names, self.model.feature_importances_.tolist()))
+            return dict(zip(names, self.model.feature_importances_.tolist(), strict=False))
         elif hasattr(self.model, "coef_"):
             names = self.model.feature_names_in_ if hasattr(self.model, "feature_names_in_") else [f"f{i}" for i in range(len(self.model.coef_[0]))]
-            return dict(zip(names, np.abs(self.model.coef_[0]).tolist()))
+            return dict(zip(names, np.abs(self.model.coef_[0]).tolist(), strict=False))
         return {}

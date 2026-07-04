@@ -72,6 +72,57 @@ export interface FeatureDefinition {
   enabled: boolean;
 }
 
+/** Training split / pipeline options (see TrainingLab handleCreate). */
+export interface SplitConfig {
+  test_after?: string;
+  val_pct?: number;
+  version_id?: number;
+  include_builtin_features?: boolean;
+  include_sp_features?: boolean;
+  include_pace_shape_features?: boolean;
+  include_race_relative_features?: boolean;
+  include_elo_features?: boolean;
+  include_odds_snapshot_features?: boolean;
+  include_h2h_features?: boolean;
+  optuna_objective?: string;
+  walk_forward_folds?: number;
+  embargo_days?: number;
+  apply_monotone_constraints?: boolean;
+  [key: string]: unknown;
+}
+
+/** Reliability-curve bins from ml/evaluation.compute_calibration_data. */
+export interface CalibrationCurve {
+  predicted_prob: number[];
+  actual_freq: number[];
+  bin_counts: number[];
+}
+
+export interface PnlPoint {
+  race: number;
+  pnl: number;
+  fav_pnl?: number;
+}
+
+/** Betting simulation block from ml/evaluation (test-set $1 bets + Kelly). */
+export interface BettingSimulation {
+  top_pick_pnl: number;
+  top_pick_races: number;
+  top_pick_roi: number;
+  top_pick_strike_rate: number;
+  top_pick_winners: number;
+  value_bet_pnl: number;
+  value_bet_count: number;
+  value_bet_roi: number;
+  kelly_pnl?: number;
+  kelly_races?: number;
+  kelly_roi?: number;
+  favourite_pnl: number;
+  favourite_roi: number;
+  pnl_by_race?: PnlPoint[];
+  kelly_pnl_by_race?: { race: number; pnl: number }[];
+}
+
 export interface Experiment {
   id: number;
   name: string;
@@ -80,12 +131,15 @@ export interface Experiment {
   target: string;
   hyperparameters: Record<string, unknown>;
   feature_set: number[];
-  split_config: Record<string, unknown> | null;
+  split_config: SplitConfig | null;
   status: string;
   metrics: Record<string, number> | null;
-  confusion_matrix: unknown;
-  calibration_data: unknown;
-  roc_data: unknown;
+  confusion_matrix: number[][] | null;
+  calibration_data: {
+    calibration?: CalibrationCurve | null;
+    betting?: BettingSimulation | null;
+  } | null;
+  roc_data: { fpr: number[]; tpr: number[] } | null;
   shap_summary: unknown;
   feature_importance: Record<string, number> | null;
   training_duration_s: number | null;
@@ -151,4 +205,28 @@ export interface RaceCombosResponse {
   }>;
   forecast_combos: ForecastCombo[];
   trio_combos: TrioCombo[];
+}
+
+// GET /predictions/preflight/{race_id} — pre-bet data-quality check
+export interface PreflightCompleteness {
+  entry_id: number;
+  trap: number | null;
+  dog_name: string | null;
+  completeness: number;
+}
+
+export interface PreflightResponse {
+  race_id: number;
+  race_status: string;
+  experiment_id: number;
+  n_entries: number;
+  post_race_features_in_use: { feature: string; reason: string }[];
+  entries_missing_history: { entry_id: number; trap: number | null; dog_name: string | null }[];
+  missing_features: {
+    feature: string;
+    reason?: string;
+    missing_for?: { entry_id: number; trap: number | null; dog_name: string | null }[];
+  }[];
+  data_completeness: PreflightCompleteness[];
+  would_fail: boolean;
 }

@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import Editor from '@monaco-editor/react';
-import api from '../api/client';
+import api, { errorMessage } from '../api/client';
 import type { FeatureDefinition } from '../types/models';
 
 const METRICS = [
@@ -108,8 +108,33 @@ export default function FeatureBuilder() {
     window: { type: 'last_n', n: 5 },
     filters: { same_track: false, same_distance: false, same_grade: false, same_trap: false },
   });
-  const [visualName, setVisualName] = useState('');
-  const [visualDisplayName, setVisualDisplayName] = useState('');
+  // Names are derived purely from the visual config — computed during render
+  // (memoised) rather than synced into state via an effect.
+  const { visualName, visualDisplayName } = useMemo(() => {
+    const { metric, aggregation, window: w, filters } = visualConfig;
+    const parts = [aggregation, metric];
+    if (w.type === 'last_n') parts.push(`last${w.n}`);
+    else if (w.type === 'days') parts.push(`${w.n}d`);
+    if (filters.same_track) parts.push('track');
+    if (filters.same_distance) parts.push('dist');
+    if (filters.same_grade) parts.push('grade');
+    if (filters.same_trap) parts.push('trap');
+
+    const displayParts = [
+      AGGREGATIONS.find(a => a.value === aggregation)?.label || aggregation,
+      METRICS.find(m => m.value === metric)?.label || metric,
+    ];
+    if (w.type === 'last_n') displayParts.push(`(last ${w.n})`);
+    else if (w.type === 'days') displayParts.push(`(${w.n} days)`);
+    const filterLabels = [];
+    if (filters.same_track) filterLabels.push('same track');
+    if (filters.same_distance) filterLabels.push('same distance');
+    if (filters.same_grade) filterLabels.push('same grade');
+    if (filters.same_trap) filterLabels.push('same trap');
+    if (filterLabels.length) displayParts.push(`[${filterLabels.join(', ')}]`);
+
+    return { visualName: parts.join('_'), visualDisplayName: displayParts.join(' ') };
+  }, [visualConfig]);
 
   // Code editor state
   const [code, setCode] = useState(DEFAULT_CODE);
@@ -130,33 +155,6 @@ export default function FeatureBuilder() {
 
   useEffect(() => { fetchFeatures(); }, [fetchFeatures]);
 
-  // Auto-generate name from visual config
-  useEffect(() => {
-    const { metric, aggregation, window: w, filters } = visualConfig;
-    const parts = [aggregation, metric];
-    if (w.type === 'last_n') parts.push(`last${w.n}`);
-    else if (w.type === 'days') parts.push(`${w.n}d`);
-    if (filters.same_track) parts.push('track');
-    if (filters.same_distance) parts.push('dist');
-    if (filters.same_grade) parts.push('grade');
-    if (filters.same_trap) parts.push('trap');
-    setVisualName(parts.join('_'));
-
-    const displayParts = [
-      AGGREGATIONS.find(a => a.value === aggregation)?.label || aggregation,
-      METRICS.find(m => m.value === metric)?.label || metric,
-    ];
-    if (w.type === 'last_n') displayParts.push(`(last ${w.n})`);
-    else if (w.type === 'days') displayParts.push(`(${w.n} days)`);
-    const filterLabels = [];
-    if (filters.same_track) filterLabels.push('same track');
-    if (filters.same_distance) filterLabels.push('same distance');
-    if (filters.same_grade) filterLabels.push('same grade');
-    if (filters.same_trap) filterLabels.push('same trap');
-    if (filterLabels.length) displayParts.push(`[${filterLabels.join(', ')}]`);
-    setVisualDisplayName(displayParts.join(' '));
-  }, [visualConfig]);
-
   const handlePreview = async () => {
     setPreviewing(true);
     setPreviewResult(null);
@@ -166,8 +164,8 @@ export default function FeatureBuilder() {
         : { feature_type: 'code', code, dog_id: parseInt(previewDogId) };
       const res = await api.post('/features/preview', body);
       setPreviewResult(res.data);
-    } catch (err: any) {
-      setPreviewResult({ value: null, error: err.response?.data?.detail || 'Preview failed' });
+    } catch (err) {
+      setPreviewResult({ value: null, error: errorMessage(err, 'Preview failed') });
     }
     setPreviewing(false);
   };
@@ -191,21 +189,29 @@ export default function FeatureBuilder() {
           };
       await api.post('/features/', body);
       fetchFeatures();
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to save feature');
+    } catch {
+      // error toast shown by the API interceptor
     }
     setSaving(false);
   };
 
   const handleToggle = async (id: number, enabled: boolean) => {
-    await api.patch(`/features/${id}`, { enabled: !enabled });
-    fetchFeatures();
+    try {
+      await api.patch(`/features/${id}`, { enabled: !enabled });
+      fetchFeatures();
+    } catch {
+      // error toast shown by the API interceptor
+    }
   };
 
   const handleDelete = async (id: number) => {
     if (!confirm('Delete this feature?')) return;
-    await api.delete(`/features/${id}`);
-    fetchFeatures();
+    try {
+      await api.delete(`/features/${id}`);
+      fetchFeatures();
+    } catch {
+      // error toast shown by the API interceptor
+    }
   };
 
   const fetchCoverage = useCallback((versionId?: number | null) => {
@@ -243,17 +249,21 @@ export default function FeatureBuilder() {
       setNewVersionDesc('');
       setSelectedVersionId(res.data.id);
       fetchVersions();
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create version');
+    } catch {
+      // error toast shown by the API interceptor
     }
     setCreatingVersion(false);
   };
 
   const handleDeleteVersion = async (id: number) => {
     if (!confirm('Delete this version and all its computed features?')) return;
-    await api.delete(`/features/versions/${id}`);
-    if (selectedVersionId === id) setSelectedVersionId(null);
-    fetchVersions();
+    try {
+      await api.delete(`/features/versions/${id}`);
+      if (selectedVersionId === id) setSelectedVersionId(null);
+      fetchVersions();
+    } catch {
+      // error toast shown by the API interceptor
+    }
   };
 
   const handleMaterialize = async () => {
@@ -264,28 +274,33 @@ export default function FeatureBuilder() {
       if (selectedVersionId) body.version_id = selectedVersionId;
       await api.post('/features/materialize', body);
     } catch {
-      alert('Failed to start materialization');
+      // error toast shown by the API interceptor
     }
     setMaterializing(false);
   };
 
   // Clear old polling interval when version changes, start new one if coverage is visible
   useEffect(() => {
-    if ((window as any).__materializeInterval) {
-      clearInterval((window as any).__materializeInterval);
-      (window as any).__materializeInterval = null;
+    const w = window as Window & {
+      __materializeInterval?: ReturnType<typeof setInterval> | null;
+    };
+    if (w.__materializeInterval) {
+      clearInterval(w.__materializeInterval);
+      w.__materializeInterval = null;
     }
     if (showCoverage) {
       fetchCoverage(selectedVersionId);
       const params: Record<string, number> = {};
       if (selectedVersionId) params.version_id = selectedVersionId;
       const interval = setInterval(() => {
-        api.get('/features/coverage', { params }).then(res => setCoverage(res.data));
+        api.get('/features/coverage', { params })
+          .then(res => setCoverage(res.data))
+          .catch(() => {});
       }, 5000);
-      (window as any).__materializeInterval = interval;
+      w.__materializeInterval = interval;
       return () => clearInterval(interval);
     }
-  }, [showCoverage, selectedVersionId]);
+  }, [showCoverage, selectedVersionId, fetchCoverage]);
 
   // Fetch versions on mount
   useEffect(() => { fetchVersions(); }, [fetchVersions]);

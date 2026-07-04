@@ -1,22 +1,20 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { toast } from 'sonner';
 import api from '../api/client';
+import {
+  DEFAULT_STAKING,
+  computeKelly,
+  verdictReason,
+  type KellyInfo,
+  type StakingParams,
+} from '../lib/kelly';
 import type {
   Experiment,
   ForecastCombo,
+  PreflightResponse,
   Track,
   TrioCombo,
 } from '../types/models';
-
-interface KellyInfo {
-  bet: boolean;
-  reason?: string;
-  stake?: number;
-  stake_pct?: number;
-  full_kelly_pct?: number;
-  edge?: number;
-  implied_prob?: number;
-  expected_value?: number;
-}
 
 interface PredictionEntry {
   race_entry_id?: number;
@@ -34,69 +32,10 @@ interface PredictionEntry {
   edge: number | null;
   is_value: boolean | null;
   kelly: KellyInfo | null;
+  data_completeness?: number | null;
   sp_decimal_at_pred?: number | null;
   forecast_combos?: ForecastCombo[];
   trio_combos?: TrioCombo[];
-}
-
-// Mirrors backend `_compute_kelly_stake` so live edits to the market-odds
-// input update the BET/PASS verdict instantly without a server round-trip.
-// Keep these defaults identical to the Python side.
-const KELLY_FRACTION = 0.25;
-const MIN_EDGE = 0.05;
-const MAX_STAKE_PCT = 0.05;
-
-function computeKelly(
-  winProb: number | null | undefined,
-  oddsDecimal: number | null | undefined,
-  bankroll: number,
-): KellyInfo {
-  if (winProb == null) return { bet: false, reason: 'no_probability' };
-  if (oddsDecimal == null || oddsDecimal <= 1.0) {
-    return { bet: false, reason: 'no_odds' };
-  }
-  const impliedProb = 1.0 / oddsDecimal;
-  const edge = winProb - impliedProb;
-  if (edge < MIN_EDGE) {
-    return {
-      bet: false,
-      reason: 'insufficient_edge',
-      edge: round4(edge),
-      implied_prob: round4(impliedProb),
-    };
-  }
-  const b = oddsDecimal - 1;
-  const fStar = (b * winProb - (1 - winProb)) / b;
-  const fractionalKelly = Math.max(0, fStar * KELLY_FRACTION);
-  const stakePct = Math.min(fractionalKelly, MAX_STAKE_PCT);
-  const stake = Math.round(bankroll * stakePct * 100) / 100;
-  return {
-    bet: true,
-    stake,
-    stake_pct: Math.round(stakePct * 10000) / 100,
-    full_kelly_pct: Math.round(fStar * 10000) / 100,
-    edge: round4(edge),
-    implied_prob: round4(impliedProb),
-    expected_value: round4(winProb * (oddsDecimal - 1) - (1 - winProb)),
-  };
-}
-
-function round4(x: number): number {
-  return Math.round(x * 10000) / 10000;
-}
-
-function verdictReason(
-  kelly: KellyInfo,
-  winProb: number | null | undefined,
-  odds: number | null | undefined,
-): string {
-  if (winProb == null) return 'no model probability';
-  if (odds == null || odds <= 1) return 'enter market odds →';
-  if (kelly.reason === 'insufficient_edge' && kelly.edge != null) {
-    const edgePct = (kelly.edge * 100).toFixed(1);
-    return `PASS — only ${edgePct}% edge (need 5%)`;
-  }
-  return 'PASS';
 }
 
 interface RacePrediction {
@@ -278,8 +217,9 @@ export default function Predictions() {
         },
       );
       setPredictions(res.data);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to save odds');
+      toast.success('Odds & bet plan saved');
+    } catch {
+      // error toast shown by the API interceptor
     } finally {
       setSavingOdds(false);
     }
@@ -290,8 +230,34 @@ export default function Predictions() {
   const [trackCode, setTrackCode] = useState('');
   const [availableRaces, setAvailableRaces] = useState<RaceOption[]>([]);
   const [selectedRaceId, setSelectedRaceId] = useState<number | null>(null);
+  const [preflight, setPreflight] = useState<PreflightResponse | null>(null);
   const [loadingRaces, setLoadingRaces] = useState(false);
   const [bankroll, setBankroll] = useState(100);
+  const [staking, setStaking] = useState<StakingParams>(DEFAULT_STAKING);
+
+  // Staking parameters are the user's Bankroll settings — the single source
+  // of truth shared with the backend. Also seeds the bankroll input from the
+  // tracked bankroll instead of a hardcoded 100.
+  useEffect(() => {
+    api
+      .get<{
+        kelly_fraction: number;
+        min_edge: number;
+        max_stake_pct: number;
+        current_bankroll: number;
+      }>('/bankroll/config')
+      .then((res) => {
+        setStaking({
+          kelly_fraction: res.data.kelly_fraction,
+          min_edge: res.data.min_edge,
+          max_stake_pct: res.data.max_stake_pct,
+        });
+        setBankroll(Math.round(res.data.current_bankroll * 100) / 100);
+      })
+      .catch(() => {
+        // keep defaults; backend uses the same fallback
+      });
+  }, []);
 
   // Manual race ID fallback
   const [manualRaceId, setManualRaceId] = useState('');
@@ -306,16 +272,27 @@ export default function Predictions() {
   const [expandedRaceId, setExpandedRaceId] = useState<number | null>(null);
   const [cardsStatus, setCardsStatus] = useState<CardsStatusResponse | null>(null);
 
-  useEffect(() => {
+  const [loadError, setLoadError] = useState(false);
+
+  const loadInitial = useCallback(() => {
     Promise.all([
       api.get<Experiment[]>('/training/experiments?status=completed'),
       api.get<Track[]>('/tracks/'),
-    ]).then(([expRes, trackRes]) => {
-      setExperiments(expRes.data);
-      setTracks(trackRes.data);
-      if (expRes.data.length > 0) setSelectedExp(expRes.data[0].id);
-    });
+    ])
+      .then(([expRes, trackRes]) => {
+        setExperiments(expRes.data);
+        setTracks(trackRes.data);
+        if (expRes.data.length > 0) {
+          setSelectedExp((prev) => prev ?? expRes.data[0].id);
+        }
+        setLoadError(false);
+      })
+      .catch(() => setLoadError(true));
   }, []);
+
+  useEffect(() => {
+    loadInitial();
+  }, [loadInitial]);
 
   // Fetch races when date/track changes
   useEffect(() => {
@@ -332,6 +309,31 @@ export default function Predictions() {
       .finally(() => setLoadingRaces(false));
   }, [raceDate, trackCode]);
 
+  // Pre-bet data-quality check: would this (race, experiment) prediction
+  // fail, and how complete is each dog's history? The backend has carried
+  // this safety signal since the preflight endpoint shipped; surface it
+  // BEFORE the user generates predictions and bets on them.
+  useEffect(() => {
+    if (!selectedRaceId || !selectedExp) {
+      setPreflight(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .get<PreflightResponse>(
+        `/predictions/preflight/${selectedRaceId}?experiment_id=${selectedExp}`,
+      )
+      .then((res) => {
+        if (!cancelled) setPreflight(res.data);
+      })
+      .catch(() => {
+        if (!cancelled) setPreflight(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRaceId, selectedExp]);
+
   const handlePredict = async (forceRefresh: boolean = false) => {
     const raceId = selectedRaceId || (manualRaceId ? parseInt(manualRaceId) : null);
     if (!selectedExp || !raceId) return;
@@ -342,10 +344,10 @@ export default function Predictions() {
         bankroll: String(bankroll),
       });
       if (forceRefresh) params.set('refresh', 'true');
-      const res = await api.get(`/predictions/race/${raceId}?${params}`);
+      const res = await api.post(`/predictions/race/${raceId}?${params}`);
       setPredictions(res.data);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to generate predictions');
+    } catch {
+      // error toast shown by the API interceptor
     }
     setLoading(false);
   };
@@ -363,8 +365,8 @@ export default function Predictions() {
         `/predictions/history?${params}`,
       );
       setHistory(res.data.sessions);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to load history');
+    } catch {
+      // error toast shown by the API interceptor
       setHistory([]);
     } finally {
       setHistoryLoading(false);
@@ -383,8 +385,8 @@ export default function Predictions() {
         `/predictions/race/${s.race_id}/saved?experiment_id=${s.experiment_id}`,
       );
       setPredictions(res.data);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to load saved prediction');
+    } catch {
+      // error toast shown by the API interceptor
     } finally {
       setLoading(false);
     }
@@ -408,9 +410,11 @@ export default function Predictions() {
     refreshCardsStatus(scrapeDate);
   }, [tab, scrapeDate]);
 
-  // Poll the scrape log while a card scrape is running
+  // Poll the scrape log while a card scrape is running. Only the log id is
+  // needed inside the effect, so depend on that rather than the whole object.
+  const scrapeLogId = scrapeStatus?.log_id;
   useEffect(() => {
-    if (!scrapeStatus || !scrapeRunning) return;
+    if (scrapeLogId == null || !scrapeRunning) return;
     interface RawLog {
       id: number;
       spider_name: string;
@@ -424,7 +428,7 @@ export default function Predictions() {
     const interval = setInterval(async () => {
       try {
         const res = await api.get<{ recent_logs: RawLog[] }>('/scraping/status');
-        const latest = res.data.recent_logs.find(l => l.id === scrapeStatus.log_id);
+        const latest = res.data.recent_logs.find(l => l.id === scrapeLogId);
         if (latest) {
           setScrapeStatus({
             log_id: latest.id,
@@ -446,7 +450,7 @@ export default function Predictions() {
       }
     }, 2500);
     return () => clearInterval(interval);
-  }, [scrapeStatus?.log_id, scrapeRunning, scrapeDate]);
+  }, [scrapeLogId, scrapeRunning, scrapeDate]);
 
   const handleStartScrape = async () => {
     setScrapeStatus(null);
@@ -457,7 +461,7 @@ export default function Predictions() {
         { race_date: scrapeDate, include_form_detail: includeFormDetail },
       );
       if (res.data.log_id == null) {
-        alert(res.data.message);
+        toast.warning(res.data.message);
         return;
       }
       setScrapeStatus({
@@ -471,8 +475,8 @@ export default function Predictions() {
         completed_at: null,
       });
       setScrapeRunning(true);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to start scrape');
+    } catch {
+      // error toast shown by the API interceptor
     }
   };
 
@@ -487,10 +491,10 @@ export default function Predictions() {
         bankroll: String(bankroll),
         only_scheduled: 'true',
       });
-      const res = await api.get<ByDateResponse>(`/predictions/by-date?${params}`);
+      const res = await api.post<ByDateResponse>(`/predictions/by-date?${params}`);
       setByDateResult(res.data);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to predict races for date');
+    } catch {
+      // error toast shown by the API interceptor
     }
     setByDateLoading(false);
   };
@@ -501,8 +505,8 @@ export default function Predictions() {
     try {
       const res = await api.get(`/predictions/results-comparison?experiment_id=${selectedExp}&limit=100`);
       setComparisons(res.data.results);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to load comparisons');
+    } catch {
+      // error toast shown by the API interceptor
     }
     setLoading(false);
   };
@@ -549,7 +553,17 @@ export default function Predictions() {
     <div>
       <h1 className="text-xl sm:text-2xl font-bold mb-4 sm:mb-6">Predictions</h1>
 
-      {experiments.length === 0 ? (
+      {loadError ? (
+        <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-4 flex items-center justify-between gap-3 text-sm">
+          <span>Failed to load models and tracks. Check the backend and try again.</span>
+          <button
+            onClick={loadInitial}
+            className="shrink-0 px-3 py-1.5 border border-red-300 rounded-md text-red-700 hover:bg-red-100 font-medium"
+          >
+            Retry
+          </button>
+        </div>
+      ) : experiments.length === 0 ? (
         <div className="bg-white rounded-lg shadow p-8 text-center">
           <p className="text-gray-500 text-lg">No trained models yet</p>
           <p className="text-gray-400 text-sm mt-1">Train a model in the Training Lab first</p>
@@ -712,6 +726,60 @@ export default function Predictions() {
                 </div>
               </div>
 
+              {/* Pre-bet data-quality check (preflight) */}
+              {preflight && (preflight.would_fail || preflight.entries_missing_history.length > 0 || preflight.data_completeness.some((d) => d.completeness < 0.5)) && (
+                <div
+                  className={`rounded-lg border px-4 py-3 text-sm ${
+                    preflight.would_fail
+                      ? 'bg-red-50 border-red-300 text-red-800'
+                      : 'bg-yellow-50 border-yellow-300 text-yellow-800'
+                  }`}
+                >
+                  {preflight.would_fail ? (
+                    <div>
+                      <p className="font-semibold">
+                        This model cannot be served on a scheduled race.
+                      </p>
+                      <ul className="list-disc ml-5 mt-1">
+                        {preflight.post_race_features_in_use.map((f) => (
+                          <li key={f.feature}>
+                            <span className="font-mono">{f.feature}</span> — {f.reason}
+                          </li>
+                        ))}
+                      </ul>
+                      <p className="mt-1 text-xs">
+                        Retrain the experiment (post-race features are excluded by default) or pick another model.
+                      </p>
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="font-semibold">Data-quality warning</p>
+                      {preflight.entries_missing_history.length > 0 && (
+                        <p className="mt-1">
+                          No prior form at all:{' '}
+                          {preflight.entries_missing_history
+                            .map((d) => `trap ${d.trap ?? '?'} ${d.dog_name ?? ''}`)
+                            .join(', ')}
+                          {' '}— their probabilities are guesses from imputed data.
+                        </p>
+                      )}
+                      {preflight.data_completeness.filter((d) => d.completeness < 0.5).length > 0 && (
+                        <p className="mt-1">
+                          Thin history (&lt;50% real features):{' '}
+                          {preflight.data_completeness
+                            .filter((d) => d.completeness < 0.5)
+                            .map((d) => `trap ${d.trap ?? '?'} ${d.dog_name ?? ''} (${Math.round(d.completeness * 100)}%)`)
+                            .join(', ')}
+                        </p>
+                      )}
+                      <p className="mt-1 text-xs">
+                        Treat BET verdicts involving these dogs with caution — consider passing or reducing stakes.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Prediction results */}
               {predictions && (
                 <div className="space-y-4">
@@ -798,6 +866,7 @@ export default function Predictions() {
                           <th className="px-3 sm:px-4 py-3">Rank</th>
                           <th className="px-3 sm:px-4 py-3">Trap</th>
                           <th className="px-3 sm:px-4 py-3">Dog</th>
+                          <th className="px-3 sm:px-4 py-3" title="Share of model features computed from real history (1.0 = full form; low values mean the model is guessing from imputed data)">Data</th>
                           <th className="px-3 sm:px-4 py-3">Win</th>
                           <th className="px-3 sm:px-4 py-3" title="P(finish 1st or 2nd)">Place</th>
                           <th className="px-3 sm:px-4 py-3" title="P(finish 1st, 2nd, or 3rd)">Show</th>
@@ -817,6 +886,7 @@ export default function Predictions() {
                             p.win_probability,
                             oddsNum && oddsNum > 1 ? oddsNum : null,
                             bankroll,
+                            staking,
                           );
                           const verdictBet = liveKelly.bet;
                           const liveEdge = liveKelly.edge ?? null;
@@ -836,6 +906,24 @@ export default function Predictions() {
                               <td className="px-4 py-3 font-medium">{i + 1}</td>
                               <td className="px-4 py-3">{p.trap || '-'}</td>
                               <td className="px-4 py-3 font-medium">{p.dog_name}</td>
+                              <td className="px-4 py-3">
+                                {p.data_completeness != null ? (
+                                  <span
+                                    className={`inline-block px-1.5 py-0.5 rounded text-xs font-mono ${
+                                      p.data_completeness >= 0.8
+                                        ? 'bg-green-100 text-green-700'
+                                        : p.data_completeness >= 0.5
+                                        ? 'bg-yellow-100 text-yellow-700'
+                                        : 'bg-red-100 text-red-700'
+                                    }`}
+                                    title={`${Math.round(p.data_completeness * 100)}% of features computed from real history`}
+                                  >
+                                    {Math.round(p.data_completeness * 100)}%
+                                  </span>
+                                ) : (
+                                  <span className="text-gray-300 text-xs">-</span>
+                                )}
+                              </td>
                               <td className={`px-4 py-3 font-mono ${probColor(p.win_probability)}`}>
                                 {p.win_probability ? `${(p.win_probability * 100).toFixed(1)}%` : '-'}
                               </td>
@@ -882,7 +970,7 @@ export default function Predictions() {
                                   </div>
                                 ) : (
                                   <span className="text-gray-500 text-xs">
-                                    {verdictReason(liveKelly, p.win_probability, oddsNum)}
+                                    {verdictReason(liveKelly, p.win_probability, oddsNum, staking.min_edge)}
                                   </span>
                                 )}
                               </td>
@@ -906,10 +994,17 @@ export default function Predictions() {
                           p.win_probability,
                           odds && odds > 1 ? odds : null,
                           bankroll,
+                          staking,
                         );
                         return { p, kelly, odds };
                       })
-                      .filter((x) => x.kelly.bet);
+                      .filter((x) => x.kelly.bet)
+                      // One bet per race: win bets are mutually exclusive, so
+                      // staking several dogs in the same race overstakes.
+                      // Keep the highest-edge qualifier — same rule as the
+                      // backend backtest and /best-bets.
+                      .sort((a, b) => (b.kelly.edge ?? 0) - (a.kelly.edge ?? 0))
+                      .slice(0, 1);
 
                     if (liveBets.length > 0) {
                       const totalStake = liveBets.reduce(

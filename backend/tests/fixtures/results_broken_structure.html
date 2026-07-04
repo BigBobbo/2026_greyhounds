@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<!--
+SYNTHETIC fixture (grireland.ie unreachable from sandbox): simulates a GRI
+markup redesign — race content is clearly present ("Race 1" text, dog rows)
+but rendered with div/h2 elements instead of the h4 + igb-tbl structure the
+parser expects. Parsing must raise ParseStructureError, never quietly
+return [].
+-->
+<html>
+<head><title>View Results - Greyhound Racing Ireland</title></head>
+<body>
+<form method="post" action="./view-results">
+  <select name="ctl00$ContentPlaceHolder1$ddlTrack" id="ContentPlaceHolder1_ddlTrack">
+    <option value="SPK" selected="selected">Shelbourne Park</option>
+  </select>
+</form>
+
+<div class="race-results-v2">
+  <h2 class="race-title">Race 1 - The 600 Final 525 (Grade : A2) Flat 525</h2>
+  <div class="runner-grid">
+    <div class="runner-row">
+      <span class="pos">1.</span>
+      <span class="trap">4</span>
+      <span class="dog"><a href="/results/greyhound-search/greyhound-details/?gid=101">BALLYMAC VISION</a></span>
+      <span class="sp">5/2F</span>
+    </div>
+    <div class="runner-row">
+      <span class="pos">2.</span>
+      <span class="trap">1</span>
+      <span class="dog"><a href="/results/greyhound-search/greyhound-details/?gid=102">SWIFT EMPRESS</a></span>
+      <span class="sp">3/1</span>
+    </div>
+  </div>
+</div>
+</body>
+</html>

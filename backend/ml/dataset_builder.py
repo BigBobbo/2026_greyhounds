@@ -11,12 +11,11 @@ Handles:
 
 import gc
 import logging
-from datetime import date
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import and_, func
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.race import Race
@@ -204,6 +203,18 @@ def build_dataset(
 
     entries_df = entries_df.loc[common_ids]
     X = X.loc[common_ids]
+
+    # Chronological ascending order with race contiguity. The fetch query is
+    # newest-first (so LIMIT keeps the most recent N), but everything
+    # downstream assumes oldest-first: the walk-forward fold generator
+    # rejects non-ascending input (with descending data its embargo check
+    # used to discard every fold and training silently fell back to a single
+    # split), and LambdaRank group sizes require all entries of a race to be
+    # contiguous, which a single-key date sort does not guarantee for
+    # same-date races. The stable sort keeps entry order within each race.
+    order = entries_df.sort_values(["race_date", "race_id"], kind="stable").index
+    entries_df = entries_df.loc[order]
+    X = X.loc[order]
 
     logger.info("After alignment: %d entries with %d features", len(X), X.shape[1])
 
@@ -439,18 +450,29 @@ def _compute_builtin_features(db: Session, entry_ids: list[int],
     Processes in batches to limit peak memory — each batch loads dog histories
     only for its subset of entries.
     """
-    from ml.race_features import compute_builtin_features_batch
+    from ml.race_features import (
+        build_global_aggregate_context,
+        compute_builtin_features_batch,
+    )
 
     BATCH_SIZE = 5000
     if len(entry_ids) <= BATCH_SIZE:
         return compute_builtin_features_batch(db, entry_ids, heartbeat_fn=heartbeat_fn)
+
+    # Build the global aggregate tables once and share them across batches —
+    # they scale with total DB size, not batch size (audit C14).
+    global_ctx = build_global_aggregate_context(db)
+    if heartbeat_fn is not None:
+        heartbeat_fn()
 
     all_dfs = []
     for i in range(0, len(entry_ids), BATCH_SIZE):
         batch = entry_ids[i:i + BATCH_SIZE]
         logger.info("Computing builtin features batch %d-%d of %d",
                      i, min(i + BATCH_SIZE, len(entry_ids)), len(entry_ids))
-        batch_df = compute_builtin_features_batch(db, batch, heartbeat_fn=heartbeat_fn)
+        batch_df = compute_builtin_features_batch(
+            db, batch, heartbeat_fn=heartbeat_fn, global_ctx=global_ctx,
+        )
         if not batch_df.empty:
             all_dfs.append(batch_df)
         gc.collect()
@@ -510,12 +532,24 @@ def generate_walk_forward_fold_indices(
     if n_races < n_folds + 1:
         return []
 
+    # Refuse silently-wrong input: with descending dates the embargo check
+    # below discards every validation race, so walk-forward "ran" but always
+    # fell back to a single split. Raising makes that regression impossible.
+    if n_races > 1:
+        dates_arr = np.asarray(unique_race_dates)
+        if not all(dates_arr[i] <= dates_arr[i + 1] for i in range(len(dates_arr) - 1)):
+            raise ValueError(
+                "generate_walk_forward_fold_indices requires race_dates in "
+                "ascending chronological order; got non-ascending input. "
+                "Sort the dataset by (race_date, race_id) first."
+            )
+
     val_size = int(n_races * (1.0 - min_train_pct) / n_folds)
     val_size = max(1, val_size)
     train_start_size = max(1, n_races - val_size * n_folds)
 
     # Build a lookup from row index -> positional index within input
-    pos_by_index = {idx: i for i, idx in enumerate(ord_idx)}
+    {idx: i for i, idx in enumerate(ord_idx)}
 
     folds: list[tuple[np.ndarray, np.ndarray]] = []
     for fold in range(n_folds):
@@ -567,12 +601,23 @@ def _compute_group_sizes(race_ids: pd.Series) -> list[int]:
         return []
 
     groups = []
+    seen: set = set()
     current_race = race_ids.iloc[0]
+    seen.add(current_race)
     count = 0
     for rid in race_ids:
         if rid == current_race:
             count += 1
         else:
+            if rid in seen:
+                # A race id reappearing after a different race means group
+                # fragmentation: LambdaRank would train on wrong groupings
+                # with no error. Fail loudly instead.
+                raise ValueError(
+                    f"race_id {rid} is not contiguous in the dataset; "
+                    "sort by (race_date, race_id) before computing groups."
+                )
+            seen.add(rid)
             groups.append(count)
             current_race = rid
             count = 1
@@ -1123,3 +1168,27 @@ def add_race_relative_features(X: pd.DataFrame, race_ids: pd.Series) -> pd.DataF
     )
 
     return X
+
+
+def dataset_fingerprint(dataset: dict) -> str:
+    """Stable digest of an assembled dataset for reproducibility checks.
+
+    Experiments default to training on unversioned feature rows that
+    re-materialization mutates in place, so 'the same experiment' can
+    silently see different data later. The fingerprint (feature names +
+    per-split shapes + content hashes) is persisted on the experiment;
+    rebuilding the dataset and comparing fingerprints detects drift
+    without snapshotting the full matrix.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(",".join(dataset.get("feature_names", [])).encode())
+    for key in ("X_train", "X_val", "X_test"):
+        X = dataset.get(key)
+        if X is None or len(X) == 0:
+            h.update(f"{key}:empty".encode())
+            continue
+        content = int(pd.util.hash_pandas_object(X.fillna(-1.0), index=True).sum())
+        h.update(f"{key}:{X.shape}:{content}".encode())
+    return h.hexdigest()[:16]

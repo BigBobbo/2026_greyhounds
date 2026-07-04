@@ -2,7 +2,6 @@
 
 import logging
 from datetime import date
-from threading import Thread
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,7 +10,7 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.database import get_db, SessionLocal
+from app.database import get_db
 from app.models.dog import Dog
 from app.models.prediction import Prediction
 from app.models.race import Race
@@ -40,7 +39,7 @@ class OddsEntry(BaseModel):
 
 class UpdateOddsRequest(BaseModel):
     experiment_id: int
-    bankroll: float = 100.0
+    bankroll: float | None = None
     odds: list[OddsEntry]
 
 
@@ -57,7 +56,7 @@ class ComboKellyRequest(BaseModel):
     bet_type: str  # "forecast" or "trio"
     legs: list[int]  # ordered race_entry_ids: [1st, 2nd] or [1st, 2nd, 3rd]
     dividend_decimal: float
-    bankroll: float = 100.0
+    bankroll: float | None = None
 
 
 @router.get("/", response_model=list[PredictionResponse])
@@ -277,11 +276,11 @@ def predict_race_preflight(
     }
 
 
-@router.get("/race/{race_id}")
+@router.post("/race/{race_id}")
 def predict_single_race(
     race_id: int,
     experiment_id: int,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1, description="Override the tracked bankroll; defaults to BankrollConfig.current_bankroll"),
     refresh: bool = Query(
         default=False,
         description="If true, recompute even if saved predictions exist",
@@ -313,11 +312,37 @@ def predict_single_race(
         preds = cached
         saved = 0
         from_cache = True
+        # The cached Kelly stakes were sized against the bankroll at
+        # prediction time. If the caller passes a different bankroll,
+        # silently returning the old stakes is a correctness trap —
+        # recompute the staking layer (cheap; no model run) against the
+        # cached probabilities and stored SPs.
+        if bankroll is not None:
+            from app.services.prediction_service import (
+                compute_kelly_stake,
+                get_staking_params,
+            )
+
+            staking = get_staking_params(db)
+            for p in preds:
+                stale_bankroll = p.get("bankroll_used")
+                if stale_bankroll == bankroll:
+                    continue
+                wp = p.get("win_probability")
+                odds = p.get("sp_decimal_at_pred")
+                if wp is not None:
+                    p["kelly"] = compute_kelly_stake(
+                        wp, odds, bankroll=bankroll,
+                        kelly_fraction=staking["kelly_fraction"],
+                        min_edge=staking["min_edge"],
+                        max_stake_pct=staking["max_stake_pct"],
+                    )
+                    p["bankroll_used"] = bankroll
     else:
         try:
             preds = predict_race(db, experiment_id, race_id, bankroll=bankroll)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
         saved = save_predictions(db, preds) if preds else 0
         from_cache = False
 
@@ -390,11 +415,11 @@ def get_saved_race_predictions(
     }
 
 
-@router.get("/race/{race_id}/combos")
+@router.post("/race/{race_id}/combos")
 def get_race_combos(
     race_id: int,
     experiment_id: int,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1, description="Override the tracked bankroll; defaults to BankrollConfig.current_bankroll"),
     refresh: bool = Query(
         default=False,
         description="If true, recompute the ordering layer even if predictions are cached",
@@ -416,7 +441,6 @@ def get_race_combos(
     already-stored win probabilities, so it's fast (millisecond range)
     and cannot drift from the saved win-bet recommendations.
     """
-    import json
 
     from app.services.prediction_service import (
         get_saved_predictions_for_race,
@@ -443,7 +467,7 @@ def get_race_combos(
         try:
             preds = predict_race(db, experiment_id, race_id, bankroll=bankroll)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
         if not preds:
             raise HTTPException(
                 status_code=404,
@@ -674,10 +698,16 @@ def score_combo_bet(race_id: int, payload: ComboKellyRequest, db: Session = Depe
                 combo_probability = c.probability
                 break
 
+    from app.services.prediction_service import get_staking_params
+
+    combo_bankroll = payload.bankroll
+    if combo_bankroll is None:
+        combo_bankroll = get_staking_params(db)["current_bankroll"]
+
     kelly = compute_combo_kelly(
         combo_probability=combo_probability,
         combo_odds_decimal=payload.dividend_decimal,
-        bankroll=payload.bankroll,
+        bankroll=combo_bankroll,
     )
 
     return {
@@ -714,7 +744,7 @@ def update_predictions_with_odds(
     if not race:
         raise HTTPException(status_code=404, detail="Race not found")
 
-    if payload.bankroll < 1:
+    if payload.bankroll is not None and payload.bankroll < 1:
         raise HTTPException(status_code=422, detail="bankroll must be >= 1")
 
     odds_by_entry: dict[int, float | None] = {}
@@ -728,12 +758,18 @@ def update_predictions_with_odds(
             )
         odds_by_entry[entry.race_entry_id] = entry.decimal_odds
 
+    from app.services.prediction_service import get_staking_params
+
+    effective_bankroll = payload.bankroll
+    if effective_bankroll is None:
+        effective_bankroll = get_staking_params(db)["current_bankroll"]
+
     updated = recompute_kelly_for_saved_predictions(
         db=db,
         experiment_id=payload.experiment_id,
         race_id=race_id,
         odds_by_entry=odds_by_entry,
-        bankroll=payload.bankroll,
+        bankroll=effective_bankroll,
     )
     if not updated:
         raise HTTPException(
@@ -967,12 +1003,12 @@ def get_races_for_date(
     ]
 
 
-@router.get("/by-date")
+@router.post("/by-date")
 def predict_races_by_date(
     race_date: date,
     experiment_id: int,
     track_code: str | None = None,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1, description="Override the tracked bankroll; defaults to BankrollConfig.current_bankroll"),
     only_scheduled: bool = Query(
         default=True,
         description="If true, only predict races with status='scheduled' (skip resulted)",
@@ -1062,7 +1098,7 @@ def predict_races_by_date(
             raise HTTPException(
                 status_code=500,
                 detail=f"Feature batch computation failed: {e}",
-            )
+            ) from e
 
     results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -1108,10 +1144,10 @@ def predict_races_by_date(
     }
 
 
-@router.get("/upcoming")
+@router.post("/upcoming")
 def get_upcoming_predictions(
     experiment_id: int,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1, description="Override the tracked bankroll; defaults to BankrollConfig.current_bankroll"),
     db: Session = Depends(get_db),
 ):
     """Get or generate predictions for all scheduled (upcoming) races."""
@@ -1120,7 +1156,7 @@ def get_upcoming_predictions(
     try:
         results = predict_upcoming_races(db, experiment_id, bankroll=bankroll)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     return {
         "experiment_id": experiment_id,
@@ -1129,12 +1165,12 @@ def get_upcoming_predictions(
     }
 
 
-@router.get("/race/{race_id}/ensemble")
+@router.post("/race/{race_id}/ensemble")
 def predict_race_ensemble(
     race_id: int,
     experiment_ids: str = Query(..., description="Comma-separated experiment IDs"),
     weights: str | None = Query(default=None, description="Comma-separated weights (must match experiment_ids)"),
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1, description="Override the tracked bankroll; defaults to BankrollConfig.current_bankroll"),
     db: Session = Depends(get_db),
 ):
     """Generate ensemble predictions by combining multiple trained models."""
@@ -1150,7 +1186,7 @@ def predict_race_ensemble(
     try:
         preds = ensemble_predict(db, exp_ids, race_id, weights=w, bankroll=bankroll)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     track = db.query(Track).filter(Track.id == race.track_id).first()
 
@@ -1166,11 +1202,11 @@ def predict_race_ensemble(
     }
 
 
-@router.get("/best-bets")
+@router.post("/best-bets")
 def get_best_bets(
     experiment_id: int,
     race_date: date,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1, description="Override the tracked bankroll; defaults to BankrollConfig.current_bankroll"),
     min_confidence: str = Query(default="moderate", description="Minimum confidence tier: strong, moderate, weak"),
     min_edge: float = Query(default=0.05, description="Minimum edge over market odds"),
     limit: int = Query(default=10, le=50),
@@ -1244,9 +1280,22 @@ def get_best_bets(
         except Exception as e:
             logger.warning("Best bets: race %d failed: %s", race.id, e)
 
+    # One bet per race: win bets in a race are mutually exclusive outcomes,
+    # and independent Kelly stakes on several of them systematically
+    # overstake (multiple "value" dogs in one race usually means the race's
+    # probabilities are miscalibrated, not that the race is a goldmine).
+    # Keep only the highest-edge qualifier per race — the same rule the
+    # betting backtest simulates, so live results stay comparable to it.
+    best_per_race: dict[int, dict] = {}
+    for bet in all_value_bets:
+        existing = best_per_race.get(bet["race_id"])
+        if existing is None or bet["edge"] > existing["edge"]:
+            best_per_race[bet["race_id"]] = bet
+    deduped = list(best_per_race.values())
+
     # Sort by edge (highest first) and limit
-    all_value_bets.sort(key=lambda b: b["edge"], reverse=True)
-    best_bets = all_value_bets[:limit]
+    deduped.sort(key=lambda b: b["edge"], reverse=True)
+    best_bets = deduped[:limit]
 
     return {
         "race_date": str(race_date),

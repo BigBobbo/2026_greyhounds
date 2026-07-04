@@ -2,18 +2,22 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LineChart, Line, ScatterChart, Scatter } from 'recharts';
 import api from '../api/client';
-import type { Experiment } from '../types/models';
+import type { Experiment, PnlPoint, SplitConfig } from '../types/models';
 
 export default function ExperimentDetail() {
   const { id } = useParams();
   const [exp, setExp] = useState<Experiment | null>(null);
   const [loading, setLoading] = useState(true);
+  // Sampled once per poll tick (not during render) so the heartbeat age
+  // display stays pure yet refreshes every time the 5s poll lands.
+  const [now, setNow] = useState(() => Date.now());
   const [logExpanded, setLogExpanded] = useState<boolean | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const fetch = () => {
       api.get<Experiment>(`/training/experiments/${id}`).then(res => {
+        setNow(Date.now());
         setExp(res.data);
         setLoading(false);
       }).catch(() => setLoading(false));
@@ -51,15 +55,15 @@ export default function ExperimentDetail() {
 
   // ROC data
   const rocData = exp.roc_data
-    ? (exp.roc_data as any).fpr?.map((fpr: number, i: number) => ({
-        fpr, tpr: (exp.roc_data as any).tpr[i],
-      }))
+    ? exp.roc_data.fpr?.map((fpr, i) => ({
+        fpr, tpr: exp.roc_data!.tpr[i],
+      })) ?? []
     : [];
 
   // Calibration data (now nested under .calibration)
-  const calRaw = (exp.calibration_data as any)?.calibration;
+  const calRaw = exp.calibration_data?.calibration;
   const calData = calRaw?.predicted_prob
-    ? calRaw.predicted_prob.map((prob: number, i: number) => ({
+    ? calRaw.predicted_prob.map((prob, i) => ({
         predicted: prob,
         actual: calRaw.actual_freq[i],
         count: calRaw.bin_counts[i],
@@ -67,12 +71,12 @@ export default function ExperimentDetail() {
     : [];
 
   // Betting P&L data
-  const bettingRaw = (exp.calibration_data as any)?.betting;
-  const pnlData: { race: number; pnl: number; fav_pnl?: number }[] = bettingRaw?.pnl_by_race || [];
+  const bettingRaw = exp.calibration_data?.betting;
+  const pnlData: PnlPoint[] = bettingRaw?.pnl_by_race || [];
   const kellyPnlData: { race: number; pnl: number }[] = bettingRaw?.kelly_pnl_by_race || [];
 
   // Confusion matrix
-  const cm = exp.confusion_matrix as number[][] | null;
+  const cm = exp.confusion_matrix;
 
   return (
     <div>
@@ -102,7 +106,7 @@ export default function ExperimentDetail() {
           return STAGE_LABELS[stage] || stage;
         };
         const ageSec = exp.heartbeat_at
-          ? Math.floor((Date.now() - new Date(exp.heartbeat_at + 'Z').getTime()) / 1000)
+          ? Math.floor((now - new Date(exp.heartbeat_at + 'Z').getTime()) / 1000)
           : null;
         const isStale = ageSec !== null && ageSec > 120;
         const ageStr = ageSec !== null
@@ -185,7 +189,7 @@ export default function ExperimentDetail() {
             )}
           </p>
           {(() => {
-            const sc = (exp.split_config as any) || {};
+            const sc: SplitConfig = exp.split_config || {};
             const obj = sc.optuna_objective || 'log_loss';
             const folds = sc.walk_forward_folds || 1;
             const embargo = sc.embargo_days || 0;
@@ -219,13 +223,46 @@ export default function ExperimentDetail() {
           <h2 className="font-semibold mb-3">Metrics</h2>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {Object.entries(exp.metrics)
-              .filter(([key]) => !key.startsWith('optuna_') && !key.startsWith('betting_'))
+              .filter(([key]) => !key.startsWith('optuna_') && !key.startsWith('betting_') && !key.startsWith('sp_gate_'))
               .map(([key, val]) => (
               <div key={key} className="border rounded-md p-3">
                 <p className="text-xs text-gray-500">{key}</p>
                 <p className="font-mono text-lg">{typeof val === 'number' ? val.toFixed(4) : String(val)}</p>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Beat-the-SP gate */}
+      {exp.metrics && typeof exp.metrics['sp_gate_log_loss_vs_sp'] === 'number' && (
+        <div className="bg-white rounded-lg shadow p-5 mb-6">
+          <h2 className="font-semibold mb-1">Market Baseline (de-vigged SP)</h2>
+          <p className="text-sm text-gray-500 mb-3">
+            The decisive test: does this model carry information beyond the market?
+            Negative log-loss delta = model better than SP probabilities on the same races.
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className={`border rounded-md p-3 ${exp.metrics['sp_gate_beats_sp'] ? 'border-green-300 bg-green-50' : 'border-red-300 bg-red-50'}`}>
+              <p className="text-xs text-gray-500">Verdict</p>
+              <p className={`font-bold ${exp.metrics['sp_gate_beats_sp'] ? 'text-green-700' : 'text-red-700'}`}>
+                {exp.metrics['sp_gate_beats_sp'] ? 'BEATS the market' : 'Does NOT beat the market'}
+              </p>
+            </div>
+            <div className="border rounded-md p-3">
+              <p className="text-xs text-gray-500">Log-loss vs SP</p>
+              <p className="font-mono text-lg">{Number(exp.metrics['sp_gate_log_loss_vs_sp']).toFixed(4)}</p>
+              <p className="text-xs text-gray-400">model {Number(exp.metrics['sp_gate_model_log_loss']).toFixed(4)} vs SP {Number(exp.metrics['sp_gate_sp_log_loss']).toFixed(4)}</p>
+            </div>
+            <div className="border rounded-md p-3">
+              <p className="text-xs text-gray-500">Brier vs SP</p>
+              <p className="font-mono text-lg">{Number(exp.metrics['sp_gate_brier_vs_sp']).toFixed(4)}</p>
+            </div>
+            <div className="border rounded-md p-3">
+              <p className="text-xs text-gray-500">Model blend weight</p>
+              <p className="font-mono text-lg">{exp.metrics['sp_gate_model_blend_coef'] != null ? Number(exp.metrics['sp_gate_model_blend_coef']).toFixed(3) : '-'}</p>
+              <p className="text-xs text-gray-400">weight assigned to the model on top of SP (0 = nothing)</p>
+            </div>
           </div>
         </div>
       )}
@@ -281,7 +318,7 @@ export default function ExperimentDetail() {
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="race" label={{ value: 'Race #', position: 'bottom', offset: -5 }} />
                       <YAxis label={{ value: 'P&L ($)', angle: -90, position: 'left' }} />
-                      <Tooltip formatter={(v: any, name) => [`$${v}`, name === 'pnl' ? 'Model Top Pick' : name === 'fav_pnl' ? 'Favourite' : String(name ?? '')]} />
+                      <Tooltip formatter={(v, name) => [`$${v}`, name === 'pnl' ? 'Model Top Pick' : name === 'fav_pnl' ? 'Favourite' : String(name ?? '')]} />
                       <Legend formatter={(value: string) => value === 'pnl' ? 'Model Top Pick' : value === 'fav_pnl' ? 'Favourite (baseline)' : value} />
                       <Line type="monotone" dataKey="pnl" stroke="#3b82f6" strokeWidth={2} dot={false} name="pnl" />
                       <Line type="monotone" dataKey="fav_pnl" stroke="#f59e0b" strokeWidth={2} dot={false} strokeDasharray="6 3" name="fav_pnl" />
@@ -298,7 +335,7 @@ export default function ExperimentDetail() {
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="race" label={{ value: 'Race #', position: 'bottom', offset: -5 }} />
                       <YAxis label={{ value: 'P&L ($)', angle: -90, position: 'left' }} />
-                      <Tooltip formatter={(v: any) => [`$${v}`, 'Kelly P&L']} />
+                      <Tooltip formatter={(v) => [`$${v}`, 'Kelly P&L']} />
                       <Line type="monotone" dataKey="pnl" stroke="#10b981" strokeWidth={2} dot={false} />
                       <Line type="monotone" dataKey={() => 0} stroke="#d1d5db" strokeDasharray="5 5" dot={false} />
                     </LineChart>

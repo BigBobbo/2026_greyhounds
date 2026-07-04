@@ -20,15 +20,17 @@ def main():
     os.makedirs("data/models", exist_ok=True)
     print(f"Data dir exists: {os.path.isdir('data')}", flush=True)
 
-    # Run alembic (non-fatal)
-    try:
-        import subprocess
-        r = subprocess.run(["alembic", "upgrade", "head"], capture_output=True, text=True)
-        print(f"Alembic stdout: {r.stdout}", flush=True)
-        if r.returncode != 0:
-            print(f"Alembic stderr: {r.stderr}", flush=True)
-    except Exception as e:
-        print(f"Alembic failed: {e}", flush=True)
+    # Run alembic. A failed migration must NOT serve traffic: continuing on a
+    # wrong schema turns a loud failure into silent drift (the API 500s on
+    # affected tables while the healthcheck used to pass). Railway's
+    # ON_FAILURE restart policy + healthcheck surface the exit properly.
+    import subprocess
+    r = subprocess.run(["alembic", "upgrade", "head"], capture_output=True, text=True)
+    print(f"Alembic stdout: {r.stdout}", flush=True)
+    if r.returncode != 0:
+        print(f"Alembic stderr: {r.stderr}", flush=True)
+        print("=== Migration failed — refusing to start ===", flush=True)
+        sys.exit(r.returncode)
 
     # Seed tracks (non-fatal)
     try:

@@ -3,12 +3,17 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from app.config import settings
 from app.database import Base
 import app.models  # noqa: F401 - import all models so Base.metadata is populated
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# Single source of truth: migrations must target the same database the app
+# uses (DATABASE_URL), not the hardcoded path in alembic.ini.
+config.set_main_option("sqlalchemy.url", settings.database_url)
 
 target_metadata = Base.metadata
 

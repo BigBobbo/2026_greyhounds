@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.database import SessionLocal, engine, Base
+from app.database import SessionLocal
 from app.models.feature_definition import FeatureDefinition
 import app.models  # noqa: F401
 
@@ -595,7 +595,6 @@ PRESET_FEATURES = [
 
 
 def seed():
-    Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
         existing = {f.name for f in db.query(FeatureDefinition).all()}

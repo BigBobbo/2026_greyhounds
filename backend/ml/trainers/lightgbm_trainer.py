@@ -1,9 +1,8 @@
-"""LightGBM trainer implementation with isotonic calibration."""
+"""LightGBM trainer implementation with Platt-scaling calibration."""
 
 from typing import Any
 
 import numpy as np
-import pandas as pd
 from lightgbm import LGBMClassifier, LGBMRegressor
 from sklearn.linear_model import LogisticRegression as _PlattLR
 
@@ -28,8 +27,8 @@ class LightGBMTrainer(BaseTrainer):
         }
         model_params.setdefault("verbosity", -1)
         model_params.setdefault("random_state", 42)
-        if target_type == "classification":
-            model_params.setdefault("is_unbalance", True)
+        # No is_unbalance default — same probability-scale reasoning as
+        # the XGBoost trainer; pass it explicitly if an experiment wants it.
         self._model_params = model_params
         self.model = None
 
@@ -42,15 +41,23 @@ class LightGBMTrainer(BaseTrainer):
             # LightGBM accepts a list of ints of same length as features.
             model_params["monotone_constraints"] = constraints
 
+        # Early stopping on val with a high tree ceiling — see the
+        # XGBoost trainer for the val-usage boundary note.
+        model_params.setdefault("n_estimators", 2000)
+
         if self.target_type == "classification":
             self.model = LGBMClassifier(**model_params)
         else:
             self.model = LGBMRegressor(**model_params)
 
+        import lightgbm as lgb
+
         self.model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
+            callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
         )
+        self.best_iteration = getattr(self.model, "best_iteration_", None)
 
         from ml.evaluation import compute_metrics
         if self.target_type == "classification":
@@ -88,5 +95,5 @@ class LightGBMTrainer(BaseTrainer):
 
     def get_feature_importance(self) -> dict[str, float]:
         if hasattr(self.model, "feature_importances_") and hasattr(self.model, "feature_names_in_"):
-            return dict(zip(self.model.feature_names_in_, self.model.feature_importances_.tolist()))
+            return dict(zip(self.model.feature_names_in_, self.model.feature_importances_.tolist(), strict=False))
         return {}

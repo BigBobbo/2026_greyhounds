@@ -126,7 +126,7 @@ export default function DogProfile() {
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="run" label={{ value: 'Run #', position: 'bottom', offset: -5 }} />
                 <YAxis domain={['auto', 'auto']} label={{ value: 'Time (s)', angle: -90, position: 'left' }} />
-                <Tooltip labelFormatter={(v) => `Run ${v}`} formatter={(v: any) => [Number(v).toFixed(2) + 's', 'Time']} />
+                <Tooltip labelFormatter={(v) => `Run ${v}`} formatter={(v) => [Number(v).toFixed(2) + 's', 'Time']} />
                 <Line type="monotone" dataKey="time" stroke="#3b82f6" strokeWidth={2} dot={{ r: 3 }} />
               </LineChart>
             </ResponsiveContainer>
@@ -140,7 +140,7 @@ export default function DogProfile() {
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="run" label={{ value: 'Run #', position: 'bottom', offset: -5 }} />
                 <YAxis reversed domain={[1, 6]} label={{ value: 'Position', angle: -90, position: 'left' }} />
-                <Tooltip labelFormatter={(v) => `Run ${v}`} formatter={(v: any) => [v, 'Position']} />
+                <Tooltip labelFormatter={(v) => `Run ${v}`} formatter={(v) => [v, 'Position']} />
                 <Line type="monotone" dataKey="position" stroke="#10b981" strokeWidth={2} dot={{ r: 3 }} />
               </LineChart>
             </ResponsiveContainer>

@@ -11,12 +11,18 @@ export default function RaceList() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
 
-  const fetchRaces = () => {
+  const fetchRaces = (overrides?: { track?: string; from?: string; to?: string }) => {
     setLoading(true);
+    // Explicit overrides exist because Clear must refetch with the CLEARED
+    // values: calling the closure after setState reads the previous render's
+    // (stale) filter state.
+    const track = overrides?.track ?? trackFilter;
+    const from = overrides?.from ?? dateFrom;
+    const to = overrides?.to ?? dateTo;
     const params: Record<string, string> = { limit: '100' };
-    if (trackFilter) params.track_id = trackFilter;
-    if (dateFrom) params.date_from = dateFrom;
-    if (dateTo) params.date_to = dateTo;
+    if (track) params.track_id = track;
+    if (from) params.date_from = from;
+    if (to) params.date_to = to;
 
     api.get<Race[]>('/races/', { params }).then(res => {
       setRaces(res.data);
@@ -24,9 +30,15 @@ export default function RaceList() {
     }).catch(() => setLoading(false));
   };
 
+  // Initial load: state updates happen inside the promise chains (loading
+  // starts true) so no setState runs synchronously in the effect body. No
+  // filters are set on mount, so this matches fetchRaces() with defaults.
   useEffect(() => {
     api.get<Track[]>('/tracks/').then(res => setTracks(res.data));
-    fetchRaces();
+    api.get<Race[]>('/races/', { params: { limit: '100' } }).then(res => {
+      setRaces(res.data);
+      setLoading(false);
+    }).catch(() => setLoading(false));
   }, []);
 
   const handleFilter = (e: React.FormEvent) => {
@@ -62,7 +74,7 @@ export default function RaceList() {
         <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded-md text-sm hover:bg-blue-700">
           Filter
         </button>
-        <button type="button" onClick={() => { setTrackFilter(''); setDateFrom(''); setDateTo(''); setTimeout(fetchRaces, 0); }} className="text-gray-500 text-sm hover:text-gray-700">
+        <button type="button" onClick={() => { setTrackFilter(''); setDateFrom(''); setDateTo(''); fetchRaces({ track: '', from: '', to: '' }); }} className="text-gray-500 text-sm hover:text-gray-700">
           Clear
         </button>
       </form>

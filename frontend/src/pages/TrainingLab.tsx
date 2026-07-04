@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { toast } from 'sonner';
+import { parseUtc } from '../lib/time';
 import api from '../api/client';
-import type { Experiment, FeatureDefinition } from '../types/models';
+import type { Experiment, FeatureDefinition, SplitConfig } from '../types/models';
 
 interface FeatureVersion {
   id: number;
@@ -32,12 +34,16 @@ export default function TrainingLab() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [creating, setCreating] = useState(false);
+  // "Now" is sampled once per poll tick (see fetchData) instead of during
+  // render, so heartbeat ages stay pure but still refresh with each poll.
+  const [now, setNow] = useState(() => Date.now());
 
   // Form state
   const [name, setName] = useState('');
   const [algorithm, setAlgorithm] = useState('lambdarank');
   const [target, setTarget] = useState('win_prob');
   const [selectedFeatures, setSelectedFeatures] = useState<number[]>([]);
+  const featuresSeeded = useRef(false);
   const [selectedVersionId, setSelectedVersionId] = useState<number | null>(null);
   const [autoTune, setAutoTune] = useState(false);
   const [optunTrials, setOptunTrials] = useState(50);
@@ -70,11 +76,17 @@ export default function TrainingLab() {
       api.get<FeatureDefinition[]>('/features/?enabled_only=true'),
       api.get<FeatureVersion[]>('/features/versions'),
     ]).then(([expRes, featRes, verRes]) => {
+      setNow(Date.now());
       setExperiments(expRes.data);
       setFeatures(featRes.data);
       setVersions(verRes.data);
-      if (featRes.data.length > 0 && selectedFeatures.length === 0) {
-        setSelectedFeatures(featRes.data.map(f => f.id));
+      // Seed the default selection exactly once. The interval below captures
+      // a stale closure where selectedFeatures is always [], so checking the
+      // state variable here would re-select everything on every poll tick,
+      // silently undoing the user's un-checks while the form is open.
+      if (featRes.data.length > 0 && !featuresSeeded.current) {
+        featuresSeeded.current = true;
+        setSelectedFeatures(prev => (prev.length > 0 ? prev : featRes.data.map(f => f.id)));
       }
       setLoading(false);
     }).catch(() => setLoading(false));
@@ -87,12 +99,18 @@ export default function TrainingLab() {
   }, []);
 
   const handleCreate = async () => {
-    if (!name.trim()) return alert('Please enter a name');
-    if (selectedFeatures.length === 0) return alert('Please select at least one feature');
+    if (!name.trim()) {
+      toast.warning('Please enter a name');
+      return;
+    }
+    if (selectedFeatures.length === 0) {
+      toast.warning('Please select at least one feature');
+      return;
+    }
 
     setCreating(true);
     try {
-      const splitConfig: Record<string, any> = {
+      const splitConfig: SplitConfig = {
         test_after: testAfter,
         val_pct: 0.15,
         include_builtin_features: includeBuiltin,
@@ -124,16 +142,20 @@ export default function TrainingLab() {
       setShowForm(false);
       setName('');
       fetchData();
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create experiment');
+    } catch {
+      // error toast shown by the API interceptor
     }
     setCreating(false);
   };
 
   const handleDelete = async (id: number) => {
     if (!confirm('Delete this experiment?')) return;
-    await api.delete(`/training/experiments/${id}`);
-    fetchData();
+    try {
+      await api.delete(`/training/experiments/${id}`);
+      fetchData();
+    } catch {
+      // error toast shown by the API interceptor
+    }
   };
 
   const statusColor = (s: string) => {
@@ -169,7 +191,7 @@ export default function TrainingLab() {
 
   const heartbeatAgeSeconds = (heartbeat: string | null) => {
     if (!heartbeat) return null;
-    return Math.floor((Date.now() - new Date(heartbeat + 'Z').getTime()) / 1000);
+    return Math.floor((now - (parseUtc(heartbeat)?.getTime() ?? 0)) / 1000);
   };
 
   const formatHeartbeatAge = (seconds: number) => {
@@ -645,8 +667,8 @@ export default function TrainingLab() {
                     <Link to={`/training/${exp.id}`} className="text-blue-600 hover:underline font-medium">
                       {exp.name}
                     </Link>
-                    {exp.split_config && (exp.split_config as any).test_after && (
-                      <p className="text-xs text-gray-400">Test after: {(exp.split_config as any).test_after}</p>
+                    {exp.split_config?.test_after && (
+                      <p className="text-xs text-gray-400">Test after: {exp.split_config.test_after}</p>
                     )}
                   </td>
                   <td className="px-4 py-3">
@@ -657,7 +679,7 @@ export default function TrainingLab() {
                       </span>
                     )}
                     {(() => {
-                      const sc = (exp.split_config as any) || {};
+                      const sc: SplitConfig = exp.split_config || {};
                       const obj = sc.optuna_objective;
                       const folds = sc.walk_forward_folds;
                       const embargo = sc.embargo_days;

@@ -44,7 +44,6 @@ SEARCH_SPACES: dict[str, dict[str, dict[str, Any]]] = {
         "subsample": {"type": "float", "low": 0.5, "high": 1.0},
         "colsample_bytree": {"type": "float", "low": 0.4, "high": 1.0},
         "min_child_weight": {"type": "int", "low": 1, "high": 30},
-        "scale_pos_weight": {"type": "float", "low": 1.0, "high": 10.0},
         "gamma": {"type": "float", "low": 0.0, "high": 5.0},
         "reg_alpha": {"type": "float_log", "low": 1e-5, "high": 10.0},
         "reg_lambda": {"type": "float_log", "low": 1e-5, "high": 10.0},
@@ -242,7 +241,7 @@ STRATEGIES = [
 
 def _select_strategy():
     """Weighted random strategy selection."""
-    funcs, weights = zip(*STRATEGIES)
+    funcs, weights = zip(*STRATEGIES, strict=False)
     return random.choices(funcs, weights=weights, k=1)[0]
 
 
@@ -250,7 +249,12 @@ def _select_strategy():
 # Core loop
 # ---------------------------------------------------------------------------
 
-# Objectives and their direction (True = higher is better)
+# Objectives and their direction (True = higher is better).
+# The names are the public API (kept stable for the /training/autoresearch
+# endpoint); during the search loop they are computed on the VALIDATION
+# split — selecting over up to 100 trials directly on the test set is
+# test-set mining and made the reported best score meaningless. The test
+# set is evaluated exactly once, for the final winner.
 OBJECTIVE_DIRECTIONS: dict[str, bool] = {
     "betting_kelly_roi": True,
     "betting_kelly_pnl": True,
@@ -264,6 +268,14 @@ OBJECTIVE_DIRECTIONS: dict[str, bool] = {
     "test_accuracy": True,
     "test_top1_accuracy": True,
 }
+
+
+def _metric_key_for(objective: str, split: str) -> str:
+    """Map a public objective name to the metric key for a given split."""
+    if objective.startswith("test_"):
+        return f"{split}_{objective[len('test_'):]}"
+    # betting objectives
+    return f"{split}_{objective}"
 
 
 def _is_improvement(
@@ -282,13 +294,18 @@ def _run_single_experiment(
     proposal: dict,
     target: str,
     split_config: dict | None,
+    eval_split: str = "val",
 ) -> tuple[dict[str, float] | None, float | None]:
     """
     Run a single training experiment without saving to DB.
 
+    Metrics are computed on `eval_split` ("val" during the search loop so
+    the test set stays untouched; "test" exactly once for the final winner)
+    and prefixed with the split name.
+
     Returns (all_metrics, training_duration) or (None, None) on failure.
     """
-    from app.services.training_service import create_trainer
+    from app.services.training_service import _nan_policy_for, create_trainer
 
     algorithm = proposal["algorithm"]
     hyperparams = proposal["hyperparameters"]
@@ -297,26 +314,32 @@ def _run_single_experiment(
 
     try:
         build_target = "finish_position" if is_ranking else target
+        # Match run_training's NaN policy: selecting GBM configs on
+        # median-imputed data while the final training uses passthrough
+        # would optimize for the wrong input distribution.
+        impute_missing = _nan_policy_for(algorithm) == "median_fill"
         dataset = build_dataset(
             db,
             feature_ids=feature_ids,
             target=build_target,
             split_config=split_config,
             only_complete=False,
+            impute_missing=impute_missing,
         )
 
         X_train = dataset["X_train"]
         y_train = dataset["y_train"]
         X_val = dataset["X_val"]
         y_val = dataset["y_val"]
-        X_test = dataset["X_test"]
-        y_test = dataset["y_test"]
         group_train = dataset.get("group_train")
         group_val = dataset.get("group_val")
-        group_test = dataset.get("group_test")
-        meta_test = dataset.get("meta_test")
 
-        if len(X_train) == 0 or len(X_test) == 0:
+        X_eval = dataset[f"X_{eval_split}"]
+        y_eval = dataset[f"y_{eval_split}"]
+        group_eval = dataset.get(f"group_{eval_split}")
+        meta_eval = dataset.get(f"meta_{eval_split}")
+
+        if len(X_train) == 0 or len(X_eval) == 0:
             logger.warning("Empty dataset, skipping")
             return None, None
 
@@ -330,57 +353,58 @@ def _run_single_experiment(
             trainer.train(X_train, y_train, X_val, y_val)
         duration = time.time() - start
 
-        # Evaluate on test set
+        # Evaluate on the requested split
         target_type = "regression" if target == "finish_time" else "classification"
-        test_pred = trainer.predict(X_test)
+        eval_pred = trainer.predict(X_eval)
 
         if is_ranking:
-            test_proba = trainer.scores_to_proba(test_pred, group_test)
-            test_metrics = trainer._compute_ranking_metrics(y_test, test_pred, group_test)
-            y_test_binary = (y_test == 1).astype(float)
-            test_pred_binary = np.zeros_like(y_test_binary)
+            eval_proba = trainer.scores_to_proba(eval_pred, group_eval)
+            eval_metrics = trainer._compute_ranking_metrics(y_eval, eval_pred, group_eval)
+            y_eval_binary = (y_eval == 1).astype(float)
+            eval_pred_binary = np.zeros_like(y_eval_binary)
             idx = 0
-            for g_size in (group_test or [len(test_pred)]):
-                g_scores = test_pred[idx:idx + g_size]
+            for g_size in (group_eval or [len(eval_pred)]):
+                g_scores = eval_pred[idx:idx + g_size]
                 winner_idx = np.argmax(g_scores)
-                test_pred_binary[idx + winner_idx] = 1
+                eval_pred_binary[idx + winner_idx] = 1
                 idx += g_size
             cls_metrics = compute_metrics(
-                y_test_binary, test_pred_binary, test_proba, "classification",
+                y_eval_binary, eval_pred_binary, eval_proba, "classification",
             )
-            test_metrics.update(cls_metrics)
+            eval_metrics.update(cls_metrics)
         else:
-            test_proba = trainer.predict_proba(X_test)
-            test_metrics = compute_metrics(y_test, test_pred, test_proba, target_type)
+            eval_proba = trainer.predict_proba(X_eval)
+            eval_metrics = compute_metrics(y_eval, eval_pred, eval_proba, target_type)
 
-        all_metrics = {f"test_{k}": v for k, v in test_metrics.items()}
+        all_metrics = {f"{eval_split}_{k}": v for k, v in eval_metrics.items()}
 
         # Betting metrics
         can_eval_betting = (
             (target_type == "classification" or is_ranking)
-            and test_proba is not None
-            and meta_test is not None
+            and eval_proba is not None
+            and meta_eval is not None
         )
         if can_eval_betting:
             try:
                 y_binary = (
-                    (y_test == 1).astype(float).values
+                    (y_eval == 1).astype(float).values
                     if is_ranking
-                    else y_test.values
+                    else y_eval.values
                 )
                 betting = compute_betting_metrics(
                     y_binary,
-                    test_proba,
-                    meta_test["sp_decimal"].values,
-                    meta_test["race_id"].values,
+                    eval_proba,
+                    meta_eval["sp_decimal"].values,
+                    meta_eval["race_id"].values,
                 )
-                all_metrics["betting_top_pick_pnl"] = betting["top_pick_pnl"]
-                all_metrics["betting_top_pick_roi"] = betting["top_pick_roi"]
-                all_metrics["betting_top_pick_strike_rate"] = betting["top_pick_strike_rate"]
-                all_metrics["betting_value_pnl"] = betting["value_bet_pnl"]
-                all_metrics["betting_value_roi"] = betting["value_bet_roi"]
-                all_metrics["betting_kelly_pnl"] = betting.get("kelly_pnl", 0)
-                all_metrics["betting_kelly_roi"] = betting.get("kelly_roi", 0)
+                p = eval_split
+                all_metrics[f"{p}_betting_top_pick_pnl"] = betting["top_pick_pnl"]
+                all_metrics[f"{p}_betting_top_pick_roi"] = betting["top_pick_roi"]
+                all_metrics[f"{p}_betting_top_pick_strike_rate"] = betting["top_pick_strike_rate"]
+                all_metrics[f"{p}_betting_value_pnl"] = betting["value_bet_pnl"]
+                all_metrics[f"{p}_betting_value_roi"] = betting["value_bet_roi"]
+                all_metrics[f"{p}_betting_kelly_pnl"] = betting.get("kelly_pnl", 0)
+                all_metrics[f"{p}_betting_kelly_roi"] = betting.get("kelly_roi", 0)
             except Exception as e:
                 logger.warning("Betting metrics failed: %s", e)
 
@@ -427,6 +451,9 @@ class AutoResearchLoop:
 
         self.db = db
         self.objective = objective
+        # Selection happens on the validation split; test is reserved for
+        # the single final evaluation of the winner.
+        self.loop_metric = _metric_key_for(objective, "val")
         self.higher_is_better = OBJECTIVE_DIRECTIONS[objective]
         self.target = target
         self.split_config = split_config or {}
@@ -480,15 +507,15 @@ class AutoResearchLoop:
         }
         logger.info("[0/%d] Running baseline...", max_experiments)
         metrics, duration = _run_single_experiment(
-            self.db, baseline, self.target, self.split_config,
+            self.db, baseline, self.target, self.split_config, eval_split="val",
         )
-        if metrics and self.objective in metrics:
-            self.state["best_score"] = metrics[self.objective]
+        if metrics and self.loop_metric in metrics:
+            self.state["best_score"] = metrics[self.loop_metric]
             self._log_experiment(0, baseline, metrics, duration, accepted=True)
             self._save_experiment(baseline, metrics, duration, is_best=True, trial_num=0)
             logger.info(
                 "[0/%d] Baseline %s = %.4f",
-                max_experiments, self.objective, self.state["best_score"],
+                max_experiments, self.loop_metric, self.state["best_score"],
             )
         else:
             logger.warning("Baseline failed or missing objective metric")
@@ -513,18 +540,18 @@ class AutoResearchLoop:
                 proposal["algorithm"], len(proposal["feature_set"]),
             )
 
-            # Train & evaluate
+            # Train & evaluate on the validation split (test stays untouched)
             metrics, duration = _run_single_experiment(
-                self.db, proposal, self.target, self.split_config,
+                self.db, proposal, self.target, self.split_config, eval_split="val",
             )
 
-            if metrics is None or self.objective not in metrics:
+            if metrics is None or self.loop_metric not in metrics:
                 logger.warning("[%d/%d] Failed or missing metric, skipping", i, max_experiments)
                 self._log_experiment(i, proposal, metrics, duration, accepted=False)
                 no_improvement_count += 1
                 continue
 
-            score = metrics[self.objective]
+            score = metrics[self.loop_metric]
             accepted = _is_improvement(score, self.state["best_score"], self.higher_is_better)
 
             if accepted:
@@ -537,7 +564,7 @@ class AutoResearchLoop:
 
                 logger.info(
                     "[%d/%d] IMPROVEMENT: %s %.4f -> %.4f (%s)",
-                    i, max_experiments, self.objective, old_score, score,
+                    i, max_experiments, self.loop_metric, old_score, score,
                     proposal["strategy"],
                 )
 
@@ -556,12 +583,40 @@ class AutoResearchLoop:
                 proposal, metrics, duration, is_best=accepted, trial_num=i,
             )
 
+        # Single, final test-set evaluation of the winner. This is the only
+        # place the test split is ever scored, so the reported number is an
+        # honest out-of-sample estimate rather than the max over N trials.
+        final_test_metrics: dict[str, float] | None = None
+        winner = {
+            "algorithm": self.state["best_algorithm"],
+            "hyperparameters": dict(self.state["best_hyperparams"]),
+            "feature_set": list(self.state["best_features"]),
+            "strategy": "final_best",
+        }
+        test_metrics, test_duration = _run_single_experiment(
+            self.db, winner, self.target, self.split_config, eval_split="test",
+        )
+        if test_metrics:
+            final_test_metrics = test_metrics
+            self._save_experiment(
+                winner,
+                {**test_metrics, f"{self.loop_metric}": self.state["best_score"]},
+                test_duration,
+                is_best=True,
+                trial_num=len(self.history),
+            )
+            logger.info(
+                "Final winner test evaluation: %s",
+                {k: round(v, 4) for k, v in test_metrics.items() if isinstance(v, float)},
+            )
+
         summary = self._build_summary()
+        summary["final_test_metrics"] = final_test_metrics
         logger.info(
             "Autoresearch complete: %d experiments, %d improvements, best %s = %.4f",
             len(self.history),
             sum(1 for h in self.history if h["accepted"]),
-            self.objective,
+            self.loop_metric,
             self.state["best_score"],
         )
         return summary
@@ -581,7 +636,7 @@ class AutoResearchLoop:
             "algorithm": proposal["algorithm"],
             "hyperparameters": proposal["hyperparameters"],
             "feature_set": proposal["feature_set"],
-            "score": metrics.get(self.objective) if metrics else None,
+            "score": metrics.get(self.loop_metric) if metrics else None,
             "metrics": metrics,
             "duration_s": duration,
             "accepted": accepted,
@@ -597,7 +652,6 @@ class AutoResearchLoop:
         trial_num: int,
     ) -> None:
         """Save experiment to DB for traceability."""
-        label = "BEST" if is_best else "trial"
         experiment = Experiment(
             name=f"autoresearch_{trial_num:04d}_{proposal.get('strategy', 'unknown')}",
             description=(

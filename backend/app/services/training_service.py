@@ -148,6 +148,31 @@ def _nan_policy_for(algorithm: str) -> str:
     return "median_fill"
 
 
+def _split_val_for_calibration(X_val, meta_val):
+    """Split validation chronologically into an Optuna-objective half and a
+    calibration half, race-aligned.
+
+    Hyperparameter selection and calibrator fitting must not share data:
+    tuning to a fold and then fitting the deployed Platt calibrator on the
+    same fold makes the served probabilities inherit the selection bias.
+    The earlier half of val drives the Optuna objective; the later half
+    (closest to the test period, best for calibration recency) fits the
+    final calibrator and is never scored by the search.
+
+    Returns (objective_mask, calibration_mask) as positional boolean
+    arrays, or None when val has too few races to split safely.
+    """
+    if meta_val is None or X_val is None or len(X_val) == 0:
+        return None
+    race_ids = meta_val["race_id"].values
+    unique = pd.unique(race_ids)
+    if len(unique) < 4:
+        return None
+    first_half = set(unique[: len(unique) // 2])
+    obj_mask = np.array([rid in first_half for rid in race_ids])
+    return obj_mask, ~obj_mask
+
+
 def run_training(db: Session, experiment_id: int) -> None:
     """Run the full training pipeline for an experiment."""
     experiment = db.query(Experiment).filter(Experiment.id == experiment_id).first()
@@ -220,6 +245,11 @@ def run_training(db: Session, experiment_id: int) -> None:
         split_config = dict(experiment.split_config or {})
         split_config["train_cutoff_date"] = dataset["stats"].get("train_cutoff_date")
         split_config["test_cutoff_date"] = dataset["stats"].get("test_cutoff_date")
+        # Reproducibility: experiments default to unversioned (mutable)
+        # feature rows, so fingerprint what was actually trained on —
+        # rebuilding later and comparing detects silent drift (audit C13).
+        from ml.dataset_builder import dataset_fingerprint
+        split_config["dataset_fingerprint"] = dataset_fingerprint(dataset)
         experiment.split_config = split_config
         db.commit()
 
@@ -296,12 +326,17 @@ def run_training(db: Session, experiment_id: int) -> None:
         )
         if can_eval_betting:
             try:
+                from app.services.prediction_service import get_staking_params
+                _stk = get_staking_params(db)
                 y_binary = (y_test == 1).astype(float).values if is_ranking else y_test.values
                 betting = compute_betting_metrics(
                     y_binary,
                     test_proba,
                     meta_test["sp_decimal"].values,
                     meta_test["race_id"].values,
+                    kelly_fraction=_stk["kelly_fraction"],
+                    kelly_min_edge=_stk["min_edge"],
+                    max_stake_pct=_stk["max_stake_pct"],
                 )
                 if "error" in betting:
                     logger.warning("Betting metrics unavailable: %s", betting["error"])
@@ -317,6 +352,22 @@ def run_training(db: Session, experiment_id: int) -> None:
                 all_metrics["betting_favourite_roi"] = betting["favourite_roi"]
                 all_metrics["betting_kelly_pnl"] = betting.get("kelly_pnl", 0)
                 all_metrics["betting_kelly_roi"] = betting.get("kelly_roi", 0)
+
+                # Beat-the-SP gate: the decisive baseline. A model that
+                # can't beat de-vigged SP probabilities carries no
+                # information beyond the market.
+                from ml.evaluation import compute_sp_baseline_metrics
+                sp_baseline = compute_sp_baseline_metrics(
+                    y_binary,
+                    test_proba,
+                    meta_test["sp_decimal"].values,
+                    meta_test["race_id"].values,
+                )
+                if "error" not in sp_baseline:
+                    for k, v in sp_baseline.items():
+                        if isinstance(v, (int, float)) and not isinstance(v, bool):
+                            all_metrics[f"sp_gate_{k}"] = v
+                    all_metrics["sp_gate_beats_sp"] = 1.0 if sp_baseline.get("beats_sp") else 0.0
                 logger.info(
                     "Betting metrics: top_pick_pnl=$%.2f (ROI %.1f%%), value_pnl=$%.2f, kelly_pnl=$%.2f",
                     betting["top_pick_pnl"], betting["top_pick_roi"],
@@ -386,12 +437,18 @@ def run_training(db: Session, experiment_id: int) -> None:
             # before this field existed default to "median_fill" to keep
             # legacy models working unchanged.
             "nan_policy": nan_policy,
+            # No hyperparameter search in this path, so calibrating on the
+            # full val set carries no selection bias.
+            "calibration_scheme": "full_val_no_search",
         }
         joblib.dump(artifact, model_path)
 
         # Free large objects before updating DB
-        del dataset, X_train, y_train, X_val, y_val, X_test, y_test
-        del artifact, trainer
+        # Release memory while keeping names bound: the Optuna objective
+        # closure references X_train/y_train, and `del` on a closed-over
+        # name makes static analysis (and any post-del call) blow up.
+        dataset = X_train = y_train = X_val = y_val = X_test = y_test = None
+        artifact = trainer = None
         gc.collect()
 
         # 8. Update experiment record
@@ -529,6 +586,11 @@ def run_optuna_optimization(
         split_config = dict(experiment.split_config or {})
         split_config["train_cutoff_date"] = dataset["stats"].get("train_cutoff_date")
         split_config["test_cutoff_date"] = dataset["stats"].get("test_cutoff_date")
+        # Reproducibility: experiments default to unversioned (mutable)
+        # feature rows, so fingerprint what was actually trained on —
+        # rebuilding later and comparing detects silent drift (audit C13).
+        from ml.dataset_builder import dataset_fingerprint
+        split_config["dataset_fingerprint"] = dataset_fingerprint(dataset)
         experiment.split_config = split_config
         db.commit()
 
@@ -537,6 +599,34 @@ def run_optuna_optimization(
         group_val = dataset.get("group_val")
         meta_train = dataset.get("meta_train")
         meta_val = dataset.get("meta_val")
+
+        # Keep selection and calibration data disjoint: Optuna scores on the
+        # earlier half of val; the final model's calibrator is fit on the
+        # later half, which the search never sees.
+        from ml.dataset_builder import _compute_group_sizes as _group_sizes
+        _val_halves = _split_val_for_calibration(X_val, meta_val)
+        if _val_halves is not None:
+            _obj_mask, _cal_mask = _val_halves
+            X_val_obj, y_val_obj = X_val[_obj_mask], y_val[_obj_mask]
+            meta_val_obj = meta_val[_obj_mask]
+            X_val_cal, y_val_cal = X_val[_cal_mask], y_val[_cal_mask]
+            group_val_obj = (
+                _group_sizes(meta_val_obj["race_id"]) if is_ranking else None
+            )
+            group_val_cal = (
+                _group_sizes(meta_val[_cal_mask]["race_id"]) if is_ranking else None
+            )
+            calibration_scheme = "val_calibration_half"
+        else:
+            X_val_obj, y_val_obj, meta_val_obj = X_val, y_val, meta_val
+            X_val_cal, y_val_cal = X_val, y_val
+            group_val_obj = group_val
+            group_val_cal = group_val
+            calibration_scheme = "full_val"
+            logger.warning(
+                "Validation set too small to hold out a calibration half — "
+                "the calibrator will share data with the Optuna objective."
+            )
 
         # Optuna objective selector.  Defaults to log_loss (minimize).
         # Betting objectives maximize ROI/Sharpe on the VAL set; we flip
@@ -570,7 +660,6 @@ def run_optuna_optimization(
         if walk_forward_folds > 1:
             from ml.dataset_builder import (
                 generate_walk_forward_fold_indices,
-                _compute_group_sizes,
             )
             X_tv = np.vstack([X_train.values, X_val.values])
             X_tv = pd.DataFrame(X_tv, columns=X_train.columns)
@@ -627,16 +716,18 @@ def run_optuna_optimization(
             if optuna_objective == "top_pick_roi":
                 return -float(bm.get("top_pick_roi", -999))
             if optuna_objective == "value_bet_roi":
-                if bm.get("value_bet_count", 0) < 10:
+                # ROI on a handful of bets is noise that Optuna will
+                # happily overfit; require a real sample.
+                if bm.get("value_bet_count", 0) < 100:
                     return 999.0
                 return -float(bm.get("value_bet_roi", -999))
             if optuna_objective == "kelly_roi":
-                if bm.get("kelly_races", 0) < 10:
+                if bm.get("kelly_races", 0) < 100:
                     return 999.0
                 return -float(bm.get("kelly_roi", -999))
             if optuna_objective == "sharpe":
                 kelly_cum = bm.get("kelly_pnl_by_race", [])
-                if len(kelly_cum) < 5:
+                if len(kelly_cum) < 30:
                     return 999.0
                 pnls = [kelly_cum[0]["pnl"]]
                 for i in range(1, len(kelly_cum)):
@@ -658,19 +749,23 @@ def run_optuna_optimization(
             params = _suggest_params(trial, experiment.algorithm)
 
             if walk_forward_folds <= 1:
-                # Single-split (original behaviour)
+                # Single-split: trials train and score against the OBJECTIVE
+                # half of val only — the calibration half stays unseen until
+                # the final retrain.
                 trainer = create_trainer(
                     experiment.algorithm, params, experiment.target,
                     split_cfg=split_cfg,
                 )
                 if is_ranking:
                     result = trainer.train(
-                        X_train, y_train, X_val, y_val,
-                        group_train=group_train, group_val=group_val,
+                        X_train, y_train, X_val_obj, y_val_obj,
+                        group_train=group_train, group_val=group_val_obj,
                     )
                 else:
-                    result = trainer.train(X_train, y_train, X_val, y_val)
-                return _score_fold(trainer, result, X_val, y_val, meta_val, group_val)
+                    result = trainer.train(X_train, y_train, X_val_obj, y_val_obj)
+                return _score_fold(
+                    trainer, result, X_val_obj, y_val_obj, meta_val_obj, group_val_obj
+                )
 
             # Walk-forward CV: train per fold, average the scores
             from ml.dataset_builder import _compute_group_sizes as _gs
@@ -714,11 +809,13 @@ def run_optuna_optimization(
             experiment.algorithm, best_params, experiment.target,
             split_cfg=split_cfg,
         )
+        # Final retrain calibrates on the held-out calibration half — races
+        # the Optuna objective never scored.
         if is_ranking:
-            result = trainer.train(X_train, y_train, X_val, y_val,
-                                   group_train=group_train, group_val=group_val)
+            result = trainer.train(X_train, y_train, X_val_cal, y_val_cal,
+                                   group_train=group_train, group_val=group_val_cal)
         else:
-            result = trainer.train(X_train, y_train, X_val, y_val)
+            result = trainer.train(X_train, y_train, X_val_cal, y_val_cal)
 
         # Evaluate on test
         _heartbeat(db, experiment, "evaluating", log_handler)
@@ -753,12 +850,17 @@ def run_optuna_optimization(
         if can_eval_betting:
             try:
                 from ml.evaluation import compute_betting_metrics
+                from app.services.prediction_service import get_staking_params
+                _stk = get_staking_params(db)
                 y_binary_bet = (y_test == 1).astype(float).values if is_ranking else y_test.values
                 betting = compute_betting_metrics(
                     y_binary_bet,
                     test_proba,
                     meta_test["sp_decimal"].values,
                     meta_test["race_id"].values,
+                    kelly_fraction=_stk["kelly_fraction"],
+                    kelly_min_edge=_stk["min_edge"],
+                    max_stake_pct=_stk["max_stake_pct"],
                 )
                 if "error" in betting:
                     logger.warning("Optuna betting metrics unavailable: %s", betting["error"])
@@ -773,6 +875,22 @@ def run_optuna_optimization(
                 all_metrics["betting_favourite_roi"] = betting["favourite_roi"]
                 all_metrics["betting_kelly_pnl"] = betting.get("kelly_pnl", 0)
                 all_metrics["betting_kelly_roi"] = betting.get("kelly_roi", 0)
+
+                # Beat-the-SP gate: the decisive baseline. A model that
+                # can't beat de-vigged SP probabilities carries no
+                # information beyond the market.
+                from ml.evaluation import compute_sp_baseline_metrics
+                sp_baseline = compute_sp_baseline_metrics(
+                    y_binary_bet,
+                    test_proba,
+                    meta_test["sp_decimal"].values,
+                    meta_test["race_id"].values,
+                )
+                if "error" not in sp_baseline:
+                    for k, v in sp_baseline.items():
+                        if isinstance(v, (int, float)) and not isinstance(v, bool):
+                            all_metrics[f"sp_gate_{k}"] = v
+                    all_metrics["sp_gate_beats_sp"] = 1.0 if sp_baseline.get("beats_sp") else 0.0
             except Exception as e:
                 logger.warning("Optuna betting metrics failed: %s", e)
 
@@ -799,6 +917,10 @@ def run_optuna_optimization(
             "feature_names": dataset.get("feature_names", []),
             "is_ranking": is_ranking,
             "nan_policy": nan_policy,
+            # Which slice the deployed calibrator was fit on (see
+            # _split_val_for_calibration): "val_calibration_half" keeps
+            # selection and calibration data disjoint.
+            "calibration_scheme": calibration_scheme,
         }
         joblib.dump(artifact, model_path)
 
@@ -819,8 +941,11 @@ def run_optuna_optimization(
                 }
 
         # Free large objects
-        del dataset, X_train, y_train, X_val, y_val, X_test, y_test
-        del artifact, trainer, study
+        # Release memory while keeping names bound: the Optuna objective
+        # closure references X_train/y_train, and `del` on a closed-over
+        # name makes static analysis (and any post-del call) blow up.
+        dataset = X_train = y_train = X_val = y_val = X_test = y_test = None
+        artifact = trainer = None, study
         gc.collect()
 
         logger.info("Optuna experiment %d completed. Best: %s", experiment_id, best_params)
@@ -894,8 +1019,8 @@ def _suggest_params(trial, algorithm: str) -> dict:
             "min_child_samples": trial.suggest_int("min_child_samples", 5, 50),
         }
     elif algorithm == "xgboost":
+        # n_estimators is set by early stopping, not searched
         return {
-            "n_estimators": trial.suggest_int("n_estimators", 50, 500),
             "max_depth": trial.suggest_int("max_depth", 3, 10),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),
@@ -903,8 +1028,8 @@ def _suggest_params(trial, algorithm: str) -> dict:
             "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
         }
     elif algorithm == "lightgbm":
+        # n_estimators is set by early stopping, not searched
         return {
-            "n_estimators": trial.suggest_int("n_estimators", 50, 500),
             "num_leaves": trial.suggest_int("num_leaves", 15, 63),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),

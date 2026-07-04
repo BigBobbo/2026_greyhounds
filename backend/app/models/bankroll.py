@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text, ForeignKey
+from sqlalchemy import Column, DateTime, Float, Integer, String, Text, ForeignKey
 from app.database import Base
 
 

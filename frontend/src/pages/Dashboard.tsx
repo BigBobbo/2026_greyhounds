@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api/client';
 import CoverageCalendar from '../components/CoverageCalendar';
@@ -24,21 +24,42 @@ export default function Dashboard() {
   const [stats, setStats] = useState<ScrapingStatus | null>(null);
   const [experiments, setExperiments] = useState<Experiment[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
-  useEffect(() => {
+  const loadData = useCallback(() => {
     Promise.all([
       api.get<ScrapingStatus>('/scraping/status'),
       api.get<Experiment[]>('/training/experiments?limit=5'),
     ]).then(([statsRes, expRes]) => {
       setStats(statsRes.data);
       setExperiments(expRes.data);
+      setLoadError(false);
       setLoading(false);
-    }).catch(() => setLoading(false));
+    }).catch(() => {
+      setLoadError(true);
+      setLoading(false);
+    });
   }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   return (
     <div>
       <h1 className="text-xl sm:text-2xl font-bold mb-4 sm:mb-6">Dashboard</h1>
+
+      {loadError && (
+        <div className="bg-red-50 border border-red-200 text-red-700 rounded-md p-4 mb-6 flex items-center justify-between gap-3 text-sm">
+          <span>Failed to load dashboard data. Check the backend and try again.</span>
+          <button
+            onClick={loadData}
+            className="shrink-0 px-3 py-1.5 border border-red-300 rounded-md text-red-700 hover:bg-red-100 font-medium"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">

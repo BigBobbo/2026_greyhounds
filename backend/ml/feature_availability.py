@@ -26,6 +26,12 @@ POST_RACE_FEATURE_NAMES: dict[str, str] = {
     # Weight change vs recent average — needs RaceEntry.weight_kg for the
     # current entry, which is set at the on-the-night weigh-in.
     "weight_change": "RaceEntry.weight_kg (weigh-in is on the night)",
+    # Current weight as a fraction of career average — same current-entry
+    # weigh-in dependency as weight_change.
+    "weight_pct_of_career_avg": "RaceEntry.weight_kg (weigh-in is on the night)",
+    # Going-conditional trap bias — needs Race.going for the current race,
+    # which GRI only reports with the results.
+    "trap_bias_deviation_going": "Race.going (reported with results)",
     # Starting-price-derived features (opt-in via include_sp_features).
     # GRI only publishes SP on the results page.
     "current_sp_decimal": "RaceEntry.sp_decimal (post-race only)",

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import api from '../api/client';
+import { parseUtc } from '../lib/time';
 import type { Track } from '../types/models';
 
 interface ScrapeLog {
@@ -55,9 +56,13 @@ export default function ScrapingStatusPage() {
   const [rangeAllActive, setRangeAllActive] = useState(true);
   const [rangeRunning, setRangeRunning] = useState(false);
   const [reaping, setReaping] = useState(false);
+  // "Now" is sampled once per poll tick (see fetchStatus) instead of during
+  // render, so heartbeat staleness stays pure but refreshes with each poll.
+  const [now, setNow] = useState(() => Date.now());
 
   const fetchStatus = () => {
     api.get<ScrapingStatus>('/scraping/status').then((res) => {
+      setNow(Date.now());
       setStatus(res.data);
       setLoading(false);
     }).catch(() => setLoading(false));
@@ -415,7 +420,7 @@ export default function ScrapingStatusPage() {
                 const isRunning = log.status === 'running';
                 const lastAlive = log.heartbeat_at || log.started_at;
                 const minsSinceAlive = isRunning && lastAlive
-                  ? Math.round((Date.now() - new Date(lastAlive).getTime()) / 60000)
+                  ? Math.round((now - (parseUtc(lastAlive)?.getTime() ?? now)) / 60000)
                   : null;
                 const isStale = isRunning && minsSinceAlive !== null && minsSinceAlive >= 15;
                 return (

@@ -159,7 +159,7 @@ def main():
         print(f"  Best {args.objective}: {summary['best_score']:.4f}")
         print(f"  Best algorithm:      {summary['best_algorithm']}")
         print(f"  Best features:       {summary['best_feature_set']}")
-        print(f"  Best hyperparams:")
+        print("  Best hyperparams:")
         for k, v in summary["best_hyperparameters"].items():
             print(f"    {k}: {v}")
         print()

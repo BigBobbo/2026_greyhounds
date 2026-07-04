@@ -23,10 +23,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
-from app.models.dog import Dog
 from app.models.race import Race
 from app.models.race_entry import RaceEntry
 from app.models.track import Track
@@ -74,6 +72,7 @@ def get_dog_history(
             RaceEntry.dog_id == dog_id,
             Race.race_date < before_date,
             Race.status == "resulted",
+            RaceEntry.scratched.isnot(True),
         )
         .order_by(Race.race_date.desc())
         .limit(limit)

@@ -2,14 +2,14 @@
 
 import asyncio
 import logging
-import traceback
 from datetime import date, datetime, timedelta
 from threading import Thread
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db, SessionLocal
@@ -118,6 +118,14 @@ class CardsStatusResponse(BaseModel):
     recent_scrape_logs: list[CardsStatusLog]
 
 
+class RetryFailedResponse(BaseModel):
+    pairs_attempted: int
+    pairs_succeeded: int
+    pairs_failed: list[str]
+    rows_marked_retried: int
+    races_scraped: int
+
+
 @router.get("/status", response_model=ScrapingStatusResponse)
 def get_scraping_status(db: Session = Depends(get_db)):
     total_races = db.query(Race).count()
@@ -182,11 +190,19 @@ def get_cards_status(race_date: str, db: Session = Depends(get_db)):
         for bucket in sorted(by_code.values(), key=lambda b: b["name"])
     ]
 
+    # Prefer the structured race_date column (E7); fall back to the legacy
+    # source-string LIKE match for rows written before the column existed.
     logs = (
         db.query(ScrapeLog)
         .filter(
             ScrapeLog.spider_name == "gri-card",
-            ScrapeLog.source.like(f"%{rd}%"),
+            or_(
+                ScrapeLog.race_date == rd,
+                and_(
+                    ScrapeLog.race_date.is_(None),
+                    ScrapeLog.source.like(f"%{rd}%"),
+                ),
+            ),
         )
         .order_by(ScrapeLog.id.desc())
         .limit(5)
@@ -194,14 +210,14 @@ def get_cards_status(race_date: str, db: Session = Depends(get_db)):
     )
     log_responses = [
         CardsStatusLog(
-            id=l.id,
-            status=l.status,
-            records_scraped=l.records_scraped or 0,
-            records_new=l.records_new or 0,
-            started_at=l.started_at,
-            completed_at=l.completed_at,
+            id=log_row.id,
+            status=log_row.status,
+            records_scraped=log_row.records_scraped or 0,
+            records_new=log_row.records_new or 0,
+            started_at=log_row.started_at,
+            completed_at=log_row.completed_at,
         )
-        for l in logs
+        for log_row in logs
     ]
 
     return CardsStatusResponse(
@@ -257,7 +273,7 @@ def reap_stale_scrape_logs(
 @router.get("/test-scrape")
 async def test_scrape(track_code: str = "TRL", date_str: str = "04-Apr-2026"):
     """Scrape one date with httpx, save to DB, return results."""
-    from scraping.gri_scraper import scrape_results, parse_results_page, VIEW_RESULTS_URL, format_date, DEFAULT_HEADERS
+    from scraping.gri_scraper import parse_results_page, VIEW_RESULTS_URL, DEFAULT_HEADERS
     from scraping.db_pipeline import upsert_race_results
     from datetime import datetime as dt
 
@@ -307,67 +323,31 @@ async def test_scrape(track_code: str = "TRL", date_str: str = "04-Apr-2026"):
     return result
 
 
-def _heartbeat(log_id: int) -> None:
-    """Mark a running ScrapeLog as alive. Best-effort — swallows errors."""
-    db_log = SessionLocal()
-    try:
-        log_entry = db_log.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
-        if log_entry:
-            log_entry.heartbeat_at = datetime.utcnow()
-            db_log.commit()
-    except Exception:
-        pass
-    finally:
-        db_log.close()
+def _date_range(date_from: date, date_to: date) -> list[date]:
+    return [
+        date_from + timedelta(days=i)
+        for i in range((date_to - date_from).days + 1)
+    ]
 
 
 def _run_scrape_in_thread(track_code: str, date_from: date, date_to: date, log_id: int):
-    """Run scraping in a background thread using httpx."""
-    from scraping.gri_scraper import scrape_results, DEFAULT_HEADERS
+    """Run scraping in a background thread via the shared job runner (E8)."""
+    from scraping.gri_scraper import scrape_results
     from scraping.db_pipeline import upsert_race_results
+    from scraping.job_runner import run_scrape_job
 
     def _scrape_sync():
-        import asyncio as _asyncio
-
-        db = SessionLocal()
-        log = db.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
-        total_races = 0
-        total_new = 0
-
-        async def _run():
-            nonlocal total_races, total_new
-            async with httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30) as client:
-                current = date_from
-                while current <= date_to:
-                    try:
-                        races = await scrape_results(track_code, current, client)
-                        if races:
-                            stats = upsert_race_results(db, races, scrape_log_id=log_id)
-                            total_races += stats["races_new"] + stats["races_updated"]
-                            total_new += stats["races_new"]
-                    except Exception as e:
-                        logger.error("Error on %s %s: %s", track_code, current, e)
-                    _heartbeat(log_id)
-                    current += timedelta(days=1)
-                    if current <= date_to:
-                        await _asyncio.sleep(1.0)
-
-        try:
-            loop = _asyncio.new_event_loop()
-            _asyncio.set_event_loop(loop)
-            loop.run_until_complete(_run())
-            loop.close()
-            log.status = "success"
-            log.records_scraped = total_races
-            log.records_new = total_new
-        except Exception as e:
-            logger.error("Scrape thread failed: %s\n%s", e, traceback.format_exc())
-            log.status = "failed"
-            log.error_message = f"{type(e).__name__}: {e}"
-        finally:
-            log.completed_at = datetime.utcnow()
-            db.commit()
-            db.close()
+        run_scrape_job(
+            SessionLocal,
+            [track_code],
+            _date_range(date_from, date_to),
+            scrape_results,
+            upsert_race_results,
+            spider_name="gri",
+            source_desc=f"manual {track_code} {date_from} to {date_to}",
+            delay=1.0,
+            log_id=log_id,
+        )
 
     Thread(target=_scrape_sync, daemon=True).start()
 
@@ -403,16 +383,50 @@ def trigger_scrape(req: TriggerRequest, db: Session = Depends(get_db)):
 @router.post("/backfill", response_model=TriggerResponse)
 def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
     """Trigger a historical backfill in the background."""
-    start = date.fromisoformat(req.start_date)
-    end = date.fromisoformat(req.end_date)
+    try:
+        start = date.fromisoformat(req.start_date)
+        end = date.fromisoformat(req.end_date)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid date: {e}") from e
+
+    if end < start:
+        raise HTTPException(status_code=422, detail="end_date is before start_date")
+    if (end - start).days > 366:
+        raise HTTPException(
+            status_code=422,
+            detail="Backfill range capped at 366 days per request — split "
+            "longer ranges into multiple calls.",
+        )
+
+    # Refuse to start while another scrape job is still running: overlapping
+    # jobs double-hit GRI and race each other on upserts.
+    running = (
+        db.query(ScrapeLog)
+        .filter(ScrapeLog.status == "running")
+        .order_by(ScrapeLog.id.desc())
+        .first()
+    )
+    if running:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Scrape job {running.id} ({running.source}) is still running. "
+                "Wait for it to finish or reap stale jobs first."
+            ),
+        )
 
     if req.track_codes:
         tracks = db.query(Track).filter(Track.code.in_(req.track_codes)).all()
+        unknown = set(req.track_codes) - {t.code for t in tracks}
+        if unknown:
+            raise HTTPException(
+                status_code=404, detail=f"Unknown track codes: {sorted(unknown)}"
+            )
     else:
         tracks = db.query(Track).filter(Track.active.is_(True)).all()
 
     if not tracks:
-        return TriggerResponse(message="No tracks found")
+        raise HTTPException(status_code=404, detail="No tracks found")
 
     log = ScrapeLog(
         spider_name="gri",
@@ -427,102 +441,51 @@ def trigger_backfill(req: BackfillRequest, db: Session = Depends(get_db)):
     track_codes = [t.code for t in tracks]
 
     def _run_backfill():
-        """Run backfill one track at a time. Each track gets its own DB session and async loop."""
-        import traceback
-        from scraping.gri_scraper import scrape_results, DEFAULT_HEADERS
-        from scraping.db_pipeline import upsert_race_results
-        import asyncio as _asyncio
+        """Run the backfill via the shared job runner (E8), then heal
+        days_since_last values corrupted by out-of-order inserts."""
+        from scraping.gri_scraper import scrape_results
+        from scraping.db_pipeline import (
+            pop_out_of_order_dogs,
+            recompute_days_since_last,
+            upsert_race_results,
+        )
+        from scraping.job_runner import run_scrape_job
 
-        total_races = 0
-        total_new = 0
-        failed_tracks = []
+        result = run_scrape_job(
+            SessionLocal,
+            track_codes,
+            _date_range(start, end),
+            scrape_results,
+            upsert_race_results,
+            spider_name="gri",
+            source_desc=f"backfill {len(track_codes)} tracks {start} to {end}",
+            delay=1.0,
+            log_id=log_id,
+        )
 
-        for tc in track_codes:
-            track_races = 0
-            track_new = 0
-
-            async def _scrape_track():
-                nonlocal track_races, track_new
-                async with httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30) as client:
-                    db_track = SessionLocal()
-                    try:
-                        current = start
-                        day_count = 0
-                        while current <= end:
-                            day_count += 1
-                            try:
-                                races = await scrape_results(tc, current, client)
-                                if races:
-                                    stats = upsert_race_results(db_track, races, scrape_log_id=log_id)
-                                    track_races += stats["races_new"] + stats["races_updated"]
-                                    track_new += stats["races_new"]
-                            except Exception as e:
-                                logger.error("Error %s %s: %s", tc, current, e)
-
-                            # Commit + update log every 50 days
-                            if day_count % 50 == 0:
-                                db_track.commit()
-                                _update_log(total_races + track_races, total_new + track_new)
-                            else:
-                                _heartbeat(log_id)
-
-                            current += timedelta(days=1)
-                            await _asyncio.sleep(1.0)
-
-                        db_track.commit()
-                    except Exception as e:
-                        logger.error("Track %s failed: %s", tc, e)
-                        db_track.rollback()
-                        raise
-                    finally:
-                        db_track.close()
-
+        # Track-by-track backfills insert races out of chronological order,
+        # which corrupts days_since_last on entries inserted earlier. Heal
+        # once at the end if any out-of-order insert was flagged.
+        flagged = pop_out_of_order_dogs()
+        if flagged:
+            db_heal = SessionLocal()
             try:
-                loop = _asyncio.new_event_loop()
-                _asyncio.set_event_loop(loop)
-                loop.run_until_complete(_scrape_track())
-                loop.close()
-
-                total_races += track_races
-                total_new += track_new
-                logger.info("Backfill: %s done — %d races (%d new). Total: %d", tc, track_races, track_new, total_races)
-                _update_log(total_races, total_new)
-
+                healed = recompute_days_since_last(db_heal)
+                logger.info(
+                    "Backfill healed days_since_last: %d entries corrected "
+                    "(%d dogs flagged out-of-order)",
+                    healed, len(flagged),
+                )
             except Exception as e:
-                logger.error("Backfill track %s crashed: %s\n%s", tc, e, traceback.format_exc())
-                failed_tracks.append(tc)
-                # Continue with next track
+                logger.error("days_since_last recompute failed: %s", e)
+            finally:
+                db_heal.close()
 
-        # Final update
-        db_final = SessionLocal()
-        try:
-            log_final = db_final.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
-            if log_final:
-                log_final.status = "success" if not failed_tracks else "partial"
-                log_final.records_scraped = total_races
-                log_final.records_new = total_new
-                log_final.completed_at = datetime.utcnow()
-                if failed_tracks:
-                    log_final.error_message = f"Failed tracks: {', '.join(failed_tracks)}"
-                db_final.commit()
-        finally:
-            db_final.close()
-        logger.info("Backfill complete: %d races, %d new. Failed: %s", total_races, total_new, failed_tracks or "none")
-
-    def _update_log(scraped: int, new: int):
-        """Update the scrape log with current progress and heartbeat."""
-        db_log = SessionLocal()
-        try:
-            log_entry = db_log.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
-            if log_entry:
-                log_entry.records_scraped = scraped
-                log_entry.records_new = new
-                log_entry.heartbeat_at = datetime.utcnow()
-                db_log.commit()
-        except Exception:
-            pass
-        finally:
-            db_log.close()
+        logger.info(
+            "Backfill complete: %d races, %d new. Failed tracks: %s. Failed days: %d",
+            result["races_scraped"], result["races_new"],
+            result["failed_tracks"] or "none", len(result["failed_pairs"]),
+        )
 
     Thread(target=_run_backfill, daemon=True).start()
 
@@ -577,30 +540,55 @@ def trigger_scrape_since_last_race_date(
     """
     from sqlalchemy import func
 
-    last_date = (
-        db.query(func.max(Race.race_date))
+    # Per-track last dates: a single global max would skip any track whose
+    # coverage lags behind the most recently scraped one (its gap could
+    # never heal through this endpoint).
+    track_query = db.query(Track).filter(Track.active.is_(True))
+    if req.track_codes:
+        track_query = db.query(Track).filter(Track.code.in_(req.track_codes))
+    tracks = track_query.all()
+    if not tracks:
+        raise HTTPException(status_code=404, detail="No matching tracks")
+
+    per_track_last = dict(
+        db.query(Race.track_id, func.max(Race.race_date))
         .filter(Race.status == "resulted")
-        .scalar()
+        .group_by(Race.track_id)
+        .all()
     )
-    if not last_date:
+    if not per_track_last:
         return TriggerResponse(
             message="No prior scraped races found. Use /backfill with explicit dates instead."
         )
 
-    start = last_date + timedelta(days=1)
     end = date.fromisoformat(req.end_date) if req.end_date else date.today()
 
-    if start > end:
-        return TriggerResponse(
-            message=f"Already up to date — last race date is {last_date}."
-        )
+    # Scrape each track from the day after ITS own last resulted race.
+    # Tracks with no coverage at all are skipped (use /backfill for those).
+    stale_tracks: list[tuple[Track, date]] = []
+    for t in tracks:
+        last = per_track_last.get(t.id)
+        if last is None:
+            continue
+        start = last + timedelta(days=1)
+        if start <= end:
+            stale_tracks.append((t, start))
 
-    backfill_req = BackfillRequest(
-        start_date=start.isoformat(),
-        end_date=end.isoformat(),
-        track_codes=req.track_codes,
+    if not stale_tracks:
+        return TriggerResponse(message="Already up to date for all covered tracks.")
+
+    earliest = min(s for _, s in stale_tracks)
+    ranges = ", ".join(
+        f"{t.code} from {s.isoformat()}" for t, s in sorted(stale_tracks, key=lambda x: x[1])
     )
-    return trigger_backfill(backfill_req, db)
+    backfill_req = BackfillRequest(
+        start_date=earliest.isoformat(),
+        end_date=end.isoformat(),
+        track_codes=[t.code for t, _ in stale_tracks],
+    )
+    resp = trigger_backfill(backfill_req, db)
+    resp.message = f"{resp.message} Per-track catch-up: {ranges}."
+    return resp
 
 
 def _run_scrape_date_in_thread(
@@ -611,122 +599,48 @@ def _run_scrape_date_in_thread(
 ):
     """Brute-force scrape all upcoming-race-card summaries for a single date.
 
-    Iterates one track at a time. For each track that returns races on the date,
-    optionally fires the per-race form-detail page to enrich dog metadata
-    (trainer/sire/dam/owner/best_time).
+    Runs via the shared job runner (E8). The optional per-race form-detail
+    enrichment (trainer/sire/dam/owner/best_time) is folded into the
+    scrape_fn closure: form failures are best-effort (the card itself is
+    still saved), matching the previous behaviour.
     """
     from scraping.gri_scraper import (
         scrape_card,
         scrape_card_form,
         merge_card_form_into_race,
-        DEFAULT_HEADERS,
     )
     from scraping.db_pipeline import upsert_race_results
+    from scraping.job_runner import run_scrape_job
+
+    async def _scrape_card_enriched(tc: str, d: date, client) -> list[dict[str, Any]]:
+        races = await scrape_card(tc, d, client)
+        if include_form_detail and races:
+            for r in races:
+                try:
+                    form = await scrape_card_form(tc, d, r["race_number"], client)
+                    if form:
+                        merge_card_form_into_race(r, form)
+                except Exception as e:
+                    logger.error(
+                        "Form scrape %s R%s failed: %s", tc, r.get("race_number"), e
+                    )
+                await asyncio.sleep(0.5)
+        return races
+
+    suffix = " (with form detail)" if include_form_detail else ""
 
     def _run_sync():
-        import asyncio as _asyncio
-
-        total_races = 0
-        total_new = 0
-        tracks_with_races: list[str] = []
-        tracks_failed: list[str] = []
-
-        async def _run():
-            nonlocal total_races, total_new
-            async with httpx.AsyncClient(
-                headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30
-            ) as client:
-                for tc in track_codes:
-                    try:
-                        races = await scrape_card(tc, race_date_val, client)
-                    except Exception as e:
-                        logger.error("Card scrape error %s %s: %s", tc, race_date_val, e)
-                        tracks_failed.append(tc)
-                        await _asyncio.sleep(1.0)
-                        continue
-
-                    if not races:
-                        await _asyncio.sleep(1.0)
-                        continue
-
-                    tracks_with_races.append(tc)
-
-                    if include_form_detail:
-                        for r in races:
-                            try:
-                                form = await scrape_card_form(
-                                    tc, race_date_val, r["race_number"], client
-                                )
-                                if form:
-                                    merge_card_form_into_race(r, form)
-                            except Exception as e:
-                                logger.error(
-                                    "Form scrape %s R%s failed: %s",
-                                    tc, r.get("race_number"), e,
-                                )
-                            await _asyncio.sleep(0.5)
-
-                    db_local = SessionLocal()
-                    try:
-                        stats = upsert_race_results(db_local, races, scrape_log_id=log_id)
-                        total_races += stats["races_new"] + stats["races_updated"]
-                        total_new += stats["races_new"]
-                    except Exception as e:
-                        logger.error("DB upsert failed for %s: %s", tc, e)
-                        db_local.rollback()
-                    finally:
-                        db_local.close()
-
-                    # progress update
-                    db_log = SessionLocal()
-                    try:
-                        log_entry = db_log.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
-                        if log_entry:
-                            log_entry.records_scraped = total_races
-                            log_entry.records_new = total_new
-                            log_entry.heartbeat_at = datetime.utcnow()
-                            db_log.commit()
-                    finally:
-                        db_log.close()
-
-                    await _asyncio.sleep(1.0)
-
-        try:
-            loop = _asyncio.new_event_loop()
-            _asyncio.set_event_loop(loop)
-            loop.run_until_complete(_run())
-            loop.close()
-            db_final = SessionLocal()
-            try:
-                log_final = (
-                    db_final.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
-                )
-                if log_final:
-                    log_final.status = "success" if not tracks_failed else "partial"
-                    log_final.records_scraped = total_races
-                    log_final.records_new = total_new
-                    log_final.completed_at = datetime.utcnow()
-                    parts = [
-                        f"tracks_with_races={','.join(tracks_with_races) or 'none'}",
-                    ]
-                    if tracks_failed:
-                        parts.append(f"failed={','.join(tracks_failed)}")
-                    log_final.error_message = "; ".join(parts) if tracks_failed else None
-                    db_final.commit()
-            finally:
-                db_final.close()
-        except Exception as e:
-            logger.error("Scrape-date thread crashed: %s\n%s", e, traceback.format_exc())
-            db_err = SessionLocal()
-            try:
-                log_err = db_err.query(ScrapeLog).filter(ScrapeLog.id == log_id).first()
-                if log_err:
-                    log_err.status = "failed"
-                    log_err.error_message = f"{type(e).__name__}: {e}"
-                    log_err.completed_at = datetime.utcnow()
-                    db_err.commit()
-            finally:
-                db_err.close()
+        run_scrape_job(
+            SessionLocal,
+            track_codes,
+            [race_date_val],
+            _scrape_card_enriched,
+            upsert_race_results,
+            spider_name="gri-card",
+            source_desc=f"scrape-date {race_date_val} {len(track_codes)} tracks{suffix}",
+            delay=1.0,
+            log_id=log_id,
+        )
 
     Thread(target=_run_sync, daemon=True).start()
 
@@ -772,6 +686,92 @@ def trigger_scrape_date(req: ScrapeDateRequest, db: Session = Depends(get_db)):
         ),
         log_id=log.id,
     )
+
+
+@router.post("/retry-failed", response_model=RetryFailedResponse)
+async def retry_failed(days: int = 7, db: Session = Depends(get_db)):
+    """Re-scrape the (track, date) pairs recorded as failed in the last N days.
+
+    Reads the structured race_date/track_code columns written by the job
+    runner's per-failure bookkeeping (audit task E7), re-scrapes exactly
+    those pairs (results pages for 'gri' failures, card pages for
+    'gri-card' failures), and marks the source rows status='retried' when
+    the pair scrapes cleanly. Pairs that fail again stay 'failed'.
+    """
+    from scraping.gri_scraper import scrape_card, scrape_results
+    from scraping.db_pipeline import upsert_race_results
+
+    if days < 1 or days > 365:
+        raise HTTPException(status_code=422, detail="days must be between 1 and 365")
+
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    pairs = (
+        db.query(ScrapeLog.track_code, ScrapeLog.race_date, ScrapeLog.spider_name)
+        .filter(
+            ScrapeLog.status == "failed",
+            ScrapeLog.track_code.isnot(None),
+            ScrapeLog.race_date.isnot(None),
+            ScrapeLog.started_at >= cutoff,
+        )
+        .distinct()
+        .all()
+    )
+    if not pairs:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No failed (track, date) pairs recorded in the last {days} days",
+        )
+
+    pairs_failed: list[str] = []
+    pairs_succeeded = 0
+    rows_marked = 0
+    races_total = 0
+
+    for idx, (tc, rd, spider) in enumerate(pairs):
+        scrape = scrape_card if spider == "gri-card" else scrape_results
+        try:
+            races = await scrape(tc, rd)
+            if races:
+                stats = upsert_race_results(db, races)
+                races_total += stats["races_new"] + stats["races_updated"]
+        except Exception as e:
+            logger.error("Retry failed for %s %s: %s", tc, rd, e)
+            db.rollback()
+            pairs_failed.append(f"{tc} {rd}")
+        else:
+            pairs_succeeded += 1
+            rows_marked += (
+                db.query(ScrapeLog)
+                .filter(
+                    ScrapeLog.status == "failed",
+                    ScrapeLog.track_code == tc,
+                    ScrapeLog.race_date == rd,
+                )
+                .update({"status": "retried"}, synchronize_session=False)
+            )
+            db.commit()
+        if idx + 1 < len(pairs):
+            await asyncio.sleep(1.0)  # politeness between GRI requests
+
+    return RetryFailedResponse(
+        pairs_attempted=len(pairs),
+        pairs_succeeded=pairs_succeeded,
+        pairs_failed=pairs_failed,
+        rows_marked_retried=rows_marked,
+        races_scraped=races_total,
+    )
+
+
+@router.get("/digest")
+def get_digest(db: Session = Depends(get_db)):
+    """Last-24h failure-visibility digest (audit task E12).
+
+    Same dict the 08:30 scheduler job logs/ships to Sentry, exposed so the
+    frontend can show it.
+    """
+    from app.tasks.scheduler import daily_digest
+
+    return daily_digest(db)
 
 
 @router.post("/discover-tracks")

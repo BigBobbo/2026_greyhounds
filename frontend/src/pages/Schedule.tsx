@@ -140,11 +140,8 @@ export default function Schedule() {
       setNewExpId('');
       setNewAsMain(false);
       await refresh();
-    } catch (e) {
-      const msg =
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (e as any)?.response?.data?.detail || (e instanceof Error ? e.message : 'Create failed');
-      alert(msg);
+    } catch {
+      // error toast shown by the API interceptor
     } finally {
       setCreating(false);
     }
@@ -155,9 +152,8 @@ export default function Schedule() {
     try {
       await api.patch(`/schedule/${id}`, patch);
       await refresh();
-    } catch (e) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      alert((e as any)?.response?.data?.detail || 'Update failed');
+    } catch {
+      // error toast shown by the API interceptor
     } finally {
       setBusyRow(null);
     }
@@ -170,9 +166,8 @@ export default function Schedule() {
       // The job runs in a background thread on the server. Wait briefly,
       // then refresh so the audit log row appears with its eventual status.
       setTimeout(refresh, 1500);
-    } catch (e) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      alert((e as any)?.response?.data?.detail || 'Trigger failed');
+    } catch {
+      // error toast shown by the API interceptor
     } finally {
       setBusyRow(null);
     }
@@ -184,9 +179,8 @@ export default function Schedule() {
     try {
       await api.delete(`/schedule/${id}`);
       await refresh();
-    } catch (e) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      alert((e as any)?.response?.data?.detail || 'Delete failed');
+    } catch {
+      // error toast shown by the API interceptor
     } finally {
       setBusyRow(null);
     }

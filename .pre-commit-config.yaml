@@ -1,0 +1,19 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.8
+    hooks:
+      - id: ruff-check
+        files: ^backend/
+      - id: ruff-format
+        files: ^backend/
+        # format is advisory for now — the codebase predates the formatter;
+        # run `ruff format backend/` deliberately when ready to adopt it.
+        stages: [manual]
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint (frontend)
+        entry: bash -c 'cd frontend && npx eslint .'
+        language: system
+        files: ^frontend/src/.*\.(ts|tsx)$
+        pass_filenames: false

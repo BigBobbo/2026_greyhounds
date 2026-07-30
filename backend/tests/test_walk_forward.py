@@ -110,3 +110,56 @@ def test_extreme_embargo_drops_entire_val_windows():
         race_ids, race_dates, n_folds=3, embargo_days=365,
     )
     assert folds == []
+
+
+def test_descending_input_still_generates_chronological_folds():
+    """Regression: the dataset query materializes rows newest-first (ORDER BY
+    race_date DESC + LIMIT). Fed that order, the old generator's embargo
+    check was true for every fold, every fold was skipped, and training
+    silently fell back to a single split. The generator must now sort the
+    unique races chronologically itself."""
+    race_ids, race_dates = _make_inputs(100)
+    desc_ids = race_ids.iloc[::-1].reset_index(drop=True)
+    desc_dates = race_dates.iloc[::-1].reset_index(drop=True)
+
+    folds = generate_walk_forward_fold_indices(
+        desc_ids, desc_dates, n_folds=4, embargo_days=0,
+    )
+    assert len(folds) == 4
+    for train_idx, val_idx in folds:
+        train_max = desc_dates.iloc[train_idx].max()
+        val_min = desc_dates.iloc[val_idx].min()
+        assert train_max <= val_min
+
+
+def test_descending_input_respects_embargo():
+    race_ids, race_dates = _make_inputs(100)
+    desc_ids = race_ids.iloc[::-1].reset_index(drop=True)
+    desc_dates = race_dates.iloc[::-1].reset_index(drop=True)
+
+    folds = generate_walk_forward_fold_indices(
+        desc_ids, desc_dates, n_folds=3, embargo_days=7,
+    )
+    assert len(folds) >= 1
+    for train_idx, val_idx in folds:
+        train_max = desc_dates.iloc[train_idx].max()
+        val_min = desc_dates.iloc[val_idx].min()
+        assert (val_min - train_max).days > 7
+
+
+def test_shuffled_input_generates_chronological_folds():
+    """Even arbitrary row order must not break fold generation."""
+    import numpy as np
+
+    race_ids, race_dates = _make_inputs(60)
+    rng = np.random.default_rng(7)
+    perm = rng.permutation(len(race_ids))
+    shuf_ids = race_ids.iloc[perm].reset_index(drop=True)
+    shuf_dates = race_dates.iloc[perm].reset_index(drop=True)
+
+    folds = generate_walk_forward_fold_indices(
+        shuf_ids, shuf_dates, n_folds=3, embargo_days=0,
+    )
+    assert len(folds) == 3
+    for train_idx, val_idx in folds:
+        assert shuf_dates.iloc[train_idx].max() <= shuf_dates.iloc[val_idx].min()

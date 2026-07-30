@@ -24,3 +24,18 @@ census exactly.
 
 Each JSONL line is the API response object for one row; `id` fields are the production
 primary keys, so foreign keys (`race_id`, `dog_id`, `track_id`) join across files.
+
+## Betfair BSP history (`bsp/`)
+
+Betfair's free daily BSP CSVs (greyhound win/place markets, including Irish
+tracks) are the price backbone for honest backtesting — but
+`promo.betfair.com` geo-blocks non-IE/UK IPs, so they cannot be fetched from
+this repo's cloud environment. Run `download_bsp.py` from any Irish/UK
+connection (plain Python 3, no dependencies, resumable):
+
+```bash
+python3 data_mirror/download_bsp.py        # 2021-01-01 → today, IRE rows only
+```
+
+then commit the resulting `bsp/win_greyhound.csv.gz` and
+`bsp/place_greyhound.csv.gz`.

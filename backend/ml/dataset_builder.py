@@ -131,6 +131,16 @@ def build_dataset(
         "entry_id", "finish_position", "finish_time", "sp_decimal", "race_id", "race_date", "num_runners",
     ])
 
+    # The query orders race_date DESC purely so LIMIT keeps the most recent
+    # max_entries rows. Everything downstream requires ascending chronological
+    # order with each race's entries contiguous: the walk-forward fold
+    # generator's embargo logic assumes it (fed descending data it silently
+    # produced zero folds), and LambdaRank group sizes are computed by
+    # scanning contiguous race_ids. Re-sort here so that guarantee holds.
+    entries_df = entries_df.sort_values(
+        ["race_date", "race_id"], kind="mergesort",
+    ).reset_index(drop=True)
+
     logger.info("Found %d resulted entries", len(entries_df))
 
     # Build feature matrix
@@ -500,12 +510,17 @@ def generate_walk_forward_fold_indices(
     if n_folds < 1:
         return []
 
-    # Race-aligned sequence (preserve appearance order — race_ids is sorted
-    # chronologically so drop_duplicates yields chronological order).
-    ord_idx = race_ids.index
+    # Race-aligned sequence. Don't trust the caller's row order: sort the
+    # unique races chronologically ourselves. (The original code assumed
+    # ascending input; fed the newest-first order the dataset query produced,
+    # the embargo check was true for every fold and walk-forward silently
+    # degraded to a single split.)
     unique_races_series = race_ids.drop_duplicates()
     unique_race_ids = unique_races_series.values
     unique_race_dates = race_dates.loc[unique_races_series.index].values
+    chron = np.argsort(unique_race_dates, kind="stable")
+    unique_race_ids = unique_race_ids[chron]
+    unique_race_dates = unique_race_dates[chron]
     n_races = len(unique_race_ids)
     if n_races < n_folds + 1:
         return []
@@ -513,9 +528,6 @@ def generate_walk_forward_fold_indices(
     val_size = int(n_races * (1.0 - min_train_pct) / n_folds)
     val_size = max(1, val_size)
     train_start_size = max(1, n_races - val_size * n_folds)
-
-    # Build a lookup from row index -> positional index within input
-    pos_by_index = {idx: i for i, idx in enumerate(ord_idx)}
 
     folds: list[tuple[np.ndarray, np.ndarray]] = []
     for fold in range(n_folds):

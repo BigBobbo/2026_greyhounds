@@ -47,6 +47,16 @@ POST_RACE_FEATURE_NAMES: dict[str, str] = {
     "opening_to_sp_drift": "odds_snapshots table (live odds feed)",
     "odds_steam_rate": "odds_snapshots table (live odds feed)",
     "cross_book_disagreement": "odds_snapshots table (live odds feed)",
+    # Seeded user-selectable code feature that returns the current race's
+    # SP verbatim. Same leak as the current_sp_* family above, but under a
+    # name the guard previously didn't know about.
+    "current_race_sp": "RaceEntry.sp_decimal via seeded code feature (post-race only)",
+    # Current-race weigh-in relative to career average — same driver as
+    # weight_change above.
+    "weight_pct_of_career_avg": "RaceEntry.weight_kg (weigh-in is on the night)",
+    # Going-conditional trap bias reads Race.going for the CURRENT race,
+    # which GRI publishes with the results, not on the card.
+    "trap_bias_deviation_going": "Race.going (published with results, not on the card)",
 }
 
 

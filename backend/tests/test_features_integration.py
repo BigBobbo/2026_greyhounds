@@ -45,7 +45,11 @@ def db():
 
 
 def _seed_simple(db):
-    """Seed: 1 track, 4 dogs, ~12 races mostly at 525m with a few 480m."""
+    """Seed: 1 track, 4 dogs, 30 races mostly at 525m with a few 480m.
+
+    30 races (not fewer) so the point-in-time speed-figure baselines have
+    >=30 prior runs in the (track, 525m) bucket by the later race dates.
+    """
     track = Track(name="Testville", code="TST", active=True)
     db.add(track)
     db.commit()
@@ -62,10 +66,10 @@ def _seed_simple(db):
     race_no = 0
     races = []
 
-    # Generate 12 races over 12 days, 4 runners each, with stable skill ranking
+    # Generate 30 races over 30 days, 4 runners each, with stable skill ranking
     # (Alpha > Bravo > Charlie > Delta) so ELO should rank them in that order
     # by the end.  A handful of races run at a different distance (480m).
-    for i in range(12):
+    for i in range(30):
         race_no += 1
         d_m = 525 if i % 4 != 0 else 480
         race = Race(
@@ -145,7 +149,7 @@ def test_elo_orders_dogs_by_skill(db):
     assert elo_alpha > elo_delta
 
     # Pre-race counts: each dog should have raced 11 times before the last race
-    assert df.loc[name_to_entry["Alpha"], "dog_elo_races"] == 11
+    assert df.loc[name_to_entry["Alpha"], "dog_elo_races"] == 29
 
     # Field aggregates are constant within a race
     assert df["field_avg_elo"].nunique() == 1
@@ -192,8 +196,9 @@ def test_speed_figure_features_present_and_finite(db):
         "career_peak_speed_figure",
     ):
         assert col in df.columns
-        # At least some entries should have a numeric value (we have 11 races
-        # of history for each dog, all at the test track, so baselines exist)
+        # At least some entries should have a numeric value (each dog has 29
+        # races of history and the 525m bucket passes 30 prior runs well before
+        # the last race dates, so as-of baselines exist for the recent windows)
         non_null = df[col].dropna()
         assert len(non_null) > 0
         for v in non_null:
@@ -291,10 +296,10 @@ def test_h2h_tracks_wins_and_losses_within_field(db):
         name_to_entry[dog.name] = e.id
 
     # Every dog has raced with the other three in every prior race, so
-    # meetings should be: 11 prior races * 3 opponents = 33
+    # meetings should be: 29 prior races * 3 opponents = 87
     for dog_name in ("Alpha", "Bravo", "Charlie", "Delta"):
         meetings = df.loc[name_to_entry[dog_name], "h2h_meetings_vs_field"]
-        assert meetings == 33
+        assert meetings == 87
 
     # Alpha (fastest) should have the highest win rate vs field
     win_rate_alpha = df.loc[name_to_entry["Alpha"], "h2h_win_rate_vs_field"]

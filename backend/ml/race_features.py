@@ -590,6 +590,153 @@ def compute_builtin_features_batch(
     all_hist_df = pd.DataFrame(hist_rows, columns=hist_columns) if hist_rows else pd.DataFrame(columns=hist_columns)
     del hist_rows  # free raw tuples — now redundant
 
+    # --- 3. Point-in-time population aggregates ---
+    # These replace whole-history aggregate queries that averaged over ALL
+    # resulted races — including races run AFTER the entry being featurised.
+    # That leaked future outcomes into every training row (and drifted from
+    # serve time, where the same aggregates could only see the past). Here we
+    # pull every resulted run once, build cumulative daily tallies per key,
+    # and join each target row to the tally strictly BEFORE its race_date via
+    # merge_asof. An upcoming race sees exactly what was knowable on the day;
+    # a 2022 training row sees only 2022-and-earlier data.
+    logger.info("Batch builtin: loading resulted runs for point-in-time aggregates...")
+    evt_rows = (
+        db.query(
+            Race.race_date,
+            Race.track_id,
+            Race.distance_m,
+            Race.going,
+            RaceEntry.trap,
+            RaceEntry.finish_position,
+            RaceEntry.adjusted_time,
+            RaceEntry.finish_time,
+            Dog.trainer_name,
+            Dog.sire,
+        )
+        .join(Race, RaceEntry.race_id == Race.id)
+        .join(Dog, RaceEntry.dog_id == Dog.id)
+        .filter(Race.status == "resulted")
+        .all()
+    )
+    evt = pd.DataFrame(evt_rows, columns=[
+        "race_date", "track_id", "distance_m", "going", "trap",
+        "finish_position", "adjusted_time", "finish_time",
+        "trainer_name", "sire",
+    ])
+    del evt_rows
+    logger.info("Batch builtin: %d resulted runs feed the as-of aggregates", len(evt))
+    _hb()
+
+    evt["_dt"] = pd.to_datetime(evt["race_date"])
+    evt["finish_position"] = pd.to_numeric(evt["finish_position"], errors="coerce")
+    evt["n"] = 1.0
+    evt["win"] = (evt["finish_position"] == 1).astype(float)
+    evt["place"] = (evt["finish_position"] <= 3).astype(float)
+    evt["at_sum"] = pd.to_numeric(evt["adjusted_time"], errors="coerce")
+    evt["at_sumsq"] = evt["at_sum"] ** 2
+    evt["ft_sum"] = pd.to_numeric(evt["finish_time"], errors="coerce")
+    pos_ok = evt["finish_position"].notna()
+    at_ok = evt["at_sum"].notna()
+    ft_ok = evt["ft_sum"].notna()
+
+    def _asof_join(
+        target: pd.DataFrame,
+        key_cols: list[str],
+        value_cols: list[str],
+        mask,
+        prefix: str,
+    ) -> pd.DataFrame:
+        """Attach cumulative event tallies as-of strictly before each target
+        row's race date, grouped by `key_cols`. Adds columns named
+        `prefix + value_col`; rows with no prior data (or NaN keys) get NaN.
+        """
+        out_cols = [prefix + c for c in value_cols]
+        src = evt[mask]
+        if src.empty or target.empty:
+            for c in out_cols:
+                target[c] = np.nan
+            return target
+        daily = (
+            src.groupby(key_cols + ["_dt"], sort=True)[value_cols]
+            .sum()
+            .reset_index()
+        )
+        for c in value_cols:
+            daily[c] = daily.groupby(key_cols, sort=False)[c].cumsum()
+        daily = daily.sort_values("_dt", kind="mergesort")
+
+        left = target[key_cols + ["_dt"]].copy()
+        left["_row"] = np.arange(len(left))
+        # merge_asof requires identical key dtypes on both sides
+        for k in key_cols:
+            if pd.api.types.is_numeric_dtype(daily[k]) or pd.api.types.is_numeric_dtype(left[k]):
+                left[k] = pd.to_numeric(left[k], errors="coerce").astype("float64")
+                daily[k] = pd.to_numeric(daily[k], errors="coerce").astype("float64")
+            else:
+                left[k] = left[k].astype(object)
+                daily[k] = daily[k].astype(object)
+        merged = pd.merge_asof(
+            left.sort_values("_dt", kind="mergesort"),
+            daily,
+            on="_dt",
+            by=key_cols,
+            direction="backward",
+            allow_exact_matches=False,  # strictly before the target date
+        ).sort_values("_row")
+        for c, oc in zip(value_cols, out_cols):
+            target[oc] = merged[c].to_numpy()
+        return target
+
+    ctx_df["_dt"] = pd.to_datetime(ctx_df["race_date"])
+    ctx_df = _asof_join(ctx_df, ["track_id", "distance_m", "trap"], ["n", "win"], pos_ok, "trap_")
+    ctx_df = _asof_join(ctx_df, ["track_id", "distance_m", "going", "trap"], ["n", "win"], pos_ok & evt["going"].notna(), "tg_")
+    ctx_df = _asof_join(ctx_df, ["trainer_name"], ["n", "win", "place"], pos_ok, "tr_")
+    ctx_df = _asof_join(ctx_df, ["trainer_name", "track_id"], ["n", "win"], pos_ok, "trt_")
+    ctx_df = _asof_join(ctx_df, ["sire"], ["n", "win"], pos_ok, "sire_")
+    ctx_df = _asof_join(ctx_df, ["sire", "distance_m"], ["n", "ft_sum"], ft_ok, "sired_")
+    ctx_df = _asof_join(ctx_df, ["track_id", "distance_m"], ["n", "at_sum"], at_ok, "trk_")
+    _hb()
+
+    # Derive the per-entry as-of rates, keeping the original minimum sample
+    # thresholds so sparse buckets stay None instead of noisy.
+    ctx_df["asof_trap_rate"] = (ctx_df["trap_win"] / ctx_df["trap_n"]).where(ctx_df["trap_n"] >= 30)
+    ctx_df["asof_tg_rate"] = (ctx_df["tg_win"] / ctx_df["tg_n"]).where(ctx_df["tg_n"] >= 20)
+    ctx_df["asof_trainer_win"] = (ctx_df["tr_win"] / ctx_df["tr_n"]).where(ctx_df["tr_n"] >= 20)
+    ctx_df["asof_trainer_place"] = (ctx_df["tr_place"] / ctx_df["tr_n"]).where(ctx_df["tr_n"] >= 20)
+    ctx_df["asof_trainer_track"] = (ctx_df["trt_win"] / ctx_df["trt_n"]).where(ctx_df["trt_n"] >= 10)
+    ctx_df["asof_sire_rate"] = (ctx_df["sire_win"] / ctx_df["sire_n"]).where(ctx_df["sire_n"] >= 50)
+    ctx_df["asof_sire_time"] = (ctx_df["sired_ft_sum"] / ctx_df["sired_n"]).where(ctx_df["sired_n"] > 0)
+    ctx_df["asof_track_avg_time"] = (ctx_df["trk_at_sum"] / ctx_df["trk_n"]).where(ctx_df["trk_n"] >= 50)
+
+    # Speed figures for every history row, normalised by the (track, distance)
+    # baseline as of that run's OWN date — so a 2023 run keeps the same figure
+    # forever, and no baseline ever includes data from after the run.
+    if not all_hist_df.empty:
+        all_hist_df["_dt"] = pd.to_datetime(all_hist_df["race_date"])
+        all_hist_df = _asof_join(
+            all_hist_df, ["track_id", "distance_m"],
+            ["n", "at_sum", "at_sumsq"], at_ok, "sf_",
+        )
+        sf_n = all_hist_df["sf_n"]
+        sf_mean = all_hist_df["sf_at_sum"] / sf_n
+        sf_var = all_hist_df["sf_at_sumsq"] / sf_n - sf_mean ** 2
+        sf_std = np.sqrt(np.clip(sf_var, 0.0, None))
+        adj = pd.to_numeric(all_hist_df["adjusted_time"], errors="coerce")
+        ok = (sf_n >= _SPEED_FIGURE_MIN_BUCKET) & (sf_std > 1e-6) & adj.notna()
+        all_hist_df["speed_figure"] = (
+            _SPEED_FIGURE_CENTER
+            + _SPEED_FIGURE_STDEV_SCALE * (sf_mean - adj) / sf_std
+        ).where(ok)
+        all_hist_df = all_hist_df.drop(
+            columns=["_dt", "sf_n", "sf_at_sum", "sf_at_sumsq"],
+        )
+    else:
+        all_hist_df["speed_figure"] = pd.Series(dtype=float)
+
+    del evt
+    gc.collect()
+    _hb()
+
     # Index by dog for fast lookup
     dog_histories: dict[int, pd.DataFrame] = {}
     n_hist_rows = len(all_hist_df)
@@ -602,274 +749,6 @@ def compute_builtin_features_batch(
 
     logger.info("Batch builtin: loaded %d history rows for %d dogs", n_hist_rows, len(dog_histories))
     _hb()
-
-    # --- 3. Bulk compute trap win rates (per track/distance/trap combo) ---
-    unique_combos = ctx_df[["track_id", "distance_m", "trap"]].drop_duplicates()
-    logger.info("Batch builtin: computing trap win rates for %d combos...", len(unique_combos))
-
-    trap_stats = (
-        db.query(
-            Race.track_id,
-            Race.distance_m,
-            RaceEntry.trap,
-            func.count(RaceEntry.id).label("total"),
-            func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
-        )
-        .join(Race, RaceEntry.race_id == Race.id)
-        .filter(
-            Race.status == "resulted",
-            RaceEntry.finish_position.isnot(None),
-        )
-        .group_by(Race.track_id, Race.distance_m, RaceEntry.trap)
-        .all()
-    )
-    # Key: (track_id, distance_m, trap) -> win_rate
-    trap_win_rates: dict[tuple, float | None] = {}
-    # Key: (track_id, distance_m, trap) -> total runs (for shrinkage)
-    trap_sample_sizes: dict[tuple, int] = {}
-    for row in trap_stats:
-        if row.total and row.total >= 30:
-            key = (row.track_id, row.distance_m, row.trap)
-            trap_win_rates[key] = float(row.wins) / float(row.total)
-            trap_sample_sizes[key] = int(row.total)
-
-    # --- 3b. Going-conditional trap win rates ---
-    # Going materially affects trap bias: heavy going churns the inside rail,
-    # fast going amplifies rail shortcuts.  Compute per (track, distance,
-    # going, trap) with a higher min-sample bar since buckets are sparser.
-    trap_going_stats = (
-        db.query(
-            Race.track_id,
-            Race.distance_m,
-            Race.going,
-            RaceEntry.trap,
-            func.count(RaceEntry.id).label("total"),
-            func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
-        )
-        .join(Race, RaceEntry.race_id == Race.id)
-        .filter(
-            Race.status == "resulted",
-            RaceEntry.finish_position.isnot(None),
-            Race.going.isnot(None),
-        )
-        .group_by(Race.track_id, Race.distance_m, Race.going, RaceEntry.trap)
-        .all()
-    )
-    trap_going_win_rates: dict[tuple, float] = {}
-    for row in trap_going_stats:
-        if row.total and row.total >= 20:
-            trap_going_win_rates[
-                (row.track_id, row.distance_m, row.going, row.trap)
-            ] = float(row.wins) / float(row.total)
-
-    # --- 4. Bulk compute trainer stats (win/place rate in last 90 days) ---
-    unique_trainers = ctx_df["trainer_name"].dropna().unique().tolist()
-    logger.info("Batch builtin: computing trainer stats for %d trainers...", len(unique_trainers))
-
-    trainer_overall: dict[str, dict] = {}
-    if unique_trainers:
-        def _trainer_overall_query(chunk):
-            return (
-                db.query(
-                    Dog.trainer_name,
-                    func.count(RaceEntry.id).label("total"),
-                    func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
-                    func.sum(case((RaceEntry.finish_position <= 3, 1), else_=0)).label("places"),
-                )
-                .join(Dog, RaceEntry.dog_id == Dog.id)
-                .join(Race, RaceEntry.race_id == Race.id)
-                .filter(
-                    Dog.trainer_name.in_(chunk),
-                    Race.status == "resulted",
-                    RaceEntry.finish_position.isnot(None),
-                )
-                .group_by(Dog.trainer_name)
-                .all()
-            )
-
-        trainer_rows = _chunked_query(db, _trainer_overall_query, unique_trainers, Dog.trainer_name)
-        for row in trainer_rows:
-            if row.total and row.total >= 20:
-                trainer_overall[row.trainer_name] = {
-                    "win_rate": float(row.wins) / float(row.total),
-                    "place_rate": float(row.places) / float(row.total),
-                }
-
-    # Trainer at track
-    trainer_at_track: dict[tuple, float | None] = {}
-    if unique_trainers:
-        def _trainer_track_query(chunk):
-            return (
-                db.query(
-                    Dog.trainer_name,
-                    Race.track_id,
-                    func.count(RaceEntry.id).label("total"),
-                    func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
-                )
-                .join(Dog, RaceEntry.dog_id == Dog.id)
-                .join(Race, RaceEntry.race_id == Race.id)
-                .filter(
-                    Dog.trainer_name.in_(chunk),
-                    Race.status == "resulted",
-                    RaceEntry.finish_position.isnot(None),
-                )
-                .group_by(Dog.trainer_name, Race.track_id)
-                .all()
-            )
-
-        trainer_track_rows = _chunked_query(db, _trainer_track_query, unique_trainers, Dog.trainer_name)
-        for row in trainer_track_rows:
-            if row.total and row.total >= 10:
-                trainer_at_track[(row.trainer_name, row.track_id)] = float(row.wins) / float(row.total)
-
-    # --- 5. Bulk compute sire stats ---
-    unique_sires = ctx_df["sire"].dropna().unique().tolist()
-    logger.info("Batch builtin: computing sire stats for %d sires...", len(unique_sires))
-
-    sire_win: dict[str, float | None] = {}
-    if unique_sires:
-        def _sire_win_query(chunk):
-            return (
-                db.query(
-                    Dog.sire,
-                    func.count(RaceEntry.id).label("total"),
-                    func.sum(case((RaceEntry.finish_position == 1, 1), else_=0)).label("wins"),
-                )
-                .join(Dog, RaceEntry.dog_id == Dog.id)
-                .join(Race, RaceEntry.race_id == Race.id)
-                .filter(
-                    Dog.sire.in_(chunk),
-                    Race.status == "resulted",
-                    RaceEntry.finish_position.isnot(None),
-                )
-                .group_by(Dog.sire)
-                .all()
-            )
-
-        sire_rows = _chunked_query(db, _sire_win_query, unique_sires, Dog.sire)
-        for row in sire_rows:
-            if row.total and row.total >= 50:
-                sire_win[row.sire] = float(row.wins) / float(row.total)
-
-    # Sire mean time at distance
-    sire_time_at_dist: dict[tuple, float | None] = {}
-    if unique_sires:
-        def _sire_time_query(chunk):
-            return (
-                db.query(
-                    Dog.sire,
-                    Race.distance_m,
-                    func.avg(RaceEntry.finish_time).label("avg_time"),
-                )
-                .join(Dog, RaceEntry.dog_id == Dog.id)
-                .join(Race, RaceEntry.race_id == Race.id)
-                .filter(
-                    Dog.sire.in_(chunk),
-                    Race.status == "resulted",
-                    RaceEntry.finish_time.isnot(None),
-                )
-                .group_by(Dog.sire, Race.distance_m)
-                .all()
-            )
-
-        sire_time_rows = _chunked_query(db, _sire_time_query, unique_sires, Dog.sire)
-        for row in sire_time_rows:
-            if row.avg_time:
-                sire_time_at_dist[(row.sire, row.distance_m)] = float(row.avg_time)
-
-    # --- 6. Bulk compute track/distance average times (for speed rating) ---
-    logger.info("Batch builtin: computing track speed baselines...")
-    track_avg_rows = (
-        db.query(
-            Race.track_id,
-            Race.distance_m,
-            func.count(RaceEntry.id).label("cnt"),
-            func.avg(RaceEntry.adjusted_time).label("avg_time"),
-        )
-        .join(Race, RaceEntry.race_id == Race.id)
-        .filter(
-            Race.status == "resulted",
-            RaceEntry.adjusted_time.isnot(None),
-        )
-        .group_by(Race.track_id, Race.distance_m)
-        .all()
-    )
-    track_avg_time: dict[tuple, float | None] = {}
-    for row in track_avg_rows:
-        if row.cnt and row.cnt >= 50 and row.avg_time:
-            track_avg_time[(row.track_id, row.distance_m)] = float(row.avg_time)
-
-    # --- 6b. Speed-figure baselines: mean & stdev of adjusted_time per
-    # (track, distance) bucket.  Used to normalise every historical run into
-    # a Beyer-style speed figure that's comparable across tracks/distances.
-    logger.info("Batch builtin: computing speed-figure baselines...")
-    speed_baseline_rows = (
-        db.query(
-            Race.track_id,
-            Race.distance_m,
-            func.count(RaceEntry.id).label("cnt"),
-            func.avg(RaceEntry.adjusted_time).label("mean_time"),
-            # SQLite/SQLAlchemy stddev portability: use a generic AVG of
-            # squared deviation via a subquery would be heavy.  We compute
-            # stdev in Python below from a second pass instead.
-        )
-        .join(Race, RaceEntry.race_id == Race.id)
-        .filter(
-            Race.status == "resulted",
-            RaceEntry.adjusted_time.isnot(None),
-        )
-        .group_by(Race.track_id, Race.distance_m)
-        .all()
-    )
-    sf_means: dict[tuple, float] = {}
-    sf_counts: dict[tuple, int] = {}
-    for row in speed_baseline_rows:
-        if row.cnt and row.cnt >= _SPEED_FIGURE_MIN_BUCKET and row.mean_time:
-            key = (row.track_id, row.distance_m)
-            sf_means[key] = float(row.mean_time)
-            sf_counts[key] = int(row.cnt)
-
-    # Second pass to compute population stdev per bucket (one query, then
-    # aggregate in Python — keeps us off DB-specific stddev functions).
-    sf_stdevs: dict[tuple, float] = {}
-    if sf_means:
-        ssd_rows = (
-            db.query(
-                Race.track_id,
-                Race.distance_m,
-                RaceEntry.adjusted_time,
-            )
-            .join(Race, RaceEntry.race_id == Race.id)
-            .filter(
-                Race.status == "resulted",
-                RaceEntry.adjusted_time.isnot(None),
-            )
-            .all()
-        )
-        ssd_accum: dict[tuple, list[float]] = defaultdict(list)
-        for r in ssd_rows:
-            key = (r.track_id, r.distance_m)
-            if key in sf_means:
-                ssd_accum[key].append(float(r.adjusted_time) - sf_means[key])
-        for key, devs in ssd_accum.items():
-            if len(devs) >= _SPEED_FIGURE_MIN_BUCKET:
-                ssq = sum(d * d for d in devs)
-                std = (ssq / len(devs)) ** 0.5
-                if std > 1e-6:
-                    sf_stdevs[key] = std
-        del ssd_rows, ssd_accum
-        gc.collect()
-
-    def _speed_figure(adj_time: float, track_id: int, distance_m: int) -> float | None:
-        key = (track_id, distance_m)
-        mean = sf_means.get(key)
-        std = sf_stdevs.get(key)
-        if mean is None or std is None:
-            return None
-        return (
-            _SPEED_FIGURE_CENTER
-            + _SPEED_FIGURE_STDEV_SCALE * (mean - adj_time) / std
-        )
 
     # --- 7. Precompute per-(dog, race_date) history aggregates ---
     # Instead of filtering history DataFrames 300k times in a Python loop,
@@ -958,25 +837,13 @@ def compute_builtin_features_batch(
         h_track = hist_sorted["track_id"].values
         h_trap = hist_sorted["trap"].values
 
-        # Precompute speed figures for the whole sorted history once.
-        # NaN where the bucket has no baseline or adjusted_time is missing.
-        h_sf = np.full(n_hist, np.nan, dtype=float)
-        for i in range(n_hist):
-            at = h_adj_time[i]
-            if at is None or (isinstance(at, float) and np.isnan(at)):
-                continue
-            tid_raw = h_track[i]
-            dst_raw = h_distance[i]
-            if tid_raw is None or dst_raw is None:
-                continue
-            try:
-                tid = int(tid_raw)
-                dst = int(dst_raw)
-            except (TypeError, ValueError):
-                continue
-            sf = _speed_figure(float(at), tid, dst)
-            if sf is not None:
-                h_sf[i] = sf
+        # Speed figures were precomputed on the full history frame, each run
+        # normalised by its (track, distance) baseline as of the run's own
+        # date. NaN where the bucket had too little prior data or
+        # adjusted_time is missing.
+        h_sf = pd.to_numeric(
+            hist_sorted["speed_figure"], errors="coerce",
+        ).to_numpy(dtype=float)
 
         # Precompute parsed race comments once per history row.  Each parsed
         # result is a dict of flags; we aggregate into rates over last-10
@@ -1414,6 +1281,16 @@ def compute_builtin_features_batch(
     # --- 8. Assemble features vectorized from precomputed lookups ---
     result_rows: dict[int, dict[str, float | None]] = {}
 
+    def _fnum(v) -> float | None:
+        """Convert an as-of aggregate cell to float, mapping NaN/None to None."""
+        if v is None:
+            return None
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return None
+        return None if np.isnan(fv) else fv
+
     for entry_id, ctx in ctx_df.iterrows():
         dog_id = ctx["dog_id"]
         race_date = ctx["race_date"]
@@ -1431,8 +1308,8 @@ def compute_builtin_features_batch(
 
         f: dict[str, float | None] = {}
 
-        # 1. Trap win rate (lookup)
-        f["trap_win_rate_at_track"] = trap_win_rates.get((track_id, distance_m, trap))
+        # 1. Trap win rate (as-of lookup)
+        f["trap_win_rate_at_track"] = _fnum(ctx["asof_trap_rate"])
 
         # 2. Grade movement
         last_grade_idx = agg.get("grade_movement_last")
@@ -1498,20 +1375,19 @@ def compute_builtin_features_batch(
             f["front_runner_x_inside"] = None
             f["front_runner_x_outside"] = None
 
-        # 11. Trainer stats (lookup)
-        t_stats = trainer_overall.get(trainer_name, {})
-        f["trainer_win_rate"] = t_stats.get("win_rate")
-        f["trainer_place_rate"] = t_stats.get("place_rate")
-        f["trainer_win_rate_at_track"] = trainer_at_track.get((trainer_name, track_id))
+        # 11. Trainer stats (as-of lookup)
+        f["trainer_win_rate"] = _fnum(ctx["asof_trainer_win"])
+        f["trainer_place_rate"] = _fnum(ctx["asof_trainer_place"])
+        f["trainer_win_rate_at_track"] = _fnum(ctx["asof_trainer_track"])
 
-        # 12. Sire stats (lookup)
-        f["sire_progeny_win_rate"] = sire_win.get(sire)
-        f["sire_progeny_mean_time_at_dist"] = sire_time_at_dist.get((sire, distance_m))
+        # 12. Sire stats (as-of lookup)
+        f["sire_progeny_win_rate"] = _fnum(ctx["asof_sire_rate"])
+        f["sire_progeny_mean_time_at_dist"] = _fnum(ctx["asof_sire_time"])
 
         # 13. Track speed rating
         best_times = agg.get("track_speed_best", {})
         dog_best = best_times.get(distance_m)
-        track_avg = track_avg_time.get((track_id, distance_m))
+        track_avg = _fnum(ctx["asof_track_avg_time"])
         if dog_best is not None and track_avg is not None:
             f["track_speed_rating"] = dog_best - track_avg
         else:
@@ -1545,9 +1421,7 @@ def compute_builtin_features_batch(
 
         # Going-conditional trap bias (may be None if the bucket is too small)
         if current_going is not None:
-            going_rate = trap_going_win_rates.get(
-                (track_id, distance_m, current_going, trap)
-            )
+            going_rate = _fnum(ctx["asof_tg_rate"])
             if going_rate is not None and expected_rate is not None:
                 f["trap_bias_deviation_going"] = going_rate - expected_rate
             else:

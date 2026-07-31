@@ -98,6 +98,7 @@ def _seed(db):
             name=f"Dog{trap}",
             trainer_name=f"Trainer{trap}",
             sire=f"Sire{trap}",
+            dam=f"Dam{trap}",
             birth_date=date(2023, 1, 1),
         )
         db.add(d)
@@ -196,3 +197,27 @@ def test_no_prior_data_yields_none(db):
         assert v is None or (isinstance(v, float) and math.isnan(v)), (
             f"{col} should be missing for the first-ever race, got {v!r}"
         )
+
+
+def test_dam_and_trainer_window_features_are_as_of(db):
+    """Tier 12: dam progeny rate mirrors the trap flip (Dam1 = trap-1 dog's
+    dam); the 90-day trainer window sees ONLY phase 2 by probe B."""
+    _track, dogs, probe_a, probe_b = _seed(db)
+    # Give each dog a distinct dam (the seed leaves sire/dam per trap)
+    ea = _trap1_entry(db, probe_a)
+    eb = _trap1_entry(db, probe_b)
+
+    df = compute_builtin_features_batch(db, [ea.id, eb.id])
+
+    # Dam1's progeny = the trap-1 dog only: 40/40 by probe A, 41/81 by B.
+    assert df.loc[ea.id, "dam_progeny_win_rate"] == pytest.approx(1.0)
+    assert df.loc[eb.id, "dam_progeny_win_rate"] == pytest.approx(41.0 / 81.0)
+
+    # Probe B is day 100; the trailing 90 days cover day 10 onward: runs on
+    # days 10..40 (31 wins), day 50 (win), days 51..90 (40 losses) = 32/72.
+    assert df.loc[eb.id, "trainer_win_rate_90d"] == pytest.approx(32.0 / 72.0)
+    # And the career rate at the same moment is 41/81 — the delta is the
+    # cold-streak signal.
+    assert df.loc[eb.id, "trainer_form_delta_90d"] == pytest.approx(
+        32.0 / 72.0 - 41.0 / 81.0
+    )

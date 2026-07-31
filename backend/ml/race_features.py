@@ -517,6 +517,7 @@ def compute_builtin_features_batch(
                 Dog.birth_date,
                 Dog.trainer_name,
                 Dog.sire,
+                Dog.dam,
             )
             .join(Race, RaceEntry.race_id == Race.id)
             .join(Dog, RaceEntry.dog_id == Dog.id)
@@ -534,7 +535,7 @@ def compute_builtin_features_batch(
         "wide_runner", "race_id",
         "track_id", "distance_m", "grade", "going", "num_runners",
         "race_date", "race_time", "race_type",
-        "birth_date", "trainer_name", "sire",
+        "birth_date", "trainer_name", "sire", "dam",
     ]).set_index("entry_id")
 
     logger.info("Batch builtin: fetched context for %d entries", len(ctx_df))
@@ -612,6 +613,7 @@ def compute_builtin_features_batch(
             RaceEntry.finish_time,
             Dog.trainer_name,
             Dog.sire,
+            Dog.dam,
         )
         .join(Race, RaceEntry.race_id == Race.id)
         .join(Dog, RaceEntry.dog_id == Dog.id)
@@ -621,7 +623,7 @@ def compute_builtin_features_batch(
     evt = pd.DataFrame(evt_rows, columns=[
         "race_date", "track_id", "distance_m", "going", "trap",
         "finish_position", "adjusted_time", "finish_time",
-        "trainer_name", "sire",
+        "trainer_name", "sire", "dam",
     ])
     del evt_rows
     logger.info("Batch builtin: %d resulted runs feed the as-of aggregates", len(evt))
@@ -645,10 +647,16 @@ def compute_builtin_features_batch(
         value_cols: list[str],
         mask,
         prefix: str,
+        window_days: int | None = None,
     ) -> pd.DataFrame:
         """Attach cumulative event tallies as-of strictly before each target
         row's race date, grouped by `key_cols`. Adds columns named
         `prefix + value_col`; rows with no prior data (or NaN keys) get NaN.
+
+        With ``window_days`` set, tallies cover only the trailing window
+        [date - window_days, date): a second as-of merge at the shifted
+        date subtracts the cumulative total from before the window opened.
+        Still strictly past-only — same-day data never enters.
         """
         out_cols = [prefix + c for c in value_cols]
         src = evt[mask]
@@ -667,7 +675,10 @@ def compute_builtin_features_batch(
 
         left = target[key_cols + ["_dt"]].copy()
         left["_row"] = np.arange(len(left))
-        # merge_asof requires identical key dtypes on both sides
+        # merge_asof requires identical dtypes on both sides — including the
+        # datetime resolution ([s] vs [us] vs [ns] all count as different).
+        left["_dt"] = left["_dt"].astype("datetime64[ns]")
+        daily["_dt"] = daily["_dt"].astype("datetime64[ns]")
         for k in key_cols:
             if pd.api.types.is_numeric_dtype(daily[k]) or pd.api.types.is_numeric_dtype(left[k]):
                 left[k] = pd.to_numeric(left[k], errors="coerce").astype("float64")
@@ -675,16 +686,33 @@ def compute_builtin_features_batch(
             else:
                 left[k] = left[k].astype(object)
                 daily[k] = daily[k].astype(object)
-        merged = pd.merge_asof(
-            left.sort_values("_dt", kind="mergesort"),
-            daily,
-            on="_dt",
-            by=key_cols,
-            direction="backward",
-            allow_exact_matches=False,  # strictly before the target date
-        ).sort_values("_row")
+
+        def _backward_merge(frame: pd.DataFrame) -> pd.DataFrame:
+            return pd.merge_asof(
+                frame.sort_values("_dt", kind="mergesort"),
+                daily,
+                on="_dt",
+                by=key_cols,
+                direction="backward",
+                allow_exact_matches=False,  # strictly before the target date
+            ).sort_values("_row")
+
+        merged = _backward_merge(left)
+        if window_days is None:
+            for c, oc in zip(value_cols, out_cols):
+                target[oc] = merged[c].to_numpy()
+            return target
+
+        shifted = left.copy()
+        shifted["_dt"] = shifted["_dt"] - pd.Timedelta(days=window_days)
+        merged_start = _backward_merge(shifted)
         for c, oc in zip(value_cols, out_cols):
-            target[oc] = merged[c].to_numpy()
+            total = merged[c].to_numpy(dtype=float)
+            # No tally before the window opened just means zero, not unknown
+            before = np.nan_to_num(
+                merged_start[c].to_numpy(dtype=float), nan=0.0,
+            )
+            target[oc] = total - before
         return target
 
     ctx_df["_dt"] = pd.to_datetime(ctx_df["race_date"])
@@ -695,6 +723,16 @@ def compute_builtin_features_batch(
     ctx_df = _asof_join(ctx_df, ["sire"], ["n", "win"], pos_ok, "sire_")
     ctx_df = _asof_join(ctx_df, ["sire", "distance_m"], ["n", "ft_sum"], ft_ok, "sired_")
     ctx_df = _asof_join(ctx_df, ["track_id", "distance_m"], ["n", "at_sum"], at_ok, "trk_")
+    # Pedigree: the dam line was entirely unused (sire-only before), yet
+    # every dog carries both parents. Dam progeny form + sire form AT this
+    # distance are classic breeding signals.
+    ctx_df = _asof_join(ctx_df, ["dam"], ["n", "win"], pos_ok, "dam_")
+    ctx_df = _asof_join(ctx_df, ["dam", "distance_m"], ["n", "ft_sum"], ft_ok, "damd_")
+    ctx_df = _asof_join(ctx_df, ["sire", "distance_m"], ["n", "win"], pos_ok, "sired2_")
+    # Trainer short-term form: trailing windows, still strictly past-only.
+    ctx_df = _asof_join(ctx_df, ["trainer_name"], ["n", "win"], pos_ok, "tr90_", window_days=90)
+    ctx_df = _asof_join(ctx_df, ["trainer_name"], ["n", "win"], pos_ok, "tr30_", window_days=30)
+    ctx_df = _asof_join(ctx_df, ["trainer_name", "track_id"], ["n", "win"], pos_ok, "trt365_", window_days=365)
     _hb()
 
     # Derive the per-entry as-of rates, keeping the original minimum sample
@@ -707,6 +745,13 @@ def compute_builtin_features_batch(
     ctx_df["asof_sire_rate"] = (ctx_df["sire_win"] / ctx_df["sire_n"]).where(ctx_df["sire_n"] >= 50)
     ctx_df["asof_sire_time"] = (ctx_df["sired_ft_sum"] / ctx_df["sired_n"]).where(ctx_df["sired_n"] > 0)
     ctx_df["asof_track_avg_time"] = (ctx_df["trk_at_sum"] / ctx_df["trk_n"]).where(ctx_df["trk_n"] >= 50)
+    ctx_df["asof_dam_rate"] = (ctx_df["dam_win"] / ctx_df["dam_n"]).where(ctx_df["dam_n"] >= 30)
+    ctx_df["asof_dam_time"] = (ctx_df["damd_ft_sum"] / ctx_df["damd_n"]).where(ctx_df["damd_n"] > 0)
+    ctx_df["asof_sire_dist_rate"] = (ctx_df["sired2_win"] / ctx_df["sired2_n"]).where(ctx_df["sired2_n"] >= 25)
+    ctx_df["asof_trainer_win_90d"] = (ctx_df["tr90_win"] / ctx_df["tr90_n"]).where(ctx_df["tr90_n"] >= 10)
+    ctx_df["asof_trainer_runs_90d"] = ctx_df["tr90_n"]
+    ctx_df["asof_trainer_win_30d"] = (ctx_df["tr30_win"] / ctx_df["tr30_n"]).where(ctx_df["tr30_n"] >= 5)
+    ctx_df["asof_trainer_track_365d"] = (ctx_df["trt365_win"] / ctx_df["trt365_n"]).where(ctx_df["trt365_n"] >= 8)
 
     # Speed figures for every history row, normalised by the (track, distance)
     # baseline as of that run's OWN date — so a 2023 run keeps the same figure
@@ -1384,6 +1429,21 @@ def compute_builtin_features_batch(
         f["sire_progeny_win_rate"] = _fnum(ctx["asof_sire_rate"])
         f["sire_progeny_mean_time_at_dist"] = _fnum(ctx["asof_sire_time"])
 
+        # 12b. Tier 12 — pedigree depth & trainer short-term form (as-of)
+        f["dam_progeny_win_rate"] = _fnum(ctx["asof_dam_rate"])
+        f["dam_progeny_mean_time_at_dist"] = _fnum(ctx["asof_dam_time"])
+        f["sire_progeny_win_rate_at_dist"] = _fnum(ctx["asof_sire_dist_rate"])
+        f["trainer_win_rate_90d"] = _fnum(ctx["asof_trainer_win_90d"])
+        f["trainer_runs_90d"] = _fnum(ctx["asof_trainer_runs_90d"])
+        f["trainer_win_rate_30d"] = _fnum(ctx["asof_trainer_win_30d"])
+        f["trainer_win_rate_at_track_365d"] = _fnum(ctx["asof_trainer_track_365d"])
+        t90 = f["trainer_win_rate_90d"]
+        tcareer = f["trainer_win_rate"]
+        if t90 is not None and tcareer is not None:
+            f["trainer_form_delta_90d"] = t90 - tcareer
+        else:
+            f["trainer_form_delta_90d"] = None
+
         # 13. Track speed rating
         best_times = agg.get("track_speed_best", {})
         dog_best = best_times.get(distance_m)
@@ -1619,6 +1679,16 @@ BUILTIN_FEATURE_NAMES = [
     "trainer_win_rate_at_track",
     "sire_progeny_win_rate",
     "sire_progeny_mean_time_at_dist",
+    # Tier 12 — pedigree depth & trainer short-term form (all as-of;
+    # littermate features wait on birth_date backfill from dog profiles)
+    "dam_progeny_win_rate",
+    "dam_progeny_mean_time_at_dist",
+    "sire_progeny_win_rate_at_dist",
+    "trainer_win_rate_90d",
+    "trainer_runs_90d",
+    "trainer_win_rate_30d",
+    "trainer_win_rate_at_track_365d",
+    "trainer_form_delta_90d",
     "track_speed_rating",
     # Tier 3 — speed figure (Beyer-style normalised time ratings)
     "speed_figure_best_last10",

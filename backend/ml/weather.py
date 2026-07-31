@@ -1,0 +1,163 @@
+"""Open-Meteo weather integration for Irish greyhound tracks.
+
+Free, keyless API. Historical days come from the archive endpoint (one
+call covers years); today/tomorrow come from the forecast endpoint so
+predictions see the same features the training set carried. Track
+coordinates are town-level — weather varies on a scale far coarser than a
+stadium.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import date, timedelta
+from typing import Iterable
+
+import httpx
+from sqlalchemy.orm import Session
+
+from app.models.track import Track
+from app.models.weather import TrackWeather
+
+logger = logging.getLogger(__name__)
+
+ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+DAILY_VARS = "precipitation_sum,temperature_2m_mean,wind_speed_10m_max"
+
+# Town-level coordinates for every location string in the tracks table.
+TOWN_COORDS: dict[str, tuple[float, float]] = {
+    "dublin": (53.339, -6.228),       # Shelbourne Park / Harolds Cross
+    "cork": (51.888, -8.545),         # Curraheen Park
+    "belfast": (54.532, -5.977),      # Drumbo Park
+    "derry": (54.997, -7.309),
+    "dundalk": (54.003, -6.416),
+    "enniscorthy": (52.501, -6.566),
+    "galway": (53.271, -9.062),
+    "kilkenny": (52.654, -7.244),
+    "limerick": (52.658, -8.630),
+    "longford": (53.727, -7.793),
+    "mullingar": (53.526, -7.338),
+    "newbridge": (53.181, -6.797),
+    "thurles": (52.679, -7.814),
+    "tralee": (52.271, -9.700),
+    "waterford": (52.246, -7.139),
+    "youghal": (51.951, -7.850),
+    "clonmel": (52.355, -7.704),
+}
+
+
+def coords_for_track(track: Track) -> tuple[float, float] | None:
+    loc = (track.location or track.name or "").strip().lower()
+    for town, coords in TOWN_COORDS.items():
+        if town in loc:
+            return coords
+    return None
+
+
+def _rows_from_payload(payload: dict) -> dict[date, dict]:
+    daily = payload.get("daily") or {}
+    out: dict[date, dict] = {}
+    times = daily.get("time") or []
+    for i, day_str in enumerate(times):
+        def pick(key):
+            arr = daily.get(key) or []
+            return arr[i] if i < len(arr) else None
+        out[date.fromisoformat(day_str)] = {
+            "precip_mm": pick("precipitation_sum"),
+            "temp_mean_c": pick("temperature_2m_mean"),
+            "wind_max_kmh": pick("wind_speed_10m_max"),
+        }
+    return out
+
+
+def _add_prev48(rows: dict[date, dict]) -> None:
+    for d, vals in rows.items():
+        p1 = rows.get(d - timedelta(days=1), {}).get("precip_mm")
+        p2 = rows.get(d - timedelta(days=2), {}).get("precip_mm")
+        if p1 is None and p2 is None:
+            vals["precip_prev48h_mm"] = None
+        else:
+            vals["precip_prev48h_mm"] = (p1 or 0.0) + (p2 or 0.0)
+
+
+def fetch_archive(lat: float, lon: float, start: date, end: date) -> dict[date, dict]:
+    """One archive call for a full date range (multi-year is fine)."""
+    resp = httpx.get(ARCHIVE_URL, params={
+        "latitude": lat, "longitude": lon,
+        "start_date": str(start), "end_date": str(end),
+        "daily": DAILY_VARS, "timezone": "Europe/Dublin",
+    }, timeout=120)
+    resp.raise_for_status()
+    rows = _rows_from_payload(resp.json())
+    _add_prev48(rows)
+    return rows
+
+
+def fetch_forecast(lat: float, lon: float) -> dict[date, dict]:
+    """Today + a few days ahead, with past days for the trailing-rain sum."""
+    resp = httpx.get(FORECAST_URL, params={
+        "latitude": lat, "longitude": lon,
+        "daily": DAILY_VARS, "timezone": "Europe/Dublin",
+        "past_days": 3, "forecast_days": 3,
+    }, timeout=60)
+    resp.raise_for_status()
+    rows = _rows_from_payload(resp.json())
+    _add_prev48(rows)
+    return rows
+
+
+def upsert_weather(
+    db: Session, track_id: int, rows: dict[date, dict],
+    only_dates: set[date] | None = None,
+) -> int:
+    n = 0
+    existing = {
+        w.date: w for w in
+        db.query(TrackWeather).filter(TrackWeather.track_id == track_id).all()
+    }
+    for d, vals in rows.items():
+        if only_dates is not None and d not in only_dates:
+            continue
+        if "precip_prev48h_mm" not in vals:
+            continue
+        row = existing.get(d)
+        if row is None:
+            db.add(TrackWeather(track_id=track_id, date=d, **vals))
+            n += 1
+        else:
+            for k, v in vals.items():
+                if v is not None:
+                    setattr(row, k, v)
+    return n
+
+
+def ensure_weather_for_date(db: Session, target: date) -> int:
+    """Make sure every active track has a weather row for `target` (and the
+    trailing days feeding precip_prev48h). Called before daily predictions
+    so serve-time features exist. Uses the forecast endpoint."""
+    total = 0
+    tracks = db.query(Track).filter(Track.active.is_(True)).all()
+    fetched: dict[tuple[float, float], dict[date, dict]] = {}
+    for track in tracks:
+        coords = coords_for_track(track)
+        if coords is None:
+            continue
+        have = (
+            db.query(TrackWeather)
+            .filter(TrackWeather.track_id == track.id, TrackWeather.date == target)
+            .first()
+        )
+        if have and have.precip_mm is not None:
+            continue
+        if coords not in fetched:
+            try:
+                fetched[coords] = fetch_forecast(*coords)
+            except Exception as e:
+                logger.warning("forecast fetch failed for %s: %s", track.name, e)
+                fetched[coords] = {}
+        rows = fetched[coords]
+        if rows:
+            total += upsert_weather(db, track.id, rows)
+    db.commit()
+    return total

@@ -12,6 +12,7 @@ class RaceEntry(Base):
     finish_position = Column(Integer, index=True)
     finish_time = Column(Float)  # seconds
     sectional_time = Column(Float)  # time to first bend
+    running_positions = Column(String)  # per-marker positions, e.g. "1222"
     adjusted_time = Column(Float)  # after going allowance
     beaten_distance = Column(Float)  # lengths behind winner
     weight_kg = Column(Float)

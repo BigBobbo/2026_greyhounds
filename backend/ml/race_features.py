@@ -735,6 +735,40 @@ def compute_builtin_features_batch(
     ctx_df = _asof_join(ctx_df, ["trainer_name", "track_id"], ["n", "win"], pos_ok, "trt365_", window_days=365)
     _hb()
 
+    # --- 3b. Weather join (Tier 13) ---
+    # Race-day weather at the track. Same-day values are forecastable
+    # before the race (ml.weather.ensure_weather_for_date fills upcoming
+    # days from the forecast API), so these are serve-safe. Races without
+    # a weather row get NaN and the trainers' missing-value handling.
+    try:
+        from app.models.weather import TrackWeather
+
+        wx_tids = [int(t) for t in ctx_df["track_id"].dropna().unique()]
+        wx_map: dict[tuple, Any] = {}
+        if wx_tids:
+            for w in db.query(TrackWeather).filter(TrackWeather.track_id.in_(wx_tids)).all():
+                wx_map[(w.track_id, w.date)] = w
+        def _wx(row, attr):
+            w = wx_map.get((row["track_id"], row["race_date"]))
+            return getattr(w, attr, None) if w is not None else None
+        if wx_map:
+            ctx_df["wx_precip"] = ctx_df.apply(lambda r: _wx(r, "precip_mm"), axis=1)
+            ctx_df["wx_temp"] = ctx_df.apply(lambda r: _wx(r, "temp_mean_c"), axis=1)
+            ctx_df["wx_wind"] = ctx_df.apply(lambda r: _wx(r, "wind_max_kmh"), axis=1)
+            ctx_df["wx_precip48"] = ctx_df.apply(lambda r: _wx(r, "precip_prev48h_mm"), axis=1)
+        else:
+            ctx_df["wx_precip"] = np.nan
+            ctx_df["wx_temp"] = np.nan
+            ctx_df["wx_wind"] = np.nan
+            ctx_df["wx_precip48"] = np.nan
+    except Exception as _wx_err:  # table may not exist on old DBs
+        logger.info("Weather join skipped: %s", _wx_err)
+        ctx_df["wx_precip"] = np.nan
+        ctx_df["wx_temp"] = np.nan
+        ctx_df["wx_wind"] = np.nan
+        ctx_df["wx_precip48"] = np.nan
+    _hb()
+
     # Derive the per-entry as-of rates, keeping the original minimum sample
     # thresholds so sparse buckets stay None instead of noisy.
     ctx_df["asof_trap_rate"] = (ctx_df["trap_win"] / ctx_df["trap_n"]).where(ctx_df["trap_n"] >= 30)
@@ -1444,6 +1478,13 @@ def compute_builtin_features_batch(
         else:
             f["trainer_form_delta_90d"] = None
 
+        # 12c. Tier 13 — race-day weather (same for all dogs in the race;
+        # trees exploit interactions with trap/pace features)
+        f["race_day_precip_mm"] = _fnum(ctx["wx_precip"])
+        f["race_day_temp_c"] = _fnum(ctx["wx_temp"])
+        f["race_day_wind_kmh"] = _fnum(ctx["wx_wind"])
+        f["precip_last48h_mm"] = _fnum(ctx["wx_precip48"])
+
         # 13. Track speed rating
         best_times = agg.get("track_speed_best", {})
         dog_best = best_times.get(distance_m)
@@ -1689,6 +1730,11 @@ BUILTIN_FEATURE_NAMES = [
     "trainer_win_rate_30d",
     "trainer_win_rate_at_track_365d",
     "trainer_form_delta_90d",
+    # Tier 13 — race-day weather (forecastable pre-race; Open-Meteo)
+    "race_day_precip_mm",
+    "race_day_temp_c",
+    "race_day_wind_kmh",
+    "precip_last48h_mm",
     "track_speed_rating",
     # Tier 3 — speed figure (Beyer-style normalised time ratings)
     "speed_figure_best_last10",

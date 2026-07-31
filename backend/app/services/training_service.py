@@ -591,13 +591,20 @@ def run_optuna_optimization(
 
         def _val_win_proba_on(trainer, X_v, group_v):
             """Extract per-entry win probability on a validation fold."""
+            # Calibrated probabilities, same as serving and the final
+            # metrics. Optuna used to score UNCALIBRATED probabilities while
+            # the reported metrics used calibrated ones — model selection was
+            # optimizing a different quantity than the one being served.
             if is_ranking:
                 scores = trainer.predict(X_v)
                 return trainer.scores_to_proba(
-                    scores, group_sizes=group_v, calibrate=False,
+                    scores, group_sizes=group_v, calibrate=True,
                 )
             if target_type == "classification":
-                return trainer.predict_proba(X_v, calibrate=False)
+                proba = trainer.predict_proba(X_v, calibrate=True)
+                if proba is None:
+                    proba = trainer.predict_proba(X_v, calibrate=False)
+                return proba
             return None
 
         def _score_fold(trainer, result, X_v, y_v, meta_v, group_v):

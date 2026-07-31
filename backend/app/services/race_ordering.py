@@ -369,49 +369,37 @@ def compute_combo_kelly(
     kelly_fraction: float = 0.125,  # eighth Kelly: combos are higher variance
     min_edge: float = 0.10,         # combos need a fatter edge to clear noise
     max_stake_pct: float = 0.02,    # absolute cap, half the win-bet cap
+    cfg: "object | None" = None,
 ) -> dict[str, float | bool | str]:
     """Kelly stake recommendation for a forecast / trio bet.
 
-    Combos have much higher variance than win bets (a 10% probability
-    paying 9/1 has the same expectation as a 50% probability paying 1/1
-    but a far wider distribution of outcomes). The defaults here are
-    deliberately tighter than the win-bet Kelly defaults — eighth Kelly
-    instead of quarter, 10% min-edge instead of 5%, 2% bankroll cap
-    instead of 5%. These can be overridden if a backtest calibrates
-    them away from the conservative side.
-    """
-    if combo_odds_decimal is None or combo_odds_decimal <= 1.0:
-        return {"bet": False, "reason": "no_odds"}
+    Combos have much higher variance than win bets, so sizing is
+    deliberately tighter than the win-bet defaults — eighth Kelly, 10%
+    min-edge, 2% bankroll cap. Pass ``cfg`` (a ml.staking.StakingConfig,
+    usually ``StakingConfig.from_db(db).for_combos()``) to drive sizing
+    from the user's BankrollConfig instead of these hard-coded legacy
+    defaults; the explicit keyword parameters then no longer apply.
 
-    if combo_probability <= 0 or combo_probability >= 1:
+    Tote dividends carry no separate commission (the operator margin is in
+    the dividend), so the legacy path uses commission_rate=0.
+    """
+    from dataclasses import replace as _replace
+
+    from ml.staking import StakingConfig, kelly_stake
+
+    if combo_probability is None or combo_probability <= 0 or combo_probability >= 1:
         return {"bet": False, "reason": "no_probability"}
 
-    implied_prob = 1.0 / combo_odds_decimal
-    edge = combo_probability - implied_prob
+    if cfg is None:
+        cfg = StakingConfig(
+            bankroll=bankroll,
+            kelly_fraction=kelly_fraction,
+            min_edge=min_edge,
+            max_stake_pct=max_stake_pct,
+            commission_rate=0.0,
+            min_odds=1.0 + 1e-9,  # dividends are long; no min-price filter
+        )
+    else:
+        cfg = _replace(cfg, min_odds=1.0 + 1e-9)
 
-    if edge < min_edge:
-        return {
-            "bet": False,
-            "reason": "insufficient_edge",
-            "edge": round(edge, 4),
-            "implied_prob": round(implied_prob, 4),
-        }
-
-    b = combo_odds_decimal - 1.0
-    f_star = (b * combo_probability - (1 - combo_probability)) / b
-    fractional_kelly = max(0.0, f_star * kelly_fraction)
-    stake_pct = min(fractional_kelly, max_stake_pct)
-    stake = round(bankroll * stake_pct, 2)
-
-    return {
-        "bet": True,
-        "stake": stake,
-        "stake_pct": round(stake_pct * 100, 2),
-        "full_kelly_pct": round(f_star * 100, 2),
-        "edge": round(edge, 4),
-        "implied_prob": round(implied_prob, 4),
-        "expected_value": round(
-            combo_probability * (combo_odds_decimal - 1) - (1 - combo_probability),
-            4,
-        ),
-    }
+    return kelly_stake(combo_probability, combo_odds_decimal, cfg)

@@ -155,6 +155,13 @@ def compute_betting_metrics(
         "race_id": race_ids,
     })
 
+    # Normalize probabilities within each race BEFORE any filtering, so the
+    # backtest bets on the same scale the serving path produces (exactly one
+    # dog wins a race; per-race probabilities must sum to 1). Without this
+    # the backtested edge is systematically different from the served edge.
+    sums = df.groupby("race_id")["prob"].transform("sum")
+    df.loc[sums > 0, "prob"] = df.loc[sums > 0, "prob"] / sums[sums > 0]
+
     # Drop rows with no SP
     df = df[df["sp"].notna() & (df["sp"] > 1)]
 

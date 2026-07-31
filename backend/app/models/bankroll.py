@@ -16,6 +16,9 @@ class BankrollConfig(Base):
     kelly_fraction = Column(Float, nullable=False, default=0.25)  # quarter Kelly
     min_edge = Column(Float, nullable=False, default=0.05)  # 5% minimum edge
     max_stake_pct = Column(Float, nullable=False, default=0.05)  # 5% max of bankroll
+    commission_rate = Column(Float, nullable=False, default=0.05)  # exchange commission on net winnings
+    min_odds = Column(Float, nullable=False, default=1.5)  # never bet shorter than this
+    max_daily_exposure_pct = Column(Float, nullable=False, default=0.10)  # day-total stake cap
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -85,8 +85,14 @@ def parse_results_page(html: str, track_code: str, race_date: date) -> list[dict
     soup = BeautifulSoup(html, "html.parser")
     races: list[dict[str, Any]] = []
 
-    # Find all race header elements
-    race_headers = soup.find_all("h4", string=re.compile(r"Race\s+\d+", re.IGNORECASE))
+    # Find all race header elements. Match on the element's full text, not
+    # bs4's `string=` — `string=` only matches when the tag has a single
+    # string child, so any nested markup GRI adds inside the <h4> (a span,
+    # a link) would silently drop every race site-wide.
+    race_headers = [
+        h for h in soup.find_all("h4")
+        if re.search(r"Race\s+\d+", h.get_text(" ", strip=True), re.IGNORECASE)
+    ]
 
     if not race_headers:
         logger.debug("No race headers found for %s %s", track_code, race_date)
@@ -270,9 +276,9 @@ def _parse_row(cells) -> dict[str, Any]:
     # By (beaten distance)
     by_text = get_td_text(-6)
     if by_text and by_text.strip() not in ("", "&nbsp;"):
-        dist_match = re.match(r"([\d.]+)", by_text)
-        if dist_match:
-            entry["beaten_distance"] = float(dist_match.group(1))
+        margin = parse_beaten_margin(by_text)
+        if margin is not None:
+            entry["beaten_distance"] = margin
 
     # Win Time
     wt_text = get_td_text(-7)
@@ -295,6 +301,59 @@ def _parse_row(cells) -> dict[str, Any]:
     return entry
 
 
+# Named margins in lengths — the racing conventions for close finishes.
+# Close finishes carry the MOST information about relative ability, and the
+# old numeric-only parser threw every one of them away (SH/HD/NK -> NULL)
+# and truncated vulgar fractions ("1½" -> 1.0).
+_NAMED_MARGINS = {
+    "DH": 0.0,     # dead heat
+    "NSE": 0.02,   # nose (rare on GRI but appears)
+    "SH": 0.05,    # short head
+    "SHD": 0.05,
+    "HD": 0.1,     # head
+    "NK": 0.25,    # neck
+    "DIS": None,   # distance — unquantified blowout; leave NULL
+    "DIST": None,
+}
+_VULGAR = {"¼": 0.25, "½": 0.5, "¾": 0.75}
+
+
+def parse_beaten_margin(text: str) -> float | None:
+    """Parse a beaten-distance cell into lengths.
+
+    Handles: "3", "3L", "2.5", named margins ("SH", "HD", "NK", "DH"),
+    vulgar fractions ("½", "1½", "2¾"), and ASCII fractions ("1 1/2").
+    Returns None when the margin is genuinely unquantifiable ("DIS").
+    """
+    t = text.strip().upper().rstrip("L").strip()
+    if not t:
+        return None
+
+    if t in _NAMED_MARGINS:
+        return _NAMED_MARGINS[t]
+
+    # Vulgar fraction, optionally after a whole number: "½", "1½", "2¾"
+    m = re.match(r"^(\d+)?\s*([¼½¾])$", t)
+    if m:
+        whole = int(m.group(1)) if m.group(1) else 0
+        return whole + _VULGAR[m.group(2)]
+
+    # ASCII fraction: "1 1/2", "1/2"
+    m = re.match(r"^(?:(\d+)\s+)?(\d+)/(\d+)$", t)
+    if m:
+        whole = int(m.group(1)) if m.group(1) else 0
+        num, den = int(m.group(2)), int(m.group(3))
+        if den > 0:
+            return whole + num / den
+
+    # Plain decimal / integer
+    m = re.match(r"^(\d+(?:\.\d+)?)$", t)
+    if m:
+        return float(m.group(1))
+
+    return None
+
+
 def _parse_sp_decimal(sp_text: str) -> float | None:
     """Convert SP text to decimal odds."""
     sp_clean = re.sub(r"[FfJj]+$", "", sp_text).strip()
@@ -308,12 +367,27 @@ def _parse_sp_decimal(sp_text: str) -> float | None:
     return None
 
 
+class ScrapeError(Exception):
+    """A fetch failed after retries. Distinct from an empty page: an empty
+    list from scrape_results means GRI genuinely lists no races for that
+    track/date; a ScrapeError means we DON'T KNOW what GRI lists. Callers
+    that treated both as "quiet day" were silently losing whole meetings."""
+
+
+_RETRY_DELAYS = (2.0, 4.0, 8.0)
+
+
 async def scrape_results(
     track_code: str,
     race_date: date,
     client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
-    """Scrape race results for a specific track and date."""
+    """Scrape race results for a specific track and date.
+
+    Retries transient failures with backoff; raises ScrapeError when the
+    page cannot be fetched at all, so callers can distinguish failure from
+    a day with no racing.
+    """
     date_str = format_date(race_date)
     url = f"{VIEW_RESULTS_URL}?track={track_code}&date={date_str}"
 
@@ -323,19 +397,29 @@ async def scrape_results(
         close_client = True
 
     try:
-        resp = await client.get(url)
-        if resp.status_code != 200:
-            logger.warning("Got %d for %s", resp.status_code, url)
-            return []
-        html = resp.text
-    except Exception as e:
-        logger.error("Failed to fetch %s: %s", url, e)
-        return []
+        last_err: str | None = None
+        for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+            try:
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    return parse_results_page(resp.text, track_code, race_date)
+                last_err = f"HTTP {resp.status_code}"
+                logger.warning(
+                    "Got %d for %s (attempt %d)", resp.status_code, url, attempt + 1,
+                )
+            except Exception as e:
+                last_err = str(e)
+                logger.warning(
+                    "Fetch failed for %s (attempt %d): %s", url, attempt + 1, e,
+                )
+            if delay is None:
+                break
+            await asyncio.sleep(delay)
+
+        raise ScrapeError(f"{url}: {last_err}")
     finally:
         if close_client:
             await client.aclose()
-
-    return parse_results_page(html, track_code, race_date)
 
 
 async def scrape_date_range(
@@ -347,6 +431,7 @@ async def scrape_date_range(
     """Scrape results for a track across a date range. Fast — no browser needed."""
     all_races: list[dict[str, Any]] = []
 
+    failed_days: list[date] = []
     async with httpx.AsyncClient(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=30) as client:
         current = start_date
         total_days = (end_date - start_date).days + 1
@@ -354,8 +439,12 @@ async def scrape_date_range(
 
         while current <= end_date:
             day_num += 1
-            races = await scrape_results(track_code, current, client)
-            all_races.extend(races)
+            try:
+                races = await scrape_results(track_code, current, client)
+                all_races.extend(races)
+            except ScrapeError as e:
+                failed_days.append(current)
+                logger.error("Day failed for %s: %s", track_code, e)
 
             if day_num % 50 == 0:
                 logger.info(
@@ -367,6 +456,12 @@ async def scrape_date_range(
             if current <= end_date:
                 await asyncio.sleep(delay)
 
+    if failed_days:
+        logger.error(
+            "Completed %s with %d FAILED days (data missing, retry these): %s",
+            track_code, len(failed_days),
+            ", ".join(str(d) for d in failed_days[:20]),
+        )
     logger.info("Completed %s: %d days, %d races", track_code, total_days, len(all_races))
     return all_races
 

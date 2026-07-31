@@ -108,8 +108,22 @@ export default function BankrollDashboard() {
     fetchData();
   };
 
-  const handleSettleBet = async (betId: number, position: number) => {
-    await api.post(`/bankroll/bets/${betId}/settle`, { actual_position: position });
+  // Settle with an explicit result string. The old version encoded "lost"
+  // as actual_position=2, which the API's place-bet rule (position <= 2
+  // wins) read as a WIN — clicking "Lost" on a place bet paid it out.
+  const handleSettleBet = async (betId: number, result: 'won' | 'lost' | 'void') => {
+    try {
+      await api.post(`/bankroll/bets/${betId}/settle`, { result });
+    } catch (err: any) {
+      alert(err?.response?.data?.detail ?? 'Could not settle bet');
+    }
+    fetchData();
+  };
+
+  const handleReconcile = async () => {
+    const res = await api.post('/bankroll/reconcile');
+    const n = res.data?.settled_count ?? 0;
+    if (n === 0) alert('No pending bets had results available yet.');
     fetchData();
   };
 
@@ -288,6 +302,15 @@ export default function BankrollDashboard() {
       {/* Bets tab */}
       {tab === 'bets' && (
         <div>
+          <div className="flex justify-end mb-2">
+            <button
+              onClick={handleReconcile}
+              className="text-sm px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700"
+              title="Auto-settle pending bets from scraped race results"
+            >
+              Sync results
+            </button>
+          </div>
           {bets.length === 0 ? (
             <div className="bg-white rounded-lg shadow p-8 text-center">
               <p className="text-gray-500">No bets recorded yet</p>
@@ -350,11 +373,14 @@ export default function BankrollDashboard() {
                       <td className="px-4 py-3">
                         {b.outcome === 'pending' && (
                           <div className="flex gap-1">
-                            <button onClick={() => handleSettleBet(b.id, 1)}
+                            <button onClick={() => handleSettleBet(b.id, 'won')}
                               className="text-xs text-green-600 hover:underline">Won</button>
                             <span className="text-gray-300">|</span>
-                            <button onClick={() => handleSettleBet(b.id, 2)}
+                            <button onClick={() => handleSettleBet(b.id, 'lost')}
                               className="text-xs text-red-500 hover:underline">Lost</button>
+                            <span className="text-gray-300">|</span>
+                            <button onClick={() => handleSettleBet(b.id, 'void')}
+                              className="text-xs text-gray-500 hover:underline">Void</button>
                             <span className="text-gray-300">|</span>
                             <button onClick={() => handleDeleteBet(b.id)}
                               className="text-xs text-gray-400 hover:underline">Del</button>

@@ -1,20 +1,32 @@
 """
 APScheduler setup for automated scraping and daily prediction jobs.
 
-Two job kinds run here:
+Three built-in jobs run here, all scheduled in Europe/Dublin so they track
+Irish racing days through DST (the old UTC crons fired an hour off all
+summer):
 
-  - Built-in fixed-time scrape jobs (today at 23:00, yesterday at 08:00).
-  - Per-``ModelSchedule`` cron jobs registered dynamically. The job ids
-    follow the pattern ``schedule_<id>`` so the schedule API can register
-    or unregister them in response to CRUD calls.
+  - Today's results at 23:00 Dublin (after the last race).
+  - Yesterday's results at 08:00 Dublin (catches late-posted results).
+  - A trailing 14-day amendment re-scrape at 04:30 Dublin. GRI amends
+    results after publication — corrected SPs, weights and even runner
+    identities (a verified case: a trap's dog changed days after the
+    result first appeared). Combined with the pipeline's
+    corrections-allowed upsert, this window keeps stored results converged
+    with GRI's current record.
 
-Integrates with FastAPI app lifecycle.
+Per-``ModelSchedule`` cron jobs are registered dynamically with the job id
+pattern ``schedule_<id>`` so the schedule API can add/remove them.
+
+Scrape-log statuses are honest: "success" only when every track scraped
+cleanly, "partial" when some failed, "failed" when all did. The old code
+marked success unconditionally, making scraper outages indistinguishable
+from quiet days.
 """
 
 import asyncio
 import logging
 from datetime import date, datetime, timedelta
-from threading import Thread
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -27,21 +39,27 @@ logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler()
 
+DUBLIN = ZoneInfo("Europe/Dublin")
 
-def _scrape_all_tracks_today():
-    """Scrape today's results for all active tracks."""
-    from scraping.gri_scraper import scrape_results
+
+def _irish_today() -> date:
+    """The current date in Ireland — the date GRI keys its pages by."""
+    return datetime.now(DUBLIN).date()
+
+
+def _scrape_dates_for_all_tracks(dates: list[date], source: str) -> None:
+    """Scrape a list of dates across all active tracks with honest logging."""
     from scraping.db_pipeline import upsert_race_results
+    from scraping.gri_scraper import ScrapeError, scrape_results
 
     async def _run():
         db = SessionLocal()
         try:
             tracks = db.query(Track).filter(Track.active.is_(True)).all()
-            today = date.today()
 
             log = ScrapeLog(
                 spider_name="gri",
-                source=f"scheduled daily {today}",
+                source=source,
                 status="running",
                 started_at=datetime.utcnow(),
             )
@@ -50,79 +68,85 @@ def _scrape_all_tracks_today():
 
             total_races = 0
             total_new = 0
+            attempts = 0
+            failures: list[str] = []
 
             for track in tracks:
-                try:
-                    races = await scrape_results(track.code, today)
-                    if races:
-                        stats = upsert_race_results(db, races)
-                        total_races += stats["races_new"] + stats["races_updated"]
-                        total_new += stats["races_new"]
+                for d in dates:
+                    attempts += 1
+                    try:
+                        races = await scrape_results(track.code, d)
+                        if races:
+                            stats = upsert_race_results(
+                                db, races, scrape_log_id=log.id,
+                            )
+                            total_races += stats["races_new"] + stats["races_updated"]
+                            total_new += stats["races_new"]
+                    except ScrapeError as e:
+                        failures.append(f"{track.code} {d}: {e}")
+                        logger.error("Scrape failed %s %s: %s", track.code, d, e)
+                    except Exception as e:
+                        failures.append(f"{track.code} {d}: {e}")
+                        logger.error("Error scraping %s %s: %s", track.code, d, e)
+                    log.heartbeat_at = datetime.utcnow()
+                    db.commit()
                     await asyncio.sleep(2.0)
-                except Exception as e:
-                    logger.error("Error scraping %s: %s", track.code, e)
 
-            log.status = "success"
+            if not failures:
+                log.status = "success"
+            elif len(failures) < attempts:
+                log.status = "partial"
+            else:
+                log.status = "failed"
+            if failures:
+                log.error_message = "; ".join(failures[:30])
             log.records_scraped = total_races
             log.records_new = total_new
             log.completed_at = datetime.utcnow()
             db.commit()
 
-            logger.info("Daily scrape complete: %d races (%d new)", total_races, total_new)
+            logger.info(
+                "%s complete: %d races (%d new), %d/%d fetches failed",
+                source, total_races, total_new, len(failures), attempts,
+            )
 
         except Exception as e:
-            logger.error("Daily scrape failed: %s", e)
+            logger.error("%s crashed: %s", source, e)
+            try:
+                log.status = "failed"
+                log.error_message = str(e)[:2000]
+                log.completed_at = datetime.utcnow()
+                db.commit()
+            except Exception:
+                pass
         finally:
             db.close()
 
     loop = asyncio.new_event_loop()
     loop.run_until_complete(_run())
     loop.close()
+
+
+def _scrape_all_tracks_today():
+    """Scrape today's results for all active tracks."""
+    today = _irish_today()
+    _scrape_dates_for_all_tracks([today], f"scheduled daily {today}")
 
 
 def _scrape_yesterday_results():
     """Scrape yesterday's results (ensures we catch late-posted results)."""
-    from scraping.gri_scraper import scrape_results
-    from scraping.db_pipeline import upsert_race_results
+    yesterday = _irish_today() - timedelta(days=1)
+    _scrape_dates_for_all_tracks([yesterday], f"scheduled yesterday {yesterday}")
 
-    async def _run():
-        db = SessionLocal()
-        try:
-            tracks = db.query(Track).filter(Track.active.is_(True)).all()
-            yesterday = date.today() - timedelta(days=1)
 
-            log = ScrapeLog(
-                spider_name="gri",
-                source=f"scheduled yesterday {yesterday}",
-                status="running",
-                started_at=datetime.utcnow(),
-            )
-            db.add(log)
-            db.commit()
-
-            total_races = 0
-            for track in tracks:
-                try:
-                    races = await scrape_results(track.code, yesterday)
-                    if races:
-                        stats = upsert_race_results(db, races)
-                        total_races += stats["races_new"] + stats["races_updated"]
-                    await asyncio.sleep(2.0)
-                except Exception as e:
-                    logger.error("Error scraping %s: %s", track.code, e)
-
-            log.status = "success"
-            log.records_scraped = total_races
-            log.completed_at = datetime.utcnow()
-            db.commit()
-        except Exception as e:
-            logger.error("Yesterday scrape failed: %s", e)
-        finally:
-            db.close()
-
-    loop = asyncio.new_event_loop()
-    loop.run_until_complete(_run())
-    loop.close()
+def _rescrape_trailing_window(days: int = 14):
+    """Re-scrape the trailing window to pick up GRI's post-publication
+    amendments (corrected SPs, weights, comments, runner identities)."""
+    today = _irish_today()
+    window = [today - timedelta(days=i) for i in range(2, days + 1)]
+    _scrape_dates_for_all_tracks(
+        window, f"amendment re-scrape {window[-1]}..{window[0]}",
+    )
 
 
 # --- Per-schedule prediction jobs ---
@@ -210,21 +234,31 @@ def _load_persisted_schedules():
 
 def start_scheduler():
     """Start the APScheduler with configured jobs."""
-    # Scrape today's results at 23:00 daily
+    # Scrape today's results at 23:00 Irish time daily
     scheduler.add_job(
         _scrape_all_tracks_today,
-        trigger=CronTrigger(hour=23, minute=0),
+        trigger=CronTrigger(hour=23, minute=0, timezone=DUBLIN),
         id="daily_results",
         name="Daily GRI results scrape",
         replace_existing=True,
     )
 
-    # Scrape yesterday's results at 08:00 (catch late posts)
+    # Scrape yesterday's results at 08:00 Irish time (catch late posts)
     scheduler.add_job(
         _scrape_yesterday_results,
-        trigger=CronTrigger(hour=8, minute=0),
+        trigger=CronTrigger(hour=8, minute=0, timezone=DUBLIN),
         id="yesterday_results",
         name="Yesterday GRI results scrape",
+        replace_existing=True,
+    )
+
+    # Amendment reconciliation: re-scrape the trailing 14 days at 04:30
+    # Irish time so post-publication corrections converge into the DB.
+    scheduler.add_job(
+        _rescrape_trailing_window,
+        trigger=CronTrigger(hour=4, minute=30, timezone=DUBLIN),
+        id="amendment_rescrape",
+        name="Trailing 14-day amendment re-scrape",
         replace_existing=True,
     )
 

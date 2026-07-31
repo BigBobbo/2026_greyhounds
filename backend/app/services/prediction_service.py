@@ -300,60 +300,30 @@ def _compute_kelly_stake(
     kelly_fraction: float = 0.25,
     min_edge: float = 0.05,
 ) -> dict[str, Any]:
-    """Compute Kelly criterion stake for a bet.
+    """Single-bet Kelly stake — thin wrapper over the canonical module.
 
-    Args:
-        win_prob: Model's estimated win probability
-        odds_decimal: Decimal odds (e.g. 3.5 means +250)
-        bankroll: Current bankroll
-        kelly_fraction: Fraction of full Kelly to use (0.25 = quarter Kelly, safer)
-        min_edge: Minimum edge required to place a bet (default 5%)
-
-    Returns dict with stake info or None if no bet recommended.
+    Kept for callers that recompute against user-supplied odds; new code
+    should build a StakingConfig (usually via StakingConfig.from_db) and
+    call ml.staking directly.
     """
-    if odds_decimal is None or odds_decimal <= 1.0:
-        return {"bet": False, "reason": "no_odds"}
+    from dataclasses import replace as _replace
 
-    implied_prob = 1.0 / odds_decimal
-    edge = win_prob - implied_prob
+    from ml.staking import StakingConfig, kelly_stake
 
-    if edge < min_edge:
-        return {
-            "bet": False,
-            "reason": "insufficient_edge",
-            "edge": round(edge, 4),
-            "implied_prob": round(implied_prob, 4),
-        }
-
-    # Kelly formula: f* = (bp - q) / b
-    # where b = odds - 1, p = win_prob, q = 1 - win_prob
-    b = odds_decimal - 1
-    f_star = (b * win_prob - (1 - win_prob)) / b
-
-    # Cap at kelly_fraction of full Kelly for safety
-    fractional_kelly = max(0, f_star * kelly_fraction)
-
-    # Also cap at 5% of bankroll as absolute max
-    max_stake_pct = 0.05
-    stake_pct = min(fractional_kelly, max_stake_pct)
-    stake = round(bankroll * stake_pct, 2)
-
-    return {
-        "bet": True,
-        "stake": stake,
-        "stake_pct": round(stake_pct * 100, 2),
-        "full_kelly_pct": round(f_star * 100, 2),
-        "edge": round(edge, 4),
-        "implied_prob": round(implied_prob, 4),
-        "expected_value": round(win_prob * (odds_decimal - 1) - (1 - win_prob), 4),
-    }
+    cfg = _replace(
+        StakingConfig(),
+        bankroll=bankroll,
+        kelly_fraction=kelly_fraction,
+        min_edge=min_edge,
+    )
+    return kelly_stake(win_prob, odds_decimal, cfg)
 
 
 def predict_race(
     db: Session,
     experiment_id: int,
     race_id: int,
-    bankroll: float = 100.0,
+    bankroll: float | None = None,
     precomputed_features: pd.DataFrame | None = None,
 ) -> list[dict[str, Any]]:
     """
@@ -363,11 +333,24 @@ def predict_race(
     and Kelly staking recommendations.
     Raises ValueError if the race falls within the training data period.
 
+    `bankroll` overrides the ledger balance for what-if sizing; by default
+    stakes are sized off the real BankrollConfig.current_bankroll (the old
+    behaviour sized every recommendation off a query-param default of 100).
+
     `precomputed_features` lets a batch caller (e.g. predict-by-date) supply
     a feature DataFrame indexed by race_entry_id covering many races at once,
     so the expensive ELO/builtin pass runs only once per request instead of
     per race. When provided, this race's slice is taken from it.
     """
+    from dataclasses import replace as _replace
+
+    from ml.staking import StakingConfig, race_kelly
+
+    staking_cfg = StakingConfig.from_db(db)
+    if bankroll is not None:
+        staking_cfg = _replace(staking_cfg, bankroll=bankroll)
+    bankroll = staking_cfg.bankroll
+
     experiment = db.query(Experiment).filter(Experiment.id == experiment_id).first()
     if not experiment or experiment.status != "completed":
         raise ValueError(f"Experiment {experiment_id} not found or not completed")
@@ -681,6 +664,28 @@ def predict_race(
         if trio_combos_payload:
             trio_combos_json = json.dumps(trio_combos_payload)
 
+    # Kelly staking: solve the whole race at once. The outcomes are
+    # mutually exclusive, so sizing each dog independently is invalid —
+    # two "value" dogs in one race must share a jointly-optimal
+    # allocation, not each receive their solo stake. Data completeness
+    # (thin-history dogs) downweights the stake as the schema always
+    # documented it should.
+    kelly_by_entry: dict[int, dict[str, Any]] = {}
+    if eid_to_win_prob:
+        candidates = []
+        for entry_row, entry_id in zip(entries, entry_ids):
+            wp = eid_to_win_prob.get(int(entry_id))
+            if wp is None:
+                continue
+            candidates.append({
+                "id": int(entry_id),
+                "win_prob": wp,
+                "odds_decimal": entry_row.RaceEntry.sp_decimal,
+                "completeness": completeness_per_entry.get(entry_id, 1.0),
+            })
+        if candidates:
+            kelly_by_entry = race_kelly(candidates, staking_cfg)
+
     # Build prediction list
     predictions = []
     for entry_row, entry_id in zip(entries, entry_ids):
@@ -740,12 +745,11 @@ def predict_race(
                 pred_data["margin"] = race_confidence["margin"]
                 pred_data["entropy"] = race_confidence["entropy"]
 
-            # Kelly staking recommendation
+            # Kelly staking recommendation (from the race-level joint solve)
             if win_prob is not None:
-                kelly = _compute_kelly_stake(
-                    win_prob, entry.sp_decimal, bankroll=bankroll,
+                pred_data["kelly"] = kelly_by_entry.get(
+                    int(entry_id), {"bet": False, "reason": "no_probability"},
                 )
-                pred_data["kelly"] = kelly
             else:
                 pred_data["kelly"] = {"bet": False, "reason": "no_probability"}
 
@@ -805,7 +809,7 @@ def recompute_kelly_for_saved_predictions(
     experiment_id: int,
     race_id: int,
     odds_by_entry: dict[int, float | None],
-    bankroll: float,
+    bankroll: float | None = None,
 ) -> list[dict[str, Any]]:
     """Recompute Kelly + edge for saved predictions using user-supplied odds.
 
@@ -813,8 +817,14 @@ def recompute_kelly_for_saved_predictions(
     the new authoritative bet recommendation for this race + experiment, so
     the History view reflects what they actually decided to back.
 
+    `bankroll=None` sizes off the real ledger balance.
+
     Returns the updated predictions in the same shape as predict_race.
     """
+    from ml.staking import StakingConfig
+
+    if bankroll is None:
+        bankroll = StakingConfig.from_db(db).bankroll
     rows = (
         db.query(Prediction, Dog.name.label("dog_name"), RaceEntry.trap)
         .join(RaceEntry, Prediction.race_entry_id == RaceEntry.id)
@@ -1037,7 +1047,7 @@ def predict_race_ensemble(
     experiment_ids: list[int],
     race_id: int,
     weights: list[float] | None = None,
-    bankroll: float = 100.0,
+    bankroll: float | None = None,
 ) -> list[dict[str, Any]]:
     """
     Generate ensemble predictions by combining multiple trained models.
@@ -1110,6 +1120,30 @@ def predict_race_ensemble(
         )
         sp_map = {r.id: r.sp_decimal for r in sp_rows}
 
+    from dataclasses import replace as _replace
+
+    from ml.staking import StakingConfig, race_kelly
+
+    staking_cfg = StakingConfig.from_db(db)
+    if bankroll is not None:
+        staking_cfg = _replace(staking_cfg, bankroll=bankroll)
+
+    # Joint Kelly solve over the race's mutually exclusive outcomes,
+    # using the ensemble probabilities.
+    kelly_by_entry = race_kelly(
+        [
+            {
+                "id": eid,
+                "win_prob": entry_probs[eid],
+                "odds_decimal": sp_map.get(eid),
+                "completeness": (entry_data[eid].get("data_completeness") or 1.0),
+            }
+            for eid in entry_data
+            if entry_probs.get(eid)
+        ],
+        staking_cfg,
+    )
+
     predictions = []
     for eid, base_pred in entry_data.items():
         win_prob = entry_probs[eid]
@@ -1121,8 +1155,9 @@ def predict_race_ensemble(
         sp_decimal = sp_map.get(eid)
 
         if win_prob is not None and win_prob > 0:
-            kelly = _compute_kelly_stake(win_prob, sp_decimal, bankroll=bankroll)
-            pred["kelly"] = kelly
+            pred["kelly"] = kelly_by_entry.get(
+                eid, {"bet": False, "reason": "no_probability"},
+            )
 
             if sp_decimal and sp_decimal > 1:
                 implied = 1.0 / sp_decimal

@@ -20,15 +20,17 @@ def main():
     os.makedirs("data/models", exist_ok=True)
     print(f"Data dir exists: {os.path.isdir('data')}", flush=True)
 
-    # Run alembic (non-fatal)
-    try:
-        import subprocess
-        r = subprocess.run(["alembic", "upgrade", "head"], capture_output=True, text=True)
-        print(f"Alembic stdout: {r.stdout}", flush=True)
-        if r.returncode != 0:
-            print(f"Alembic stderr: {r.stderr}", flush=True)
-    except Exception as e:
-        print(f"Alembic failed: {e}", flush=True)
+    # Run alembic — FATAL on failure. Booting the app against a schema the
+    # code doesn't expect turns one clear crash into hours of scattered
+    # 500s and silently-wrong writes; better to fail loudly and keep the
+    # previous deployment serving.
+    import subprocess
+    r = subprocess.run(["alembic", "upgrade", "head"], capture_output=True, text=True)
+    print(f"Alembic stdout: {r.stdout}", flush=True)
+    if r.returncode != 0:
+        print(f"Alembic stderr: {r.stderr}", flush=True)
+        print("=== MIGRATION FAILED — refusing to boot ===", flush=True)
+        sys.exit(1)
 
     # Seed tracks (non-fatal)
     try:

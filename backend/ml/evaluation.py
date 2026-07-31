@@ -37,6 +37,27 @@ def compute_metrics(
     if task_type == "classification":
         metrics["accuracy"] = float(accuracy_score(y_true, y_pred))
         metrics["f1_score"] = float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
+        # The headline "accuracy" number is misleading on its own: with a
+        # ~17% winner base rate, predicting "nobody wins" scores ~83%.
+        # Surface the base rate so accuracy is always read against it.
+        metrics["base_rate"] = float(np.mean(y_true))
+
+        if y_proba is not None:
+            # Calibration slope/intercept: logistic refit of outcomes on the
+            # model's own log-odds. Perfect calibration = slope 1, intercept
+            # 0; slope < 1 means over-confident probabilities.
+            try:
+                from sklearn.linear_model import LogisticRegression
+
+                p = np.clip(np.asarray(y_proba, dtype=float), 1e-6, 1 - 1e-6)
+                logit = np.log(p / (1 - p)).reshape(-1, 1)
+                if len(np.unique(y_true)) == 2:
+                    lr = LogisticRegression(C=1e6, solver="lbfgs")
+                    lr.fit(logit, np.asarray(y_true).astype(int))
+                    metrics["calibration_slope"] = float(lr.coef_[0][0])
+                    metrics["calibration_intercept"] = float(lr.intercept_[0])
+            except Exception:
+                pass
 
         if y_proba is not None:
             try:
@@ -123,30 +144,60 @@ def compute_betting_metrics(
     y_proba: np.ndarray,
     sp_decimal: np.ndarray,
     race_ids: np.ndarray,
+    commission_rate: float = 0.05,
+    slippage: float = 0.05,
+    min_odds: float = 1.5,
+    n_bootstrap: int = 500,
 ) -> dict[str, Any]:
     """
-    Compute betting P&L metrics.
+    Compute betting P&L metrics at REALISTIC execution prices.
 
-    Simulates betting $1 on the model's top pick in each race.
-    Also evaluates value betting (bet when model prob > implied prob).
+    The old simulation bet at the final post-race SP with no commission —
+    a price nobody can obtain in advance. Here every bet executes at
+    ``price_taken = 1 + (SP - 1) * (1 - slippage)`` with ``commission_rate``
+    charged on net winnings, so backtested edges are systematically
+    conservative rather than systematically flattering. Value/Kelly
+    strategies also refuse prices below ``min_odds``.
 
-    Returns:
-        {
-            "top_pick_pnl": total P&L from $1 on predicted winner per race,
-            "top_pick_roi": return on investment %,
-            "top_pick_races": number of races bet on,
-            "top_pick_winners": number of winners picked,
-            "top_pick_strike_rate": % of races where top pick won,
-            "value_bet_pnl": P&L from $1 on value bets only,
-            "value_bet_roi": ROI % for value bets,
-            "value_bet_count": number of value bets placed,
-            "value_bet_winners": number of value bet winners,
-            "favourite_pnl": P&L from $1 on SP favourite (baseline),
-            "favourite_roi": ROI % for favourites,
-            "pnl_by_race": list of per-race results for charting,
-        }
+    Race-level bootstrap confidence intervals (90%) are reported for every
+    ROI so a "profitable" strategy whose CI straddles zero is visibly
+    noise, not signal.
+
+    Simulates: $1 on the model's top pick per race; $1 value bets (model
+    prob exceeds implied by min edge); Kelly staking via the canonical
+    ml.staking module; and a $1 SP-favourite baseline under the same
+    execution model.
     """
     import pandas as pd
+
+    def _take_price(sp: float) -> float:
+        return 1.0 + (sp - 1.0) * (1.0 - slippage)
+
+    def _profit(sp: float, won: bool, stake: float = 1.0) -> float:
+        if not won:
+            return -stake
+        return stake * (_take_price(sp) - 1.0) * (1.0 - commission_rate)
+
+    def _roi_ci(profits: list[float], stakes: list[float]) -> list[float] | None:
+        """90% bootstrap CI on ROI%, resampling races with replacement."""
+        n = len(profits)
+        if n < 20:
+            return None
+        rng = np.random.default_rng(42)
+        p = np.asarray(profits)
+        s = np.asarray(stakes)
+        rois = []
+        for _ in range(n_bootstrap):
+            idx = rng.integers(0, n, n)
+            staked = s[idx].sum()
+            if staked > 0:
+                rois.append(p[idx].sum() / staked * 100.0)
+        if not rois:
+            return None
+        return [
+            round(float(np.percentile(rois, 5)), 2),
+            round(float(np.percentile(rois, 95)), 2),
+        ]
 
     df = pd.DataFrame({
         "won": y_true.astype(bool),
@@ -180,7 +231,7 @@ def compute_betting_metrics(
             continue
         # Model's top pick = highest predicted probability
         top = group.loc[group["prob"].idxmax()]
-        profit = (top["sp"] - 1) if top["won"] else -1.0
+        profit = _profit(float(top["sp"]), bool(top["won"]))
         top_pick_results.append({
             "race_id": int(race_id),
             "won": bool(top["won"]),
@@ -188,61 +239,61 @@ def compute_betting_metrics(
             "prob": float(top["prob"]),
             "profit": float(profit),
         })
-        # Favourite = lowest SP (baseline)
+        # Favourite = lowest SP (baseline) — same execution model
         fav = group.loc[group["sp"].idxmin()]
-        fav_profit = (fav["sp"] - 1) if fav["won"] else -1.0
-        fav_profits.append(float(fav_profit))
+        fav_profits.append(_profit(float(fav["sp"]), bool(fav["won"])))
 
     top_pick_df = pd.DataFrame(top_pick_results)
     top_pick_pnl = float(top_pick_df["profit"].sum()) if len(top_pick_df) > 0 else 0
     top_pick_races = len(top_pick_df)
     top_pick_winners = int(top_pick_df["won"].sum()) if len(top_pick_df) > 0 else 0
 
-    # --- Strategy 2: Value betting (model prob > implied prob * 1.05 = 5% min edge) ---
+    # --- Strategy 2: Value betting ($1 when model prob clears implied + edge) ---
     min_edge = 0.05
     df["edge"] = df["prob"] - df["implied_prob"]
-    df["is_value"] = df["edge"] > min_edge
+    df["is_value"] = (df["edge"] > min_edge) & (df["sp"] >= min_odds)
     value_bets = df[df["is_value"]]
     value_profit = value_bets.apply(
-        lambda r: (r["sp"] - 1) if r["won"] else -1.0, axis=1
+        lambda r: _profit(float(r["sp"]), bool(r["won"])), axis=1
     )
     value_pnl = float(value_profit.sum()) if len(value_profit) > 0 else 0
     value_winners = int(value_bets["won"].sum())
 
-    # --- Strategy 3: Kelly criterion staking (fractional Kelly) ---
-    # Use a hybrid approach: bet on the model's top pick per race,
-    # but size the bet using Kelly based on the probability edge.
-    # We use a lower min-edge threshold than value betting since we're
-    # already filtering to the model's top pick (higher conviction).
-    kelly_fraction = 0.25  # Quarter Kelly for safety
-    kelly_min_edge = 0.02  # 2% min edge (lower than value betting's 5%)
-    bankroll = 100.0
+    # --- Strategy 3: Kelly staking via the canonical staking module ---
+    # Bet the model's top pick per race, sized by the same code that sizes
+    # real recommendations at serve time — commission, min-odds and caps
+    # included — so the backtested strategy IS the served strategy.
+    from ml.staking import StakingConfig, kelly_stake
+
+    kelly_cfg = StakingConfig(
+        bankroll=100.0,
+        kelly_fraction=0.25,
+        min_edge=0.02,  # top-pick pre-filter carries conviction; lower floor
+        max_stake_pct=0.05,
+        commission_rate=commission_rate,
+        min_odds=min_odds,
+    )
     kelly_results = []
     for race_id, group in df.groupby("race_id"):
         if len(group) == 0:
             continue
         top = group.loc[group["prob"].idxmax()]
-        b = top["sp"] - 1
-        if b <= 0:
+        # Size against the obtainable price, not the closing SP
+        rec = kelly_stake(float(top["prob"]), _take_price(float(top["sp"])), kelly_cfg)
+        if not rec.get("bet"):
             continue
-
-        # Check if there's a minimum probability edge
-        edge = top["prob"] - top["implied_prob"]
-        if edge < kelly_min_edge:
-            continue
-
-        f_star = (b * top["prob"] - (1 - top["prob"])) / b
-        if f_star <= 0:
-            continue
-        stake_pct = min(f_star * kelly_fraction, 0.05)  # Cap at 5% of bankroll
-        stake = bankroll * stake_pct
-        profit = stake * (top["sp"] - 1) if top["won"] else -stake
+        stake = rec["stake"]
+        # Winnings already priced at the taken price; commission applied here
+        profit = (
+            stake * (_take_price(float(top["sp"])) - 1.0) * (1.0 - commission_rate)
+            if top["won"] else -stake
+        )
         kelly_results.append({
             "race_id": int(race_id),
             "won": bool(top["won"]),
             "stake": round(float(stake), 2),
             "profit": round(float(profit), 2),
-            "edge": round(float(edge), 4),
+            "edge": rec.get("edge"),
         })
 
     kelly_total_staked = sum(r["stake"] for r in kelly_results) if kelly_results else 0
@@ -273,21 +324,43 @@ def compute_betting_metrics(
     return {
         "top_pick_pnl": round(top_pick_pnl, 2),
         "top_pick_roi": round(top_pick_pnl / max(top_pick_races, 1) * 100, 2),
+        "top_pick_roi_ci90": _roi_ci(
+            [r["profit"] for r in top_pick_results],
+            [1.0] * len(top_pick_results),
+        ),
         "top_pick_races": top_pick_races,
         "top_pick_winners": top_pick_winners,
         "top_pick_strike_rate": round(top_pick_winners / max(top_pick_races, 1) * 100, 1),
         "value_bet_pnl": round(value_pnl, 2),
         "value_bet_roi": round(value_pnl / max(len(value_bets), 1) * 100, 2),
+        "value_bet_roi_ci90": _roi_ci(
+            list(value_profit) if len(value_bets) else [],
+            [1.0] * len(value_bets),
+        ),
         "value_bet_count": len(value_bets),
         "value_bet_winners": value_winners,
         "kelly_pnl": round(kelly_pnl, 2),
         "kelly_roi": round(kelly_pnl / max(kelly_total_staked, 1) * 100, 2),
+        "kelly_roi_ci90": _roi_ci(
+            [r["profit"] for r in kelly_results],
+            [r["stake"] for r in kelly_results],
+        ),
         "kelly_races": len(kelly_results),
         "kelly_total_staked": round(kelly_total_staked, 2),
         "kelly_pnl_by_race": kelly_cumulative,
         "favourite_pnl": round(fav_pnl, 2),
         "favourite_roi": round(fav_pnl / max(len(fav_profits), 1) * 100, 2),
+        "favourite_roi_ci90": _roi_ci(fav_profits, [1.0] * len(fav_profits)),
         "pnl_by_race": cumulative,
+        "execution_model": {
+            "commission_rate": commission_rate,
+            "slippage": slippage,
+            "min_odds": min_odds,
+            "note": (
+                "All P&L at price 1+(SP-1)*(1-slippage) with commission on "
+                "net winnings — SP itself is unobtainable in advance."
+            ),
+        },
     }
 
 

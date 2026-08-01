@@ -56,11 +56,29 @@ def main(experiment_id: int, target_date: date_cls, min_confidence: str) -> None
     tier_rank = {"strong": 3, "moderate": 2, "weak": 1, "avoid": 0}
     min_tier = tier_rank.get(min_confidence, 2)
 
+    # Compute features ONCE for every entry racing that day — the per-race
+    # path would rebuild the full as-of aggregate index per race (minutes
+    # each); the shared matrix brings the whole day to one pass.
+    from app.models.race_entry import RaceEntry
+    from app.services.prediction_service import compute_features_for_entries
+
+    race_ids = [race.id for race, _ in races]
+    all_entry_ids = [
+        e.id for e in db.query(RaceEntry.id)
+        .filter(RaceEntry.race_id.in_(race_ids)).all()
+    ]
+    print(f"Computing features for {len(all_entry_ids)} entries across "
+          f"{len(race_ids)} races...", file=sys.stderr)
+    features = compute_features_for_entries(
+        db, all_entry_ids, [], include_builtin=True, include_elo=True,
+    )
+
     candidates = []
     skipped = 0
     for race, track_name in races:
         try:
-            preds = predict_race(db, experiment_id, race.id)
+            preds = predict_race(db, experiment_id, race.id,
+                                 precomputed_features=features)
         except Exception as e:
             skipped += 1
             print(f"  ! race {race.id} ({track_name} R{race.race_number}): {e}",

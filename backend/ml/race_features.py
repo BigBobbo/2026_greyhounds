@@ -556,6 +556,7 @@ def compute_builtin_features_batch(
                 RaceEntry.finish_time,
                 RaceEntry.sectional_time,
                 RaceEntry.adjusted_time,
+                RaceEntry.running_positions,
                 RaceEntry.beaten_distance,
                 RaceEntry.weight_kg,
                 RaceEntry.sp_decimal,
@@ -583,7 +584,7 @@ def compute_builtin_features_batch(
 
     hist_columns = [
         "dog_id", "trap", "finish_position", "finish_time", "sectional_time",
-        "adjusted_time", "beaten_distance", "weight_kg", "sp_decimal",
+        "adjusted_time", "running_positions", "beaten_distance", "weight_kg", "sp_decimal",
         "starting_price", "comment", "race_date", "track_id", "distance_m",
         "grade", "race_type", "going", "going_allowance", "num_runners",
         "prize_money",
@@ -865,6 +866,8 @@ def compute_builtin_features_batch(
                     "career_races": 0.0,
                     "position_consistency": None,
                     "track_speed_best": {},  # (track_id, distance_m) -> best_time
+                    "bend1_position_mean_last5": None,
+                    "bend1_led_rate_last10": None,
                     "speed_figure_best_last10": None,
                     "speed_figure_mean_last5": None,
                     "speed_figure_ewm_last10": None,
@@ -912,6 +915,12 @@ def compute_builtin_features_batch(
         h_comments = hist_sorted["comment"].values
         h_positions = hist_sorted["finish_position"].values
         h_adj_time = hist_sorted["adjusted_time"].values
+        # First character of the running-positions string = position at the
+        # first bend (e.g. "1233" broke on top then faded). NaN when absent.
+        h_bend1 = np.full(n_hist, np.nan, dtype=float)
+        for _i, _rp in enumerate(hist_sorted["running_positions"].values):
+            if isinstance(_rp, str) and _rp and _rp[0].isdigit():
+                h_bend1[_i] = float(_rp[0])
         h_distance = hist_sorted["distance_m"].values
         h_track = hist_sorted["track_id"].values
         h_trap = hist_sorted["trap"].values
@@ -948,6 +957,8 @@ def compute_builtin_features_batch(
                     "career_races": 0.0,
                     "position_consistency": None,
                     "track_speed_best": {},
+                    "bend1_position_mean_last5": None,
+                    "bend1_led_rate_last10": None,
                     "speed_figure_best_last10": None,
                     "speed_figure_mean_last5": None,
                     "speed_figure_ewm_last10": None,
@@ -1227,6 +1238,15 @@ def compute_builtin_features_batch(
                         best_times[key[0]] = float(at)
 
             # Speed-figure aggregates from precomputed h_sf series
+            bend1_w10 = h_bend1[slice(max(0, cut - 10), cut)]
+            bend1_w5 = h_bend1[slice(max(0, cut - 5), cut)]
+            b10_valid = bend1_w10[~np.isnan(bend1_w10)]
+            b5_valid = bend1_w5[~np.isnan(bend1_w5)]
+            bend1_mean5 = float(b5_valid.mean()) if b5_valid.size else None
+            bend1_led10 = (
+                float((b10_valid == 1.0).mean()) if b10_valid.size else None
+            )
+
             sf_window10 = h_sf[slice(max(0, cut - 10), cut)]
             sf_window5 = h_sf[slice(max(0, cut - 5), cut)]
             sf_career = h_sf[:cut]
@@ -1315,6 +1335,8 @@ def compute_builtin_features_batch(
                 "career_races": career,
                 "position_consistency": pos_consistency,
                 "track_speed_best": best_times,
+                "bend1_position_mean_last5": bend1_mean5,
+                "bend1_led_rate_last10": bend1_led10,
                 "speed_figure_best_last10": sf_best10,
                 "speed_figure_mean_last5": sf_mean5,
                 "speed_figure_ewm_last10": sf_ewm10,
@@ -1493,6 +1515,10 @@ def compute_builtin_features_batch(
             f["track_speed_rating"] = dog_best - track_avg
         else:
             f["track_speed_rating"] = None
+
+        # 13b. Sectional running-position profile (from dog-profile scrapes)
+        f["bend1_position_mean_last5"] = agg.get("bend1_position_mean_last5")
+        f["bend1_led_rate_last10"] = agg.get("bend1_led_rate_last10")
 
         # 14. Speed figure aggregates (Beyer-style normalisation)
         f["speed_figure_best_last10"] = agg.get("speed_figure_best_last10")
@@ -1735,6 +1761,9 @@ BUILTIN_FEATURE_NAMES = [
     "race_day_temp_c",
     "race_day_wind_kmh",
     "precip_last48h_mm",
+    # Tier 14 — first-bend profile from scraped running positions
+    "bend1_position_mean_last5",
+    "bend1_led_rate_last10",
     "track_speed_rating",
     # Tier 3 — speed figure (Beyer-style normalised time ratings)
     "speed_figure_best_last10",

@@ -366,6 +366,58 @@ def run_training(db: Session, experiment_id: int) -> None:
         except Exception as e:
             logger.warning("SHAP failed: %s", e)
 
+        # 6b. Final refit on train+val — the deployed model should have seen
+        # the most recent pre-test data (the races most like the ones it
+        # will predict). All reported metrics above come from the honest
+        # pre-refit split; only the PERSISTED artifact benefits. The Platt
+        # calibrator is refit inside train() on the val tail it receives —
+        # we hand it the last 15% of the combined window so calibration
+        # stays on the newest data. Opt out with split_config
+        # {"final_refit_on_train_val": false}.
+        if bool(split_cfg.get("final_refit_on_train_val", True)) and len(X_val) > 0:
+            try:
+                logger.info("Final refit on train+val (%d + %d rows)...",
+                            len(X_train), len(X_val))
+                _heartbeat(db, experiment, "final_refit", log_handler)
+                import pandas as _pd
+
+                X_full = _pd.concat([X_train, X_val])
+                y_full = _pd.concat(
+                    [_pd.Series(np.asarray(y_train)), _pd.Series(np.asarray(y_val))],
+                    ignore_index=True,
+                )
+                y_full.index = X_full.index
+                cut = int(len(X_full) * 0.85)
+                refit_trainer = type(trainer)(dict(getattr(trainer, "params", {}) or {}))
+                if is_ranking:
+                    # Group sizes must follow the same concatenation
+                    g_full = list(group_train or []) + list(group_val or [])
+                    # Split at a race boundary nearest the 85% row cut
+                    rows_seen, g_cut = 0, 0
+                    for gi, g in enumerate(g_full):
+                        if rows_seen + g > cut:
+                            g_cut = gi
+                            break
+                        rows_seen += g
+                    else:
+                        g_cut, rows_seen = len(g_full) - 1, sum(g_full[:-1])
+                    refit_trainer.train(
+                        X_full.iloc[:rows_seen], y_full.iloc[:rows_seen],
+                        X_full.iloc[rows_seen:], y_full.iloc[rows_seen:],
+                        group_train=g_full[:g_cut], group_val=g_full[g_cut:],
+                    )
+                else:
+                    refit_trainer.train(
+                        X_full.iloc[:cut], y_full.iloc[:cut],
+                        X_full.iloc[cut:], y_full.iloc[cut:],
+                    )
+                trainer = refit_trainer
+            except Exception as e:
+                logger.warning(
+                    "Final refit failed (%s) — persisting the honest-split "
+                    "model instead", e,
+                )
+
         # 7. Save model + preprocessing artifacts
         _heartbeat(db, experiment, "saving_model", log_handler)
         model_dir = settings.model_artifacts_dir

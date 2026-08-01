@@ -78,26 +78,39 @@ def main():
     insert("races",
            ["id", "track_id", "race_date", "race_time", "race_number",
             "distance_m", "grade", "race_type", "prize_money", "going",
-            "num_runners", "status", "created_at", "last_scraped_at",
-            "last_scrape_log_id"],
+            "going_allowance", "num_runners", "status", "created_at",
+            "last_scraped_at", "last_scrape_log_id"],
            [(r["id"], r["track_id"], r["race_date"], r.get("race_time"),
              r.get("race_number"), r.get("distance_m"), r.get("grade"),
              r.get("race_type"), r.get("prize_money"), r.get("going"),
-             r.get("num_runners"), r.get("status", "resulted"),
-             r.get("created_at"), r.get("last_scraped_at"),
-             r.get("last_scrape_log_id"))
+             r.get("going_allowance"), r.get("num_runners"),
+             r.get("status", "resulted"), r.get("created_at"),
+             r.get("last_scraped_at"), r.get("last_scrape_log_id"))
             for r in rows("races")])
 
     insert("race_entries",
            ["id", "race_id", "dog_id", "trap", "finish_position",
-            "finish_time", "sectional_time", "beaten_distance", "weight_kg",
+            "finish_time", "sectional_time", "running_positions",
+            "adjusted_time", "beaten_distance", "weight_kg",
             "starting_price", "sp_decimal", "comment"],
            [(e["id"], e["race_id"], e["dog_id"], e.get("trap"),
              e.get("finish_position"), e.get("finish_time"),
-             e.get("sectional_time"), e.get("beaten_distance"),
+             e.get("sectional_time"), e.get("running_positions"),
+             e.get("adjusted_time"), e.get("beaten_distance"),
              e.get("weight_kg"), e.get("starting_price"),
              e.get("sp_decimal"), e.get("comment"))
             for e in rows("race_entries")])
+
+    # Weather (present once dump_local.py has run with the enrichment)
+    weather_path = os.path.join(HERE, "weather.jsonl.gz")
+    if os.path.exists(weather_path):
+        insert("track_weather",
+               ["id", "track_id", "date", "precip_mm", "temp_mean_c",
+                "wind_max_kmh", "precip_prev48h_mm"],
+               [(w["id"], w["track_id"], w["date"], w.get("precip_mm"),
+                 w.get("temp_mean_c"), w.get("wind_max_kmh"),
+                 w.get("precip_prev48h_mm"))
+                for w in rows("weather")])
 
     db.execute("PRAGMA synchronous=NORMAL")
     db.close()

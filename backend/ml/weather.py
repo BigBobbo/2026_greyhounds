@@ -132,6 +132,71 @@ def upsert_weather(
     return n
 
 
+def backfill_archive(db: Session, log=None) -> dict:
+    """Backfill daily weather for every track over the full race-date range.
+
+    One archive call per distinct town covers the whole range; rows are
+    stored per (track_id, date) only for dates that track actually raced.
+    Idempotent — existing rows are updated, not duplicated. Returns a
+    summary dict; `log` (if given) receives progress strings.
+    """
+    from sqlalchemy import func, text
+
+    from app.models.race import Race
+
+    def say(msg: str) -> None:
+        if log:
+            log(msg)
+
+    lo, hi = db.query(func.min(Race.race_date), func.max(Race.race_date)).one()
+    if lo is None:
+        return {"inserted": 0, "table_rows": 0, "detail": "no races in DB"}
+    if isinstance(lo, str):
+        lo, hi = date.fromisoformat(lo), date.fromisoformat(hi)
+    start = lo - timedelta(days=2)
+    end = min(hi, date.today() - timedelta(days=3))  # archive lags a few days
+    say(f"Backfilling weather {start} .. {end}")
+
+    tracks = db.query(Track).all()
+    by_coords: dict[tuple, list[Track]] = {}
+    skipped: list[str] = []
+    for t in tracks:
+        c = coords_for_track(t)
+        if c is None:
+            skipped.append(t.code)
+            say(f"  ! no coordinates for track {t.code} {t.name!r} — skipped")
+            continue
+        by_coords.setdefault(c, []).append(t)
+
+    race_dates: dict[int, set] = {}
+    for tid, rd in db.query(Race.track_id, Race.race_date).distinct():
+        if isinstance(rd, str):
+            rd = date.fromisoformat(rd)
+        race_dates.setdefault(tid, set()).add(rd)
+
+    inserted = 0
+    for i, (coords, town_tracks) in enumerate(by_coords.items(), 1):
+        say(f"[{i}/{len(by_coords)}] fetching {coords} "
+            f"for {[t.code for t in town_tracks]}")
+        rows = fetch_archive(coords[0], coords[1], start, end)
+        for t in town_tracks:
+            dates = race_dates.get(t.id)
+            if not dates:
+                continue
+            inserted += upsert_weather(db, t.id, rows, only_dates=dates)
+        db.commit()
+
+    table_rows = db.execute(text("SELECT COUNT(*) FROM track_weather")).scalar()
+    say(f"DONE: inserted {inserted} new rows; table now {table_rows} rows")
+    return {
+        "inserted": inserted,
+        "table_rows": table_rows,
+        "range": [str(start), str(end)],
+        "towns": len(by_coords),
+        "tracks_skipped_no_coords": skipped,
+    }
+
+
 def ensure_weather_for_date(db: Session, target: date) -> int:
     """Make sure every active track has a weather row for `target` (and the
     trailing days feeding precip_prev48h). Called before daily predictions

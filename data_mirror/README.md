@@ -20,7 +20,12 @@ census exactly.
 - finish_position 100%, weight 100%, finish_time 98.2%, in-running comment 97.4%
 - starting price 87.6% overall — 90–93% for 2022–2026, 67% for 2021
 - beaten_distance 70.9%
-- sectional_time **0%** — never scraped; sourced from GRI dog-profile pages in Phase 0 enrichment
+- **After dog-profile enrichment (2026-08-01, 36,441 profiles, 0 failures):**
+  sectional_time 99.7%, running_positions 92.4%, adjusted_time 53.5%
+  (going allowance known for 54.5% of races); dogs: birth_date / trainer /
+  sex each ~99.5%. `weather.jsonl.gz` adds daily Open-Meteo weather for
+  every track race-day 2015–2026. Rebuild the DB with `load_mirror.py`;
+  re-export after future enrichment with `dump_local.py`.
 
 Each JSONL line is the API response object for one row; `id` fields are the production
 primary keys, so foreign keys (`race_id`, `dog_id`, `track_id`) join across files.

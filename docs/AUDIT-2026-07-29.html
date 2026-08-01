@@ -206,6 +206,7 @@
   </div>
 
   <ul class="toc">
+    <li><a href="#update">Update: results</a></li>
     <li><a href="#scorecard">Scorecard</a></li>
     <li><a href="#how">How it works today</a></li>
     <li><a href="#findings">Findings</a></li>
@@ -216,6 +217,43 @@
     <li><a href="#appendix">Appendix</a></li>
   </ul>
 </header>
+
+
+<section id="update">
+  <p class="eyebrow">Update &middot; 1 August 2026</p>
+  <h2>Remediation &amp; the first honest results</h2>
+  <div class="verdict prose">
+    <p><strong>Every finding in this audit that could be fixed has been fixed, the dataset has been rebuilt and enriched, and the first honest evaluation is in: the model-plus-market blend shows a large, confidence-bounded edge against historical prices.</strong></p>
+    <p>Headline numbers from the definitive retrain (test window 28 Mar &ndash; 29 Jul 2026, 5,192 races, 205 leakage-safe features, executed at SP&nbsp;&minus;5% slippage with 5% commission): <strong>blended Kelly ROI +50.8%</strong> (90% CI +43.7 to +59.0, 1,052 races), <strong>blended value bets +35.3%</strong> (CI +27.6 to +44.4, 865 bets), against an SP-favourite baseline of &minus;12.8%. Model log-loss 0.420 / AUC 0.687, improving to 0.405 / 0.727 with the market blend; calibration slope 0.95. The blend weights the market above the raw model (&alpha;=0.71, &beta;=1.12) &mdash; exactly the Benter architecture this audit prescribed.</p>
+    <p><strong>The honest caveat:</strong> bet selection still references the closing SP &mdash; the one number a live bettor never has in advance. The slippage haircut prices some of that away, but only the paper-trading week measures how much of this backtest edge is realisable at pre-race prices. These numbers are a green light for the €100 week, not a bank statement.</p>
+  </div>
+
+  <h3>Remediation scorecard</h3>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Subsystem</th><th>Was</th><th>Now</th><th>What changed</th></tr></thead>
+      <tbody>
+        <tr><td>Dataset / training</td><td><span class="chip crit">Broken</span></td><td><span class="chip good">Fixed</span></td><td>Point-in-time aggregates (regression-tested on a rate-flip dataset), walk-forward CV order-proofed, leakage-guard escapees closed, calibrated Optuna selection, CI-lower-bound autoresearch, final refit on train+val.</td></tr>
+        <tr><td>Probabilities served</td><td><span class="chip crit">Broken</span></td><td><span class="chip good">Fixed</span></td><td>Per-race renormalisation after Platt everywhere, serve/backtest parity.</td></tr>
+        <tr><td>Staking &amp; bankroll</td><td><span class="chip crit">Broken</span></td><td><span class="chip good">Fixed</span></td><td>One canonical config-driven module: commission-aware Kelly, simultaneous per-race solve, min-odds floor, completeness downweight, day-level exposure cap, ledger-driven bankroll. Settlement rebuilt (Lost-button bug, place terms, voids, auto-reconcile from results).</td></tr>
+        <tr><td>GRI scraper</td><td><span class="chip med">Fix</span></td><td><span class="chip good">Fixed</span></td><td>Wrong-dog reassignment on re-scrape, namesake splitting, corrections accepted, close-finish margins parsed, retries + honest scrape logs, Dublin-timezone crons, nightly 14-day amendment window.</td></tr>
+        <tr><td>Evaluation</td><td><span class="chip high">Misleading</span></td><td><span class="chip good">Fixed</span></td><td>Execution-price haircut + commission + min-odds in every strategy; race-level bootstrap CIs on every ROI; base-rate and calibration-slope diagnostics.</td></tr>
+        <tr><td>Odds / market data</td><td><span class="chip crit">Missing</span></td><td><span class="chip med">Ready</span></td><td>Benter blend built and validated; exchange odds capture written, tested and scheduled &mdash; dormant until the Betfair app key exists. Historical market signal: stored SPs (87.6% of entries).</td></tr>
+        <tr><td>Data coverage</td><td><span class="chip high">Gaps</span></td><td><span class="chip good">Enriched</span></td><td>36,441 dog profiles scraped (0 failures): sectionals on 99.7% of 518,695 runs, running positions 92%, trainers &amp; birth dates ~99.5% (from ~0%). Plus daily weather for every track race-day 2015&ndash;2026, dam-line/sibling pedigree features, trainer form windows.</td></tr>
+        <tr><td>Ops / deployment</td><td><span class="chip high">Fragile</span></td><td><span class="chip good">Fixed</span></td><td>HTTPS backup endpoint, real health check, fail-fast migrations, CI on every push, 126 passing tests.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>What the retrain said about the new signals</h3>
+  <p class="prose">The audit's enrichment bets paid off in the feature importances: <span class="ref">dam_progeny_win_rate</span> is the single strongest feature in the model, with <span class="ref">sire_progeny_win_rate_at_dist</span> and <span class="ref">dam_progeny_mean_time_at_dist</span> immediately behind &mdash; the lineage signal the owner asked about is real. Trainer form (<span class="ref">trainer_win_rate_at_track_365d</span>, <span class="ref">trainer_win_rate_30d</span>) and the scraped early-pace features (<span class="ref">led_at_bend1_rate_last10</span>, <span class="ref">early_speed_vs_field</span>) all reach the top fifteen.</p>
+
+  <h3>One research correction</h3>
+  <p class="prose"><strong>The free Betfair BSP archive contains no Irish greyhound data.</strong> Section 4's claim that daily BSP CSVs cover Irish tracks is wrong: ~7,600 archived day-files (2012&ndash;2024) were inventoried via the Internet Archive and contain UK, Australian and New Zealand tracks only. No download, from any country, can produce Irish BSP history. The market layer therefore uses stored SPs historically and live captured odds forward &mdash; which the now-built capture service provides the moment an app key exists.</p>
+
+  <h3>Still open</h3>
+  <p class="prose">Two items, both requiring the account holder in person: the Betfair account and its free delayed app key (activates live odds capture and the live blend), and the supervised €100 evaluation week itself, run off the daily min-odds-conditional bet sheets the platform now generates.</p>
+</section>
 
 <section id="scorecard">
   <p class="eyebrow">Section 1</p>

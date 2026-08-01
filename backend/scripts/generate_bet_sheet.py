@@ -84,7 +84,16 @@ def main(experiment_id: int, target_date: date_cls, min_confidence: str) -> None
             print(f"  ! race {race.id} ({track_name} R{race.race_number}): {e}",
                   file=sys.stderr)
             continue
+        # Mirror the BACKTESTED strategy exactly: the model's top pick per
+        # race, nothing else. Listing every dog with a theoretical price
+        # floor produced 366 micro-bets — technically +EV lines, but not
+        # the strategy the evaluation validated, and unexecutable by hand.
+        top = None
         for p in preds:
+            wp = p.get("win_probability")
+            if wp is not None and (top is None or wp > top.get("win_probability", 0)):
+                top = p
+        for p in ([top] if top else []):
             wp = p.get("win_probability")
             if wp is None or wp <= cfg.min_edge:
                 continue

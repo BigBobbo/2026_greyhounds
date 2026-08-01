@@ -1874,17 +1874,20 @@ def compute_h2h_features_batch(
     requested = list(set(entry_ids))
 
     # Step 1: load target entry context (race_id, dog_id, race_date)
-    ctx_rows = (
-        db.query(
-            RaceEntry.id.label("entry_id"),
-            RaceEntry.race_id,
-            RaceEntry.dog_id,
-            Race.race_date,
+    def _h2h_ctx_query(chunk):
+        return (
+            db.query(
+                RaceEntry.id.label("entry_id"),
+                RaceEntry.race_id,
+                RaceEntry.dog_id,
+                Race.race_date,
+            )
+            .join(Race, RaceEntry.race_id == Race.id)
+            .filter(RaceEntry.id.in_(chunk))
+            .all()
         )
-        .join(Race, RaceEntry.race_id == Race.id)
-        .filter(RaceEntry.id.in_(requested))
-        .all()
-    )
+
+    ctx_rows = _chunked_query(db, _h2h_ctx_query, requested, RaceEntry.id)
     if not ctx_rows:
         return pd.DataFrame()
 
@@ -1897,11 +1900,14 @@ def compute_h2h_features_batch(
     # Cast to plain ints — SQLite's in_() binding rejects numpy.int64 values
     # silently (returns no rows) when they arrive from a pandas unique().
     target_race_ids = [int(r) for r in target_df["race_id"].unique()]
-    field_rows = (
-        db.query(RaceEntry.race_id, RaceEntry.dog_id)
-        .filter(RaceEntry.race_id.in_(target_race_ids))
-        .all()
-    )
+    def _h2h_field_query(chunk):
+        return (
+            db.query(RaceEntry.race_id, RaceEntry.dog_id)
+            .filter(RaceEntry.race_id.in_(chunk))
+            .all()
+        )
+
+    field_rows = _chunked_query(db, _h2h_field_query, target_race_ids, RaceEntry.race_id)
     field_by_race: dict[int, set[int]] = defaultdict(set)
     for rid, did in field_rows:
         field_by_race[int(rid)].add(int(did))
@@ -2074,12 +2080,17 @@ def compute_elo_features_batch(
     # Find the latest race date among the requested entries; we only need to
     # walk history up through that date.  Includes unresulted races so that
     # prediction-time requests for future races are also bounded correctly.
-    target_max_date = (
-        db.query(func.max(Race.race_date))
-        .join(RaceEntry, RaceEntry.race_id == Race.id)
-        .filter(RaceEntry.id.in_(list(requested_set)))
-        .scalar()
-    )
+    target_max_date = None
+    _req_list = list(requested_set)
+    for _i in range(0, len(_req_list), _SQLITE_VAR_LIMIT):
+        _d = (
+            db.query(func.max(Race.race_date))
+            .join(RaceEntry, RaceEntry.race_id == Race.id)
+            .filter(RaceEntry.id.in_(_req_list[_i:_i + _SQLITE_VAR_LIMIT]))
+            .scalar()
+        )
+        if _d is not None and (target_max_date is None or _d > target_max_date):
+            target_max_date = _d
     if target_max_date is None:
         return pd.DataFrame()
 
@@ -2089,30 +2100,46 @@ def compute_elo_features_batch(
     # Also include requested entries whose race is NOT yet resulted (e.g.
     # live prediction time) so we can still snapshot pre-race ELO for them.
     requested_ids_list = list(requested_set)
+    _elo_cols = (
+        RaceEntry.id.label("entry_id"),
+        RaceEntry.race_id,
+        RaceEntry.dog_id,
+        RaceEntry.finish_position,
+        Race.status.label("race_status"),
+        Race.race_date,
+        Race.race_time,
+        Race.track_id,
+        Race.distance_m,
+    )
     rows = (
-        db.query(
-            RaceEntry.id.label("entry_id"),
-            RaceEntry.race_id,
-            RaceEntry.dog_id,
-            RaceEntry.finish_position,
-            Race.status.label("race_status"),
-            Race.race_date,
-            Race.race_time,
-            Race.track_id,
-            Race.distance_m,
-        )
+        db.query(*_elo_cols)
         .join(Race, RaceEntry.race_id == Race.id)
-        .filter(
-            (
-                (Race.status == "resulted") & (Race.race_date <= target_max_date)
-            ) | (
-                RaceEntry.id.in_(requested_ids_list)
-            ),
-        )
-        .order_by(Race.race_date.asc(), Race.race_time.asc().nullsfirst(),
-                  Race.id.asc())
+        .filter(Race.status == "resulted", Race.race_date <= target_max_date)
         .all()
     )
+    # Requested entries whose race is NOT resulted (prediction time) come in
+    # a separate chunked pass — putting a 250k-id IN() inside an OR blew
+    # SQLite's variable limit on large training runs.
+    _have = {r.entry_id for r in rows}
+    _missing = [i for i in requested_ids_list if i not in _have]
+    if _missing:
+        def _elo_extra_query(chunk):
+            return (
+                db.query(*_elo_cols)
+                .join(Race, RaceEntry.race_id == Race.id)
+                .filter(RaceEntry.id.in_(chunk))
+                .all()
+            )
+        rows.extend(_chunked_query(db, _elo_extra_query, _missing, RaceEntry.id))
+    # Restore the chronological walk order the single SQL query provided
+    # (race_date asc, race_time asc with NULLs first, race id asc).
+    from datetime import time as _time
+    rows.sort(key=lambda r: (
+        r.race_date,
+        r.race_time is not None,
+        r.race_time or _time.min,
+        r.race_id,
+    ))
     _hb()
 
     if not rows:

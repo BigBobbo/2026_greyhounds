@@ -798,16 +798,20 @@ def _add_odds_snapshot_features(
 
     entry_index = entries_df.index
     # No dog_id available on the input frames — fetch from DB once
-    lookup = (
-        db.query(
-            RaceEntry.id.label("entry_id"),
-            RaceEntry.dog_id,
-            RaceEntry.race_id,
-            RaceEntry.sp_decimal,
+    _CHUNK = 900  # stay under SQLite's variable limit
+    _ids = list(entry_index)
+    lookup = []
+    for _i in range(0, len(_ids), _CHUNK):
+        lookup.extend(
+            db.query(
+                RaceEntry.id.label("entry_id"),
+                RaceEntry.dog_id,
+                RaceEntry.race_id,
+                RaceEntry.sp_decimal,
+            )
+            .filter(RaceEntry.id.in_(_ids[_i:_i + _CHUNK]))
+            .all()
         )
-        .filter(RaceEntry.id.in_(list(entry_index)))
-        .all()
-    )
     if not lookup:
         return X
 
@@ -816,30 +820,27 @@ def _add_odds_snapshot_features(
 
     # Early exit: if the snapshots table has no rows for any of these races
     # we can skip the per-entry work entirely.
-    snap_count = (
-        db.query(func.count(OddsSnapshot.id))
-        .filter(OddsSnapshot.race_id.in_(race_ids))
-        .scalar()
-    )
-    if not snap_count:
-        logger.info("Skipped odds-snapshot features — no snapshots for target races")
+    if not db.query(OddsSnapshot.id).first():
+        logger.info("Skipped odds-snapshot features — snapshots table is empty")
         return X
 
-    snap_rows = (
-        db.query(
-            OddsSnapshot.race_id,
-            OddsSnapshot.dog_id,
-            OddsSnapshot.bookmaker,
-            OddsSnapshot.odds_decimal,
-            OddsSnapshot.scraped_at,
-            OddsSnapshot.is_sp,
+    snap_rows = []
+    for _i in range(0, len(race_ids), _CHUNK):
+        snap_rows.extend(
+            db.query(
+                OddsSnapshot.race_id,
+                OddsSnapshot.dog_id,
+                OddsSnapshot.bookmaker,
+                OddsSnapshot.odds_decimal,
+                OddsSnapshot.scraped_at,
+                OddsSnapshot.is_sp,
+            )
+            .filter(
+                OddsSnapshot.race_id.in_(race_ids[_i:_i + _CHUNK]),
+                OddsSnapshot.odds_decimal > 0,
+            )
+            .all()
         )
-        .filter(
-            OddsSnapshot.race_id.in_(race_ids),
-            OddsSnapshot.odds_decimal > 0,
-        )
-        .all()
-    )
     if not snap_rows:
         return X
 

@@ -615,6 +615,7 @@ def compute_builtin_features_batch(
             Dog.trainer_name,
             Dog.sire,
             Dog.dam,
+            RaceEntry.dog_id.label("evt_dog_id"),
         )
         .join(Race, RaceEntry.race_id == Race.id)
         .join(Dog, RaceEntry.dog_id == Dog.id)
@@ -624,7 +625,7 @@ def compute_builtin_features_batch(
     evt = pd.DataFrame(evt_rows, columns=[
         "race_date", "track_id", "distance_m", "going", "trap",
         "finish_position", "adjusted_time", "finish_time",
-        "trainer_name", "sire", "dam",
+        "trainer_name", "sire", "dam", "evt_dog_id",
     ])
     del evt_rows
     logger.info("Batch builtin: %d resulted runs feed the as-of aggregates", len(evt))
@@ -734,6 +735,11 @@ def compute_builtin_features_batch(
     ctx_df = _asof_join(ctx_df, ["trainer_name"], ["n", "win"], pos_ok, "tr90_", window_days=90)
     ctx_df = _asof_join(ctx_df, ["trainer_name"], ["n", "win"], pos_ok, "tr30_", window_days=30)
     ctx_df = _asof_join(ctx_df, ["trainer_name", "track_id"], ["n", "win"], pos_ok, "trt365_", window_days=365)
+    # Sibling form: same sire AND dam (in practice one or two litters).
+    # Family cumulative minus the dog's own cumulative = siblings only.
+    ctx_df["evt_dog_id"] = ctx_df["dog_id"]
+    ctx_df = _asof_join(ctx_df, ["sire", "dam"], ["n", "win"], pos_ok, "fam_")
+    ctx_df = _asof_join(ctx_df, ["evt_dog_id"], ["n", "win"], pos_ok, "own_")
     _hb()
 
     # --- 3b. Weather join (Tier 13) ---
@@ -787,6 +793,10 @@ def compute_builtin_features_batch(
     ctx_df["asof_trainer_runs_90d"] = ctx_df["tr90_n"]
     ctx_df["asof_trainer_win_30d"] = (ctx_df["tr30_win"] / ctx_df["tr30_n"]).where(ctx_df["tr30_n"] >= 5)
     ctx_df["asof_trainer_track_365d"] = (ctx_df["trt365_win"] / ctx_df["trt365_n"]).where(ctx_df["trt365_n"] >= 8)
+    _sib_n = ctx_df["fam_n"].fillna(0) - ctx_df["own_n"].fillna(0)
+    _sib_w = ctx_df["fam_win"].fillna(0) - ctx_df["own_win"].fillna(0)
+    ctx_df["asof_sibling_runs"] = _sib_n.where(ctx_df["fam_n"].notna())
+    ctx_df["asof_sibling_rate"] = (_sib_w / _sib_n).where(_sib_n >= 20)
 
     # Speed figures for every history row, normalised by the (track, distance)
     # baseline as of that run's OWN date — so a 2023 run keeps the same figure
@@ -1493,6 +1503,8 @@ def compute_builtin_features_batch(
         f["trainer_runs_90d"] = _fnum(ctx["asof_trainer_runs_90d"])
         f["trainer_win_rate_30d"] = _fnum(ctx["asof_trainer_win_30d"])
         f["trainer_win_rate_at_track_365d"] = _fnum(ctx["asof_trainer_track_365d"])
+        f["sibling_win_rate"] = _fnum(ctx["asof_sibling_rate"])
+        f["sibling_runs"] = _fnum(ctx["asof_sibling_runs"])
         t90 = f["trainer_win_rate_90d"]
         tcareer = f["trainer_win_rate"]
         if t90 is not None and tcareer is not None:
@@ -1751,6 +1763,8 @@ BUILTIN_FEATURE_NAMES = [
     "dam_progeny_win_rate",
     "dam_progeny_mean_time_at_dist",
     "sire_progeny_win_rate_at_dist",
+    "sibling_win_rate",
+    "sibling_runs",
     "trainer_win_rate_90d",
     "trainer_runs_90d",
     "trainer_win_rate_30d",

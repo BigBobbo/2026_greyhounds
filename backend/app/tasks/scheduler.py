@@ -139,6 +139,20 @@ def _scrape_yesterday_results():
     _scrape_dates_for_all_tracks([yesterday], f"scheduled yesterday {yesterday}")
 
 
+def _capture_betfair_odds():
+    """Snapshot exchange prices for upcoming Irish win markets. Dormant
+    (logs and returns) until Betfair credentials are configured."""
+    db = SessionLocal()
+    try:
+        from scraping.betfair_odds import capture_from_settings
+
+        capture_from_settings(db)
+    except Exception as e:
+        logger.error("Odds capture failed: %s", e)
+    finally:
+        db.close()
+
+
 def _rescrape_trailing_window(days: int = 14):
     """Re-scrape the trailing window to pick up GRI's post-publication
     amendments (corrected SPs, weights, comments, runner identities)."""
@@ -259,6 +273,16 @@ def start_scheduler():
         trigger=CronTrigger(hour=4, minute=30, timezone=DUBLIN),
         id="amendment_rescrape",
         name="Trailing 14-day amendment re-scrape",
+        replace_existing=True,
+    )
+
+    # Exchange odds snapshots through the racing afternoon/evening —
+    # dormant no-ops until Betfair credentials are configured.
+    scheduler.add_job(
+        _capture_betfair_odds,
+        trigger=CronTrigger(hour="12-22", minute=15, timezone=DUBLIN),
+        id="betfair_odds_capture",
+        name="Betfair odds capture (hourly, race hours)",
         replace_existing=True,
     )
 

@@ -95,12 +95,63 @@ def main(max_entries: int, test_pct: float, val_pct: float) -> None:
     betting.pop("pnl_by_race", None)
     betting.pop("kelly_pnl_by_race", None)
 
+    # --- Benter blend: second-stage model+market conditional logit ---
+    # Fit alpha/beta on the VALIDATION window, apply to test. Market
+    # probabilities come from de-vigged SPs (the same price source the
+    # betting sim executes against, minus slippage).
+    from ml.blend import BlendModel, devig_market_probs, fit_blend
+
+    meta_val = data["meta_val"]
+    val_proba = trainer.predict_proba(data["X_val"], calibrate=True)
+    val_market = devig_market_probs(
+        meta_val["sp_decimal"].values, meta_val["race_id"].values,
+    )
+    blender = fit_blend(
+        np.asarray(val_proba), val_market,
+        np.asarray(data["y_val"]).astype(int), meta_val["race_id"].values,
+    )
+    test_market = devig_market_probs(
+        meta_test["sp_decimal"].values, meta_test["race_id"].values,
+    )
+    blended = blender.blend(
+        np.asarray(proba), test_market, meta_test["race_id"].values,
+    )
+    betting_blended = compute_betting_metrics(
+        y_arr, blended,
+        meta_test["sp_decimal"].values,
+        meta_test["race_id"].values,
+    )
+    betting_blended.pop("pnl_by_race", None)
+    betting_blended.pop("kelly_pnl_by_race", None)
+    blend_clf = compute_metrics(
+        y_arr, (blended > 0.5).astype(int), blended, "classification",
+    )
+
+    # Persist the trained artifacts for downstream use (bet sheets, blend)
+    import joblib
+
+    joblib.dump(
+        {
+            "trainer": trainer,
+            "feature_names": data["feature_names"],
+            "feature_medians": data["feature_medians"],
+            "nan_policy": "passthrough",
+            "is_ranking": False,
+            "blend_alpha": blender.alpha,
+            "blend_beta": blender.beta,
+        },
+        os.path.join("data", "retrain_model.joblib"),
+    )
+
     report = {
         "dataset": data["stats"],
         "n_features": len(data["feature_names"]),
         "train_metrics": result.metrics,
         "test_classification": clf_metrics,
         "test_betting": betting,
+        "blend": {"alpha": blender.alpha, "beta": blender.beta},
+        "test_classification_blended": blend_clf,
+        "test_betting_blended": betting_blended,
         "test_period": {
             "from": str(meta_test["race_date"].min()),
             "to": str(meta_test["race_date"].max()),

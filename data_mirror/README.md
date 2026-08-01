@@ -30,17 +30,18 @@ census exactly.
 Each JSONL line is the API response object for one row; `id` fields are the production
 primary keys, so foreign keys (`race_id`, `dog_id`, `track_id`) join across files.
 
-## Betfair BSP history (`bsp/`)
+## Betfair BSP history (`bsp/`) — RESOLVED: no Irish data exists
 
-Betfair's free daily BSP CSVs (greyhound win/place markets, including Irish
-tracks) are the price backbone for honest backtesting — but
-`promo.betfair.com` geo-blocks non-IE/UK IPs, so they cannot be fetched from
-this repo's cloud environment. Run `download_bsp.py` from any Irish/UK
-connection (plain Python 3, no dependencies, resumable):
+**Finding (2026-08-01):** the free BSP archive (promo.betfair.com and its
+Wayback Machine mirror, ~7,600 day-files inventoried 2012-2024) contains
+UK, AUS and NZ greyhound tracks ONLY. Irish greyhound markets have never
+been published in these CSVs, so neither `download_bsp.py` (IE/UK
+connection) nor `download_bsp_wayback.py` (archive mirror) can yield
+Irish price history. Both scripts are retained in case UK-track expansion
+is ever wanted.
 
-```bash
-python3 data_mirror/download_bsp.py        # 2021-01-01 → today, IRE rows only
-```
-
-then commit the resulting `bsp/win_greyhound.csv.gz` and
-`bsp/place_greyhound.csv.gz`.
+Consequences for the market layer:
+- Historical market signal = the starting prices already in this mirror
+  (87.6% of entries; 90-93% for 2022-2026).
+- Live pre-race exchange/bookmaker odds require the odds-capture service
+  plus a Betfair app key (scraping/betfair_odds.py) going forward.

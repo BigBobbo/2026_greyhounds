@@ -146,6 +146,11 @@ def compute_features_for_entries(
         return pd.DataFrame()
 
     df = pd.DataFrame.from_dict(rows, orient="index")
+    if df.empty and rows:
+        # With zero user-defined features every per-entry dict is empty and
+        # from_dict drops the index entirely — which would left-join the
+        # builtin/ELO/H2H frames onto nothing. Rebuild the bare index.
+        df = pd.DataFrame(index=list(rows.keys()))
     df.index.name = "race_entry_id"
 
     # Add built-in race-context features in one batched pass.  This shares

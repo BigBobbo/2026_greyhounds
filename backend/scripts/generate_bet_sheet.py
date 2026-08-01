@@ -90,8 +90,12 @@ def main(experiment_id: int, target_date: date_cls, min_confidence: str) -> None
                 continue
             if tier_rank.get(p.get("confidence_tier", "avoid"), 0) < min_tier:
                 continue
-            # Minimum acceptable price for the required edge
-            min_odds = max(1.0 / (wp - cfg.min_edge), cfg.min_odds)
+            # Minimum acceptable price for the required edge, grossed up so
+            # the edge survives commission: at gross odds X the net price is
+            # 1 + (X-1)(1-c), and THAT must clear 1/(p - min_edge).
+            net_floor = 1.0 / (wp - cfg.min_edge)
+            min_odds = 1.0 + (net_floor - 1.0) / (1.0 - cfg.commission_rate)
+            min_odds = max(min_odds, cfg.min_odds)
             rec = kelly_stake(wp, min_odds, cfg, completeness=p.get("data_completeness") or 1.0)
             if not rec.get("bet"):
                 continue

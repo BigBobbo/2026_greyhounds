@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     # ML
     model_artifacts_dir: str = "./data/models"
 
+    # Admin: bearer token protecting the database-backup download endpoint.
+    # Empty string disables the endpoint entirely. Set a long random value
+    # in the deployment environment to enable HTTPS backups (the hosting
+    # volume has no other export path).
+    admin_backup_token: str = ""
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

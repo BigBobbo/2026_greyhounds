@@ -380,7 +380,16 @@ def _run_single_experiment(
                 all_metrics["betting_value_pnl"] = betting["value_bet_pnl"]
                 all_metrics["betting_value_roi"] = betting["value_bet_roi"]
                 all_metrics["betting_kelly_pnl"] = betting.get("kelly_pnl", 0)
-                all_metrics["betting_kelly_roi"] = betting.get("kelly_roi", 0)
+                # Selecting the maximum raw ROI over hundreds of trials is a
+                # maximum over noise (±5pp SE on ~1,200 test races). Score the
+                # LOWER bound of the 90% bootstrap CI instead: an experiment
+                # only "improves" when its worst plausible ROI beats the
+                # incumbent's, which is exactly the robustness we care about.
+                ci = betting.get("kelly_roi_ci90")
+                all_metrics["betting_kelly_roi_point"] = betting.get("kelly_roi", 0)
+                all_metrics["betting_kelly_roi"] = (
+                    float(ci[0]) if ci else betting.get("kelly_roi", 0)
+                )
             except Exception as e:
                 logger.warning("Betting metrics failed: %s", e)
 

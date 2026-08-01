@@ -158,3 +158,39 @@ def test_real_world_examples():
                     actual.add(f"{k}:{b}")
         missing = expected - actual
         assert not missing, f"For '{raw}': missing flags {missing}"
+
+
+# --- Beaten-margin parsing (close finishes carry the most information) ---
+
+from scraping.gri_scraper import parse_beaten_margin
+
+
+class TestBeatenMargin:
+    def test_named_margins(self):
+        assert parse_beaten_margin("SH") == 0.05
+        assert parse_beaten_margin("HD") == 0.1
+        assert parse_beaten_margin("NK") == 0.25
+        assert parse_beaten_margin("DH") == 0.0
+
+    def test_distance_is_unquantified(self):
+        assert parse_beaten_margin("DIS") is None
+        assert parse_beaten_margin("DIST") is None
+
+    def test_vulgar_fractions(self):
+        assert parse_beaten_margin("½") == 0.5
+        assert parse_beaten_margin("1½") == 1.5
+        assert parse_beaten_margin("2¾") == 2.75
+        assert parse_beaten_margin("¼") == 0.25
+
+    def test_ascii_fractions(self):
+        assert parse_beaten_margin("1 1/2") == 1.5
+        assert parse_beaten_margin("3/4") == 0.75
+
+    def test_plain_numbers_and_length_suffix(self):
+        assert parse_beaten_margin("3") == 3.0
+        assert parse_beaten_margin("2.5") == 2.5
+        assert parse_beaten_margin("4L") == 4.0
+
+    def test_garbage_is_none(self):
+        assert parse_beaten_margin("") is None
+        assert parse_beaten_margin("N/A") is None

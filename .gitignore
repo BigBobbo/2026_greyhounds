@@ -16,6 +16,9 @@ backend/*.db
 backend/*.sqlite
 *.db
 *.sqlite
+*.db-shm
+*.db-wal
+backend/data/
 
 # ML artifacts
 mlruns/

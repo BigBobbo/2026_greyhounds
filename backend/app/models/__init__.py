@@ -11,6 +11,7 @@ from app.models.prediction import Prediction
 from app.models.scrape_log import ScrapeLog
 from app.models.bankroll import BankrollConfig, BetRecord
 from app.models.schedule import ModelSchedule, ScheduledPredictionRun
+from app.models.weather import TrackWeather
 
 __all__ = [
     "Track",
@@ -28,4 +29,5 @@ __all__ = [
     "BetRecord",
     "ModelSchedule",
     "ScheduledPredictionRun",
+    "TrackWeather",
 ]

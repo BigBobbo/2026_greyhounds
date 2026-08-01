@@ -100,9 +100,16 @@ async def run_backfill(
             track_entries = 0
             current = start_date
 
+            failed_days = 0
             try:
                 while current <= end_date:
-                    races = await scrape_results(track.code, current)
+                    try:
+                        races = await scrape_results(track.code, current)
+                    except Exception as e:
+                        failed_days += 1
+                        logger.error("Backfill day failed %s %s: %s",
+                                     track.code, current, e)
+                        races = []
 
                     if races:
                         stats = upsert_race_results(db, races, scrape_log_id=log.id)
@@ -114,7 +121,9 @@ async def run_backfill(
                     current += timedelta(days=1)
                     await asyncio.sleep(delay)
 
-                log.status = "success"
+                log.status = "partial" if failed_days else "success"
+                if failed_days:
+                    log.error_message = f"{failed_days} day(s) failed to fetch"
                 log.records_scraped = track_races
                 log.records_new = track_entries
 

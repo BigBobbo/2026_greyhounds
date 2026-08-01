@@ -26,6 +26,9 @@ class BankrollConfigUpdate(BaseModel):
     kelly_fraction: float | None = None
     min_edge: float | None = None
     max_stake_pct: float | None = None
+    commission_rate: float | None = None
+    min_odds: float | None = None
+    max_daily_exposure_pct: float | None = None
 
 
 class PlaceBetRequest(BaseModel):
@@ -48,12 +51,70 @@ class PlaceBetRequest(BaseModel):
 
 
 class SettleBetRequest(BaseModel):
-    # Win/place/show: a single integer is enough.
+    # Preferred: the explicit outcome. The old UI encoded "lost" as
+    # actual_position=2, which the place-bet rule (position <= 2 wins)
+    # read as a WIN — clicking "Lost" on a place bet credited the
+    # bankroll. An explicit result cannot be misread.
+    result: str | None = None  # "won" | "lost" | "void"
+    # Alternative: the dog's real finishing position; the handler derives
+    # won/lost from the bet type.
     actual_position: int | None = None
     # Forecast/trio: the ordered list of finishing race_entry_ids the
     # race actually produced. The handler compares this against the
     # bet's `legs_json` to decide whether the combo hit.
     actual_finishing_order: list[int] | None = None
+
+
+# Standard each-way place terms at Irish greyhound tracks: places pay a
+# quarter of the win odds. A place bet's profit is stake * (odds-1) * 1/4,
+# not the full win odds the old code paid.
+PLACE_TERMS_FRACTION = 0.25
+
+
+def _placings_for_field(num_runners: int | None) -> int:
+    """Number of paid places for a field. Six-dog greyhound races pay 2;
+    smaller fields typically pay win-only but we keep 2 as the floor the
+    UI expects. Show bets always use 3."""
+    if num_runners is not None and num_runners < 5:
+        return 1
+    return 2
+
+
+def _apply_settlement(
+    record: BetRecord,
+    config: BankrollConfig | None,
+    *,
+    won: bool,
+    void: bool = False,
+) -> None:
+    """Book a settlement onto the record and the bankroll ledger.
+
+    Stake was already deducted at placement, so: void returns the stake;
+    a win returns stake + profit; a loss moves nothing further.
+    """
+    if void:
+        record.outcome = "void"
+        record.profit = 0.0
+    elif won:
+        odds = record.odds_decimal
+        bet_type = (record.bet_type or "win").lower()
+        if bet_type in ("place", "show"):
+            profit = record.stake * (odds - 1) * PLACE_TERMS_FRACTION
+        else:
+            profit = record.stake * (odds - 1)
+        record.outcome = "won"
+        record.profit = round(profit, 2)
+    else:
+        record.outcome = "lost"
+        record.profit = -record.stake
+
+    record.settled_at = datetime.utcnow()
+    if config:
+        if record.outcome == "void":
+            config.current_bankroll += record.stake
+        elif record.outcome == "won":
+            config.current_bankroll += record.stake + record.profit
+        record.bankroll_after = config.current_bankroll
 
 
 # --- Config ---
@@ -74,6 +135,9 @@ def get_config(db: Session = Depends(get_db)):
         "kelly_fraction": config.kelly_fraction,
         "min_edge": config.min_edge,
         "max_stake_pct": config.max_stake_pct,
+        "commission_rate": getattr(config, "commission_rate", 0.05),
+        "min_odds": getattr(config, "min_odds", 1.5),
+        "max_daily_exposure_pct": getattr(config, "max_daily_exposure_pct", 0.10),
     }
 
 
@@ -95,6 +159,12 @@ def update_config(update: BankrollConfigUpdate, db: Session = Depends(get_db)):
         config.min_edge = update.min_edge
     if update.max_stake_pct is not None:
         config.max_stake_pct = update.max_stake_pct
+    if update.commission_rate is not None:
+        config.commission_rate = update.commission_rate
+    if update.min_odds is not None:
+        config.min_odds = update.min_odds
+    if update.max_daily_exposure_pct is not None:
+        config.max_daily_exposure_pct = update.max_daily_exposure_pct
 
     db.commit()
     db.refresh(config)
@@ -105,6 +175,9 @@ def update_config(update: BankrollConfigUpdate, db: Session = Depends(get_db)):
         "kelly_fraction": config.kelly_fraction,
         "min_edge": config.min_edge,
         "max_stake_pct": config.max_stake_pct,
+        "commission_rate": getattr(config, "commission_rate", 0.05),
+        "min_odds": getattr(config, "min_odds", 1.5),
+        "max_daily_exposure_pct": getattr(config, "max_daily_exposure_pct", 0.10),
     }
 
 
@@ -225,56 +298,169 @@ def settle_bet(bet_id: int, settle: SettleBetRequest, db: Session = Depends(get_
         raise HTTPException(status_code=400, detail="Bet already settled")
 
     config = db.query(BankrollConfig).first()
-
     bet_type = (record.bet_type or "win").lower()
-    won = False
-    if bet_type == "win":
-        won = settle.actual_position == 1
-    elif bet_type == "place":
-        won = settle.actual_position is not None and settle.actual_position <= 2
-    elif bet_type == "show":
-        won = settle.actual_position is not None and settle.actual_position <= 3
-    elif bet_type in ("forecast", "trio"):
-        # Combo bets need the actual finishing order — compare it leg by
-        # leg to the legs the bet was placed on. For a forecast the
-        # first two finishers must match in order; for a trio the first
-        # three. Reverse forecasts (CB) aren't a separate bet here —
-        # they'd be staked as two separate forecast records.
-        if not settle.actual_finishing_order:
+
+    if settle.result is not None:
+        result = settle.result.lower()
+        if result not in ("won", "lost", "void"):
+            raise HTTPException(
+                status_code=422,
+                detail="result must be one of 'won', 'lost', 'void'",
+            )
+        if result == "void":
+            _apply_settlement(record, config, won=False, void=True)
+        elif result == "lost":
+            _apply_settlement(record, config, won=False)
+        else:
+            if not record.odds_decimal or record.odds_decimal <= 1.0:
+                # The old code silently booked NULL-odds winners as LOSSES.
+                # A win cannot be paid without a price — make the caller
+                # supply one instead of corrupting the ledger.
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Bet has no odds_decimal — a win cannot be settled "
+                        "without a price. Update the bet's odds first."
+                    ),
+                )
+            _apply_settlement(record, config, won=True)
+    else:
+        won = False
+        if bet_type == "win":
+            if settle.actual_position is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Provide `result` or `actual_position`",
+                )
+            won = settle.actual_position == 1
+        elif bet_type in ("place", "show"):
+            if settle.actual_position is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Place/show bets need the dog's real finishing "
+                        "position (or an explicit `result`)"
+                    ),
+                )
+            limit = 3 if bet_type == "show" else 2
+            won = settle.actual_position <= limit
+        elif bet_type in ("forecast", "trio"):
+            # Combo bets need the actual finishing order — compare it leg by
+            # leg to the legs the bet was placed on. For a forecast the
+            # first two finishers must match in order; for a trio the first
+            # three. Reverse forecasts (CB) aren't a separate bet here —
+            # they'd be staked as two separate forecast records.
+            if not settle.actual_finishing_order:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"{bet_type} bets must be settled with an "
+                        f"`actual_finishing_order` list (or explicit `result`)"
+                    ),
+                )
+            import json as _json
+            legs = _json.loads(record.legs_json) if record.legs_json else []
+            n = 2 if bet_type == "forecast" else 3
+            if len(settle.actual_finishing_order) >= n and len(legs) == n:
+                won = list(settle.actual_finishing_order[:n]) == list(legs)
+
+        if won and (not record.odds_decimal or record.odds_decimal <= 1.0):
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"{bet_type} bets must be settled with an "
-                    f"`actual_finishing_order` list"
+                    "Bet has no odds_decimal — a win cannot be settled "
+                    "without a price. Update the bet's odds first."
                 ),
             )
-        import json as _json
-        legs = _json.loads(record.legs_json) if record.legs_json else []
-        n = 2 if bet_type == "forecast" else 3
-        if len(settle.actual_finishing_order) >= n and len(legs) == n:
-            won = list(settle.actual_finishing_order[:n]) == list(legs)
-
-    if won and record.odds_decimal:
-        profit = record.stake * (record.odds_decimal - 1)
-        record.outcome = "won"
-    else:
-        profit = -record.stake
-        record.outcome = "lost"
-
-    record.profit = round(profit, 2)
-    record.settled_at = datetime.utcnow()
-
-    # Update bankroll: add back stake + profit if won, nothing if lost (stake already deducted)
-    if config:
-        if won:
-            config.current_bankroll += record.stake + profit  # return stake + winnings
-        record.bankroll_after = config.current_bankroll
+        _apply_settlement(record, config, won=won)
 
     db.commit()
     return {
         "id": record.id,
         "outcome": record.outcome,
         "profit": record.profit,
+        "bankroll": config.current_bankroll if config else None,
+    }
+
+
+@router.post("/reconcile")
+def reconcile_bets(db: Session = Depends(get_db)):
+    """Auto-settle pending bets against the scraped results already in the
+    database. A pending bet whose race has resulted is settled from the
+    entry's real finishing position; a dog with no finishing position in a
+    resulted race is treated as a non-runner and the bet voided (stake
+    refunded). Combo bets settle against the race's actual finishing order.
+    """
+    import json as _json
+
+    config = db.query(BankrollConfig).first()
+    pending = db.query(BetRecord).filter(BetRecord.outcome == "pending").all()
+
+    settled, skipped = [], 0
+    for record in pending:
+        entry = (
+            db.query(RaceEntry).filter(RaceEntry.id == record.race_entry_id).first()
+        )
+        if not entry:
+            skipped += 1
+            continue
+        race = db.query(Race).filter(Race.id == entry.race_id).first()
+        if not race or race.status != "resulted":
+            skipped += 1
+            continue
+
+        bet_type = (record.bet_type or "win").lower()
+
+        if bet_type in ("forecast", "trio"):
+            legs = _json.loads(record.legs_json) if record.legs_json else []
+            n = 2 if bet_type == "forecast" else 3
+            finishers = (
+                db.query(RaceEntry)
+                .filter(
+                    RaceEntry.race_id == race.id,
+                    RaceEntry.finish_position.isnot(None),
+                )
+                .order_by(RaceEntry.finish_position)
+                .all()
+            )
+            order = [e.id for e in finishers]
+            if len(order) < n or len(legs) != n:
+                skipped += 1
+                continue
+            won = order[:n] == list(legs)
+            if won and (not record.odds_decimal or record.odds_decimal <= 1.0):
+                skipped += 1  # needs a price before it can be paid
+                continue
+            _apply_settlement(record, config, won=won)
+        else:
+            pos = entry.finish_position
+            if pos is None:
+                # Resulted race, no position for this dog: non-runner.
+                _apply_settlement(record, config, won=False, void=True)
+            else:
+                if bet_type == "win":
+                    won = pos == 1
+                elif bet_type == "show":
+                    won = pos <= 3
+                else:  # place
+                    won = pos <= _placings_for_field(race.num_runners)
+                if won and (not record.odds_decimal or record.odds_decimal <= 1.0):
+                    skipped += 1
+                    continue
+                _apply_settlement(record, config, won=won)
+
+        settled.append({
+            "id": record.id,
+            "dog_name": record.dog_name,
+            "outcome": record.outcome,
+            "profit": record.profit,
+        })
+
+    db.commit()
+    return {
+        "settled": settled,
+        "settled_count": len(settled),
+        "still_pending": skipped,
         "bankroll": config.current_bankroll if config else None,
     }
 
@@ -404,7 +590,9 @@ def get_summary(db: Session = Depends(get_db)):
         "pending_bets": pending_bets,
         "wins": wins,
         "losses": losses,
-        "strike_rate": round(wins / max(settled_bets, 1) * 100, 1),
+        # Voids are settled but neither won nor lost — exclude them from
+        # the strike-rate denominator.
+        "strike_rate": round(wins / max(wins + losses, 1) * 100, 1),
         "total_staked": round(float(total_staked), 2),
         "avg_stake": round(float(total_staked) / max(settled_bets, 1), 2),
         "streak": f"{streak_count} {'win' if streak_type == 'won' else 'loss'}{'es' if streak_count != 1 and streak_type == 'lost' else 's' if streak_count != 1 else ''}" if streak_type else "N/A",

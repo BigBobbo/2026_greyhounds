@@ -59,21 +59,50 @@ def find_or_create_dog(
     db: Session, name: str, trainer_name: str | None = None,
     sire: str | None = None, dam: str | None = None,
 ) -> Dog:
-    """Find existing dog by normalized name, or create new."""
+    """Find existing dog by normalized name, or create new.
+
+    Greyhound names recur across generations. Matching by name alone merges
+    two different dogs into one blended form history, so when BOTH the
+    stored dog and the scraped entry carry a full pedigree (sire and dam)
+    and BOTH differ, we treat it as a different animal with the same name
+    and create a separate record. Partial or missing pedigree keeps the
+    conservative name match — a spelling variant in one parent must not
+    fork a dog's history in two.
+    """
     norm_name = normalize_name(name)
 
-    dog = db.query(Dog).filter(Dog.name == norm_name).first()
-    if dog:
-        # Update missing fields
-        if sire and not dog.sire:
-            dog.sire = sire
-        if dam and not dog.dam:
-            dog.dam = dam
-        if trainer_name and not dog.trainer_name:
-            dog.trainer_name = normalize_name(trainer_name)
-        return dog
+    candidates = db.query(Dog).filter(Dog.name == norm_name).all()
+    scraped_sire = normalize_name(sire) if sire else None
+    scraped_dam = normalize_name(dam) if dam else None
 
-    # Create new dog
+    match: Dog | None = None
+    for dog in candidates:
+        stored_sire = normalize_name(dog.sire) if dog.sire else None
+        stored_dam = normalize_name(dog.dam) if dog.dam else None
+        if (
+            scraped_sire and scraped_dam and stored_sire and stored_dam
+            and scraped_sire != stored_sire and scraped_dam != stored_dam
+        ):
+            continue  # same name, different parents on both sides: not this dog
+        match = dog
+        break
+
+    if match:
+        if sire and not match.sire:
+            match.sire = sire
+        if dam and not match.dam:
+            match.dam = dam
+        if trainer_name and not match.trainer_name:
+            match.trainer_name = normalize_name(trainer_name)
+        return match
+
+    if candidates:
+        logger.info(
+            "Namesake split: creating a second dog named %r (scraped sire=%r "
+            "dam=%r differs from all %d stored namesakes)",
+            norm_name, sire, dam, len(candidates),
+        )
+
     dog = Dog(
         name=norm_name,
         sire=sire,
@@ -191,18 +220,42 @@ def upsert_race_entry(
             days_since_last = (race.race_date - last_date).days
 
     if existing:
-        # Update with new data if available
+        # The (race, trap) row exists — but the dog in it may be wrong.
+        # Cards are scraped days ahead; reserves are substituted on the
+        # night, and GRI occasionally amends a runner's identity after
+        # publication. The freshly scraped page is authoritative for who
+        # actually ran in this trap: reassign dog_id when it differs, or
+        # the result (position, time, SP, comment) is attached to a dog
+        # that never ran — poisoning its form history and the training
+        # labels built from it.
+        if existing.dog_id != dog.id:
+            logger.info(
+                "Trap %s in race %s: dog changed %s -> %s (%r) on re-scrape "
+                "(reserve substitution or GRI amendment)",
+                trap, race.id, existing.dog_id, dog.id, dog.name,
+            )
+            existing.dog_id = dog.id
+
+        # Result fields: the scraped page is the source of truth, so a
+        # present value always wins — GRI corrections (amended SP, weight,
+        # comment) must be able to overwrite the first-scraped value. Only
+        # absent scraped values leave the stored one alone.
         if entry_data.get("finish_position") is not None:
             existing.finish_position = entry_data["finish_position"]
         if entry_data.get("finish_time") is not None:
             existing.finish_time = entry_data["finish_time"]
-        if entry_data.get("starting_price") and not existing.starting_price:
+        if entry_data.get("starting_price"):
             existing.starting_price = entry_data["starting_price"]
-            existing.sp_decimal = entry_data.get("sp_decimal")
-        if entry_data.get("weight_kg") and not existing.weight_kg:
+            if entry_data.get("sp_decimal") is not None:
+                existing.sp_decimal = entry_data["sp_decimal"]
+        if entry_data.get("weight_kg"):
             existing.weight_kg = entry_data["weight_kg"]
-        if entry_data.get("comment") and not existing.comment:
+        if entry_data.get("comment"):
             existing.comment = entry_data["comment"]
+        if entry_data.get("beaten_distance") is not None:
+            existing.beaten_distance = entry_data["beaten_distance"]
+        if entry_data.get("sectional_time") is not None:
+            existing.sectional_time = entry_data["sectional_time"]
         # Backfill derivable fields if they were left NULL at first scrape.
         if grade_at_entry and not existing.grade_at_entry:
             existing.grade_at_entry = grade_at_entry

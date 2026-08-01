@@ -131,6 +131,16 @@ def build_dataset(
         "entry_id", "finish_position", "finish_time", "sp_decimal", "race_id", "race_date", "num_runners",
     ])
 
+    # The query orders race_date DESC purely so LIMIT keeps the most recent
+    # max_entries rows. Everything downstream requires ascending chronological
+    # order with each race's entries contiguous: the walk-forward fold
+    # generator's embargo logic assumes it (fed descending data it silently
+    # produced zero folds), and LambdaRank group sizes are computed by
+    # scanning contiguous race_ids. Re-sort here so that guarantee holds.
+    entries_df = entries_df.sort_values(
+        ["race_date", "race_id"], kind="mergesort",
+    ).reset_index(drop=True)
+
     logger.info("Found %d resulted entries", len(entries_df))
 
     # Build feature matrix
@@ -500,12 +510,17 @@ def generate_walk_forward_fold_indices(
     if n_folds < 1:
         return []
 
-    # Race-aligned sequence (preserve appearance order — race_ids is sorted
-    # chronologically so drop_duplicates yields chronological order).
-    ord_idx = race_ids.index
+    # Race-aligned sequence. Don't trust the caller's row order: sort the
+    # unique races chronologically ourselves. (The original code assumed
+    # ascending input; fed the newest-first order the dataset query produced,
+    # the embargo check was true for every fold and walk-forward silently
+    # degraded to a single split.)
     unique_races_series = race_ids.drop_duplicates()
     unique_race_ids = unique_races_series.values
     unique_race_dates = race_dates.loc[unique_races_series.index].values
+    chron = np.argsort(unique_race_dates, kind="stable")
+    unique_race_ids = unique_race_ids[chron]
+    unique_race_dates = unique_race_dates[chron]
     n_races = len(unique_race_ids)
     if n_races < n_folds + 1:
         return []
@@ -513,9 +528,6 @@ def generate_walk_forward_fold_indices(
     val_size = int(n_races * (1.0 - min_train_pct) / n_folds)
     val_size = max(1, val_size)
     train_start_size = max(1, n_races - val_size * n_folds)
-
-    # Build a lookup from row index -> positional index within input
-    pos_by_index = {idx: i for i, idx in enumerate(ord_idx)}
 
     folds: list[tuple[np.ndarray, np.ndarray]] = []
     for fold in range(n_folds):
@@ -786,16 +798,20 @@ def _add_odds_snapshot_features(
 
     entry_index = entries_df.index
     # No dog_id available on the input frames — fetch from DB once
-    lookup = (
-        db.query(
-            RaceEntry.id.label("entry_id"),
-            RaceEntry.dog_id,
-            RaceEntry.race_id,
-            RaceEntry.sp_decimal,
+    _CHUNK = 900  # stay under SQLite's variable limit
+    _ids = list(entry_index)
+    lookup = []
+    for _i in range(0, len(_ids), _CHUNK):
+        lookup.extend(
+            db.query(
+                RaceEntry.id.label("entry_id"),
+                RaceEntry.dog_id,
+                RaceEntry.race_id,
+                RaceEntry.sp_decimal,
+            )
+            .filter(RaceEntry.id.in_(_ids[_i:_i + _CHUNK]))
+            .all()
         )
-        .filter(RaceEntry.id.in_(list(entry_index)))
-        .all()
-    )
     if not lookup:
         return X
 
@@ -804,30 +820,27 @@ def _add_odds_snapshot_features(
 
     # Early exit: if the snapshots table has no rows for any of these races
     # we can skip the per-entry work entirely.
-    snap_count = (
-        db.query(func.count(OddsSnapshot.id))
-        .filter(OddsSnapshot.race_id.in_(race_ids))
-        .scalar()
-    )
-    if not snap_count:
-        logger.info("Skipped odds-snapshot features — no snapshots for target races")
+    if not db.query(OddsSnapshot.id).first():
+        logger.info("Skipped odds-snapshot features — snapshots table is empty")
         return X
 
-    snap_rows = (
-        db.query(
-            OddsSnapshot.race_id,
-            OddsSnapshot.dog_id,
-            OddsSnapshot.bookmaker,
-            OddsSnapshot.odds_decimal,
-            OddsSnapshot.scraped_at,
-            OddsSnapshot.is_sp,
+    snap_rows = []
+    for _i in range(0, len(race_ids), _CHUNK):
+        snap_rows.extend(
+            db.query(
+                OddsSnapshot.race_id,
+                OddsSnapshot.dog_id,
+                OddsSnapshot.bookmaker,
+                OddsSnapshot.odds_decimal,
+                OddsSnapshot.scraped_at,
+                OddsSnapshot.is_sp,
+            )
+            .filter(
+                OddsSnapshot.race_id.in_(race_ids[_i:_i + _CHUNK]),
+                OddsSnapshot.odds_decimal > 0,
+            )
+            .all()
         )
-        .filter(
-            OddsSnapshot.race_id.in_(race_ids),
-            OddsSnapshot.odds_decimal > 0,
-        )
-        .all()
-    )
     if not snap_rows:
         return X
 

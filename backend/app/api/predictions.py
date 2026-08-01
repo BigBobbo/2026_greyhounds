@@ -40,7 +40,7 @@ class OddsEntry(BaseModel):
 
 class UpdateOddsRequest(BaseModel):
     experiment_id: int
-    bankroll: float = 100.0
+    bankroll: float | None = None  # None -> size off the real ledger balance
     odds: list[OddsEntry]
 
 
@@ -57,7 +57,7 @@ class ComboKellyRequest(BaseModel):
     bet_type: str  # "forecast" or "trio"
     legs: list[int]  # ordered race_entry_ids: [1st, 2nd] or [1st, 2nd, 3rd]
     dividend_decimal: float
-    bankroll: float = 100.0
+    bankroll: float | None = None  # None -> size off the real ledger balance
 
 
 @router.get("/", response_model=list[PredictionResponse])
@@ -281,7 +281,7 @@ def predict_race_preflight(
 def predict_single_race(
     race_id: int,
     experiment_id: int,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1),
     refresh: bool = Query(
         default=False,
         description="If true, recompute even if saved predictions exist",
@@ -394,7 +394,7 @@ def get_saved_race_predictions(
 def get_race_combos(
     race_id: int,
     experiment_id: int,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1),
     refresh: bool = Query(
         default=False,
         description="If true, recompute the ordering layer even if predictions are cached",
@@ -674,10 +674,17 @@ def score_combo_bet(race_id: int, payload: ComboKellyRequest, db: Session = Depe
                 combo_probability = c.probability
                 break
 
+    from dataclasses import replace as _replace
+
+    from ml.staking import StakingConfig
+
+    combo_cfg = StakingConfig.from_db(db).for_combos()
+    if payload.bankroll is not None:
+        combo_cfg = _replace(combo_cfg, bankroll=payload.bankroll)
     kelly = compute_combo_kelly(
         combo_probability=combo_probability,
         combo_odds_decimal=payload.dividend_decimal,
-        bankroll=payload.bankroll,
+        cfg=combo_cfg,
     )
 
     return {
@@ -714,7 +721,7 @@ def update_predictions_with_odds(
     if not race:
         raise HTTPException(status_code=404, detail="Race not found")
 
-    if payload.bankroll < 1:
+    if payload.bankroll is not None and payload.bankroll < 1:
         raise HTTPException(status_code=422, detail="bankroll must be >= 1")
 
     odds_by_entry: dict[int, float | None] = {}
@@ -972,7 +979,7 @@ def predict_races_by_date(
     race_date: date,
     experiment_id: int,
     track_code: str | None = None,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1),
     only_scheduled: bool = Query(
         default=True,
         description="If true, only predict races with status='scheduled' (skip resulted)",
@@ -1111,7 +1118,7 @@ def predict_races_by_date(
 @router.get("/upcoming")
 def get_upcoming_predictions(
     experiment_id: int,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1),
     db: Session = Depends(get_db),
 ):
     """Get or generate predictions for all scheduled (upcoming) races."""
@@ -1134,7 +1141,7 @@ def predict_race_ensemble(
     race_id: int,
     experiment_ids: str = Query(..., description="Comma-separated experiment IDs"),
     weights: str | None = Query(default=None, description="Comma-separated weights (must match experiment_ids)"),
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1),
     db: Session = Depends(get_db),
 ):
     """Generate ensemble predictions by combining multiple trained models."""
@@ -1170,7 +1177,7 @@ def predict_race_ensemble(
 def get_best_bets(
     experiment_id: int,
     race_date: date,
-    bankroll: float = Query(default=100.0, ge=1),
+    bankroll: float | None = Query(default=None, ge=1),
     min_confidence: str = Query(default="moderate", description="Minimum confidence tier: strong, moderate, weak"),
     min_edge: float = Query(default=0.05, description="Minimum edge over market odds"),
     limit: int = Query(default=10, le=50),
@@ -1248,11 +1255,34 @@ def get_best_bets(
     all_value_bets.sort(key=lambda b: b["edge"], reverse=True)
     best_bets = all_value_bets[:limit]
 
+    # Portfolio cap: the old endpoint could recommend up to 50 bets each
+    # sized at up to 5% of the SAME bankroll — 250% total exposure. Scale
+    # the day's stakes so their sum never exceeds the configured share of
+    # the bankroll.
+    from dataclasses import replace as _replace
+
+    from ml.staking import StakingConfig, allocate_daily
+
+    staking_cfg = StakingConfig.from_db(db)
+    if bankroll is not None:
+        staking_cfg = _replace(staking_cfg, bankroll=bankroll)
+    for b in best_bets:
+        b["stake"] = b.get("kelly_stake")
+    best_bets = allocate_daily(best_bets, staking_cfg)
+    for b in best_bets:
+        b["kelly_stake"] = b.pop("stake", b.get("kelly_stake"))
+
     return {
         "race_date": str(race_date),
         "experiment_id": experiment_id,
         "races_scanned": races_scanned,
         "total_value_bets": len(all_value_bets),
+        "total_recommended_stake": round(
+            sum(b.get("kelly_stake") or 0 for b in best_bets), 2,
+        ),
+        "daily_exposure_cap": round(
+            staking_cfg.bankroll * staking_cfg.max_daily_exposure_pct, 2,
+        ),
         "best_bets": best_bets,
     }
 

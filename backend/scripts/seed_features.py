@@ -188,7 +188,7 @@ PRESET_FEATURES = [
     {
         "name": "current_race_sp",
         "display_name": "Current Race Starting Price",
-        "description": "The starting price (decimal odds) for this specific race. The single strongest predictor of race outcomes — represents the market's collective assessment of each dog's chances.",
+        "description": "POST-RACE ONLY: the starting price (decimal odds) for this specific race, which GRI publishes with the results. Automatically excluded from pre-race models by the leakage guard — including it trains on the closing market price and produces backtests that cannot be reproduced on a live card. Diagnostics only.",
         "feature_type": "code",
         "code": """def compute(dog_history, race_context):
     sp = race_context.get('sp_decimal')

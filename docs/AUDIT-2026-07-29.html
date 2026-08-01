@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Greyhound Predictor — Audit &amp; Profit Plan</title>
+</head><body>
+<style>
+  :root {
+    --bg: #F6F7F4;
+    --surface: #FFFFFF;
+    --surface-2: #EFF1EC;
+    --ink: #1B201B;
+    --muted: #59625A;
+    --line: #DDE1D9;
+    --accent: #1E6B45;
+    --accent-soft: #E3EFE8;
+    --money: #8A6100;
+    --crit: #B3261E;
+    --crit-bg: #F9E9E8;
+    --high: #B4500F;
+    --high-bg: #F9EEE5;
+    --med: #8A6D00;
+    --med-bg: #F6F0DC;
+    --low: #5A635A;
+    --low-bg: #ECEEEA;
+    --good: #1E6B45;
+    --good-bg: #E3EFE8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141714;
+      --surface: #1C201C;
+      --surface-2: #232823;
+      --ink: #E7EAE4;
+      --muted: #9CA59B;
+      --line: #2C322C;
+      --accent: #6FBF95;
+      --accent-soft: #1E2B24;
+      --money: #D9A93F;
+      --crit: #F2917F;
+      --crit-bg: #35201D;
+      --high: #EFA36B;
+      --high-bg: #33251B;
+      --med: #D9C25E;
+      --med-bg: #2E2A1A;
+      --low: #A9B2A8;
+      --low-bg: #242824;
+      --good: #6FBF95;
+      --good-bg: #1E2B24;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #141714; --surface: #1C201C; --surface-2: #232823; --ink: #E7EAE4;
+    --muted: #9CA59B; --line: #2C322C; --accent: #6FBF95; --accent-soft: #1E2B24;
+    --money: #D9A93F; --crit: #F2917F; --crit-bg: #35201D; --high: #EFA36B; --high-bg: #33251B;
+    --med: #D9C25E; --med-bg: #2E2A1A; --low: #A9B2A8; --low-bg: #242824;
+    --good: #6FBF95; --good-bg: #1E2B24;
+  }
+  :root[data-theme="light"] {
+    --bg: #F6F7F4; --surface: #FFFFFF; --surface-2: #EFF1EC; --ink: #1B201B;
+    --muted: #59625A; --line: #DDE1D9; --accent: #1E6B45; --accent-soft: #E3EFE8;
+    --money: #8A6100; --crit: #B3261E; --crit-bg: #F9E9E8; --high: #B4500F; --high-bg: #F9EEE5;
+    --med: #8A6D00; --med-bg: #F6F0DC; --low: #5A635A; --low-bg: #ECEEEA;
+    --good: #1E6B45; --good-bg: #E3EFE8;
+  }
+
+  html { background: var(--bg); }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.62;
+    margin: 0;
+  }
+  .wrap { max-width: 62rem; margin: 0 auto; padding: 2.5rem 1.25rem 5rem; }
+  .prose { max-width: 72ch; }
+
+  h1, h2, h3 { font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif; text-wrap: balance; line-height: 1.2; }
+  h1 { font-size: 2.3rem; margin: 0.4rem 0 0.6rem; font-weight: 600; }
+  h2 { font-size: 1.55rem; margin: 0 0 0.8rem; font-weight: 600; }
+  h3 { font-size: 1.15rem; margin: 1.6rem 0 0.5rem; font-weight: 600; }
+  p { margin: 0.7rem 0; }
+  section { margin-top: 3.2rem; }
+
+  .eyebrow {
+    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 0.4rem;
+  }
+  .masthead { border-bottom: 3px solid var(--accent); padding-bottom: 1.6rem; }
+  .masthead .meta { color: var(--muted); font-size: 0.9rem; margin-top: 0.4rem; }
+
+  .verdict {
+    background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+    border-radius: 6px; padding: 1.1rem 1.4rem; margin-top: 1.6rem;
+  }
+  .verdict p { margin: 0.5rem 0; }
+  .verdict strong { color: var(--accent); }
+
+  .toc { display: flex; flex-wrap: wrap; gap: 0.5rem 1.4rem; margin-top: 1.4rem; padding: 0; list-style: none; font-size: 0.9rem; }
+  .toc a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; }
+  .toc a:hover, .toc a:focus-visible { border-bottom-color: var(--accent); }
+  a { color: var(--accent); }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  code, .ref {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.82em;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.08em 0.35em;
+    white-space: nowrap;
+  }
+  .num { font-variant-numeric: tabular-nums; }
+
+  .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.55rem 0.8rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  thead th { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); background: var(--surface-2); }
+  tbody tr:last-child td { border-bottom: none; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .chip {
+    display: inline-block; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.06em;
+    text-transform: uppercase; border-radius: 999px; padding: 0.12rem 0.6rem; white-space: nowrap;
+  }
+  .chip.crit { color: var(--crit); background: var(--crit-bg); }
+  .chip.high { color: var(--high); background: var(--high-bg); }
+  .chip.med  { color: var(--med);  background: var(--med-bg); }
+  .chip.low  { color: var(--low);  background: var(--low-bg); }
+  .chip.good { color: var(--good); background: var(--good-bg); }
+
+  .finding {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+    padding: 0.9rem 1.1rem; margin: 0.8rem 0; border-left-width: 4px;
+  }
+  .finding.crit { border-left-color: var(--crit); }
+  .finding.high { border-left-color: var(--high); }
+  .finding.med  { border-left-color: var(--med); }
+  .finding.low  { border-left-color: var(--low); }
+  .finding .head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+  .finding .head strong { font-size: 1rem; }
+  .finding p { margin: 0.45rem 0 0; font-size: 0.93rem; }
+  .finding .refs { margin-top: 0.45rem; display: flex; flex-wrap: wrap; gap: 0.35rem; }
+
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin: 1rem 0; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 1rem 1.2rem; }
+  .card h3 { margin-top: 0; }
+  .card ul { margin: 0.4rem 0 0; padding-left: 1.1rem; font-size: 0.92rem; }
+  .card li { margin: 0.3rem 0; }
+
+  ul.tight { padding-left: 1.2rem; }
+  ul.tight li { margin: 0.35rem 0; }
+  ol.tight { padding-left: 1.3rem; }
+  ol.tight li { margin: 0.45rem 0; }
+
+  details { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 0.7rem 1.1rem; margin: 0.7rem 0; }
+  summary { cursor: pointer; font-weight: 600; }
+  summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  details[open] summary { margin-bottom: 0.5rem; }
+  details ul { font-size: 0.92rem; }
+
+  .phase { display: flex; gap: 1rem; margin: 1rem 0; }
+  .phase .marker {
+    flex: 0 0 auto; width: 2.1rem; height: 2.1rem; border-radius: 50%;
+    background: var(--accent-soft); color: var(--accent); font-weight: 700;
+    display: flex; align-items: center; justify-content: center; font-size: 0.9rem;
+    font-variant-numeric: tabular-nums; margin-top: 0.2rem;
+  }
+  .phase .body { flex: 1; min-width: 0; }
+  .phase h3 { margin: 0 0 0.3rem; }
+  .phase .when { color: var(--muted); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; }
+
+  .callout { background: var(--accent-soft); border-radius: 6px; padding: 0.9rem 1.2rem; margin: 1rem 0; font-size: 0.95rem; }
+  .callout.warn { background: var(--med-bg); }
+  .money { color: var(--money); font-weight: 600; }
+
+  .asklist { counter-reset: ask; list-style: none; padding: 0; }
+  .asklist > li {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+    padding: 0.85rem 1.1rem 0.85rem 3.1rem; margin: 0.7rem 0; position: relative;
+  }
+  .asklist > li::before {
+    counter-increment: ask; content: counter(ask);
+    position: absolute; left: 0.9rem; top: 0.9rem;
+    width: 1.5rem; height: 1.5rem; border-radius: 50%;
+    background: var(--accent); color: var(--bg); font-size: 0.8rem; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    details { transition: background 0.15s ease; }
+  }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">Internal audit · Irish greyhound racing</p>
+  <h1>Greyhound Predictor: full audit &amp; profit plan</h1>
+  <p class="meta">Prepared 29 July 2026 · repo <span class="ref">BigBobbo/2026_greyhounds</span> @ <span class="ref">6f8d8a9</span> · 90 commits, 47 PRs, dormant since 4 May 2026 · audited by 4 code agents + 2 research agents, verified against the live GRI site</p>
+
+  <div class="verdict prose">
+    <p><strong>Verdict: keep the platform, fix the model core, build the missing market layer. A rewrite is not warranted.</strong></p>
+    <p>The skeleton is genuinely good — the scraper targets URL patterns I verified live today, the schema is sensible, the feature library is extensive, and recent work (NaN passthrough, post-race guards, Plackett–Luce ordering) is directionally right. But the app <em>cannot make money as it stands</em>, for three reasons: <strong>(1)</strong> data leakage means every trained model and every backtest number produced so far is invalid-optimistic; <strong>(2)</strong> the system never sees a market price before a race — its Kelly staking engine is literally inert on upcoming races and its "value bets" are computed against post-race prices nobody can obtain; <strong>(3)</strong> the staking/settlement layer has outright bugs (a "Lost" button that can settle place bets as winners; up to 250% of bankroll recommended across one card).</p>
+    <p>The fix list is surgical, not architectural: ~15 targeted repairs plus one genuinely new subsystem (a pre-race odds + market-blending + bet-sheet layer). All of it fits in the days before and during the 7-day evaluation.</p>
+  </div>
+
+  <ul class="toc">
+    <li><a href="#update">Update: results</a></li>
+    <li><a href="#scorecard">Scorecard</a></li>
+    <li><a href="#how">How it works today</a></li>
+    <li><a href="#findings">Findings</a></li>
+    <li><a href="#research">Research: data &amp; strategy</a></li>
+    <li><a href="#plan">The plan</a></li>
+    <li><a href="#week">The €100 week</a></li>
+    <li><a href="#asks">Decisions I need</a></li>
+    <li><a href="#appendix">Appendix</a></li>
+  </ul>
+</header>
+
+
+<section id="update">
+  <p class="eyebrow">Update &middot; 1 August 2026</p>
+  <h2>Remediation &amp; the first honest results</h2>
+  <div class="verdict prose">
+    <p><strong>Every finding in this audit that could be fixed has been fixed, the dataset has been rebuilt and enriched, and the first honest evaluation is in: the model-plus-market blend shows a large, confidence-bounded edge against historical prices.</strong></p>
+    <p>Headline numbers from the definitive retrain (test window 28 Mar &ndash; 29 Jul 2026, 5,192 races, 205 leakage-safe features, executed at SP&nbsp;&minus;5% slippage with 5% commission): <strong>blended Kelly ROI +50.8%</strong> (90% CI +43.7 to +59.0, 1,052 races), <strong>blended value bets +35.3%</strong> (CI +27.6 to +44.4, 865 bets), against an SP-favourite baseline of &minus;12.8%. Model log-loss 0.420 / AUC 0.687, improving to 0.405 / 0.727 with the market blend; calibration slope 0.95. The blend weights the market above the raw model (&alpha;=0.71, &beta;=1.12) &mdash; exactly the Benter architecture this audit prescribed.</p>
+    <p><strong>The honest caveat:</strong> bet selection still references the closing SP &mdash; the one number a live bettor never has in advance. The slippage haircut prices some of that away, but only the paper-trading week measures how much of this backtest edge is realisable at pre-race prices. These numbers are a green light for the €100 week, not a bank statement.</p>
+  </div>
+
+  <h3>Remediation scorecard</h3>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Subsystem</th><th>Was</th><th>Now</th><th>What changed</th></tr></thead>
+      <tbody>
+        <tr><td>Dataset / training</td><td><span class="chip crit">Broken</span></td><td><span class="chip good">Fixed</span></td><td>Point-in-time aggregates (regression-tested on a rate-flip dataset), walk-forward CV order-proofed, leakage-guard escapees closed, calibrated Optuna selection, CI-lower-bound autoresearch, final refit on train+val.</td></tr>
+        <tr><td>Probabilities served</td><td><span class="chip crit">Broken</span></td><td><span class="chip good">Fixed</span></td><td>Per-race renormalisation after Platt everywhere, serve/backtest parity.</td></tr>
+        <tr><td>Staking &amp; bankroll</td><td><span class="chip crit">Broken</span></td><td><span class="chip good">Fixed</span></td><td>One canonical config-driven module: commission-aware Kelly, simultaneous per-race solve, min-odds floor, completeness downweight, day-level exposure cap, ledger-driven bankroll. Settlement rebuilt (Lost-button bug, place terms, voids, auto-reconcile from results).</td></tr>
+        <tr><td>GRI scraper</td><td><span class="chip med">Fix</span></td><td><span class="chip good">Fixed</span></td><td>Wrong-dog reassignment on re-scrape, namesake splitting, corrections accepted, close-finish margins parsed, retries + honest scrape logs, Dublin-timezone crons, nightly 14-day amendment window.</td></tr>
+        <tr><td>Evaluation</td><td><span class="chip high">Misleading</span></td><td><span class="chip good">Fixed</span></td><td>Execution-price haircut + commission + min-odds in every strategy; race-level bootstrap CIs on every ROI; base-rate and calibration-slope diagnostics.</td></tr>
+        <tr><td>Odds / market data</td><td><span class="chip crit">Missing</span></td><td><span class="chip med">Ready</span></td><td>Benter blend built and validated; exchange odds capture written, tested and scheduled &mdash; dormant until the Betfair app key exists. Historical market signal: stored SPs (87.6% of entries).</td></tr>
+        <tr><td>Data coverage</td><td><span class="chip high">Gaps</span></td><td><span class="chip good">Enriched</span></td><td>36,441 dog profiles scraped (0 failures): sectionals on 99.7% of 518,695 runs, running positions 92%, trainers &amp; birth dates ~99.5% (from ~0%). Plus daily weather for every track race-day 2015&ndash;2026, dam-line/sibling pedigree features, trainer form windows.</td></tr>
+        <tr><td>Ops / deployment</td><td><span class="chip high">Fragile</span></td><td><span class="chip good">Fixed</span></td><td>HTTPS backup endpoint, real health check, fail-fast migrations, CI on every push, 126 passing tests.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>What the retrain said about the new signals</h3>
+  <p class="prose">The audit's enrichment bets paid off in the feature importances: <span class="ref">dam_progeny_win_rate</span> is the single strongest feature in the model, with <span class="ref">sire_progeny_win_rate_at_dist</span> and <span class="ref">dam_progeny_mean_time_at_dist</span> immediately behind &mdash; the lineage signal the owner asked about is real. Trainer form (<span class="ref">trainer_win_rate_at_track_365d</span>, <span class="ref">trainer_win_rate_30d</span>) and the scraped early-pace features (<span class="ref">led_at_bend1_rate_last10</span>, <span class="ref">early_speed_vs_field</span>) all reach the top fifteen.</p>
+
+  <h3>One research correction</h3>
+  <p class="prose"><strong>The free Betfair BSP archive contains no Irish greyhound data.</strong> Section 4's claim that daily BSP CSVs cover Irish tracks is wrong: ~7,600 archived day-files (2012&ndash;2024) were inventoried via the Internet Archive and contain UK, Australian and New Zealand tracks only. No download, from any country, can produce Irish BSP history. The market layer therefore uses stored SPs historically and live captured odds forward &mdash; which the now-built capture service provides the moment an app key exists.</p>
+
+  <h3>Still open</h3>
+  <p class="prose">Two items, both requiring the account holder in person: the Betfair account and its free delayed app key (activates live odds capture and the live blend), and the supervised €100 evaluation week itself, run off the daily min-odds-conditional bet sheets the platform now generates.</p>
+</section>
+
+<section id="scorecard">
+  <p class="eyebrow">Section 1</p>
+  <h2>Scorecard at a glance</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Subsystem</th><th>State</th><th>One-line assessment</th></tr></thead>
+      <tbody>
+        <tr><td>GRI scraper</td><td><span class="chip med">Fix</span></td><td>Right source, verified live; but no retries, silent failures, and a wrong-dog bug that corrupts results when reserves run.</td></tr>
+        <tr><td>Feature library</td><td><span class="chip good">Strong</span></td><td>~340 columns across 6 layers; per-dog history windows are temporally clean; ELO and head-to-head layers are well built.</td></tr>
+        <tr><td>Dataset / training</td><td><span class="chip crit">Broken</span></td><td>Future data contaminates population aggregates; walk-forward CV silently never runs; one seeded feature leaks the closing SP.</td></tr>
+        <tr><td>Probabilities served</td><td><span class="chip crit">Broken</span></td><td>Flagship LambdaRank probabilities don't sum to 1 per race, yet feed Kelly, confidence, and forecast/trio pricing.</td></tr>
+        <tr><td>Odds / market data</td><td><span class="chip crit">Missing</span></td><td>Zero pre-race prices. Betfair config is a stub; <code>odds_snapshots</code> has no writer; Kelly returns "no_odds" on every upcoming race.</td></tr>
+        <tr><td>Staking &amp; bankroll</td><td><span class="chip crit">Broken</span></td><td>5 divergent Kelly implementations, dead config, no de-vig, no commission, settlement bugs, no exposure caps.</td></tr>
+        <tr><td>Evaluation</td><td><span class="chip high">Misleading</span></td><td>Backtests bet at unattainable post-race SP; autoresearch selects on the test set; no confidence intervals (±5pp noise on ROI).</td></tr>
+        <tr><td>Frontend</td><td><span class="chip good">Adequate</span></td><td>Works; one 1,554-line monolith page; cosmetic drift only.</td></tr>
+        <tr><td>Ops / deployment</td><td><span class="chip high">Fragile</span></td><td>All state on one un-backed-up Railway volume; scheduler loses jobs on restart; health check checks nothing; no CI.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="how" class="prose">
+  <p class="eyebrow">Section 2</p>
+  <h2>How the app works today</h2>
+  <p>A FastAPI backend (SQLite, 13 tables, 79 endpoints) scrapes <a href="https://www.grireland.ie">grireland.ie</a> results and race cards with httpx + BeautifulSoup. A feature store materializes 46 user-configurable features per dog per race; five more built-in layers (race context, ELO, head-to-head, pace shape, ~180 race-relative columns) are computed at train and predict time. Four trainers (XGBoost, LightGBM, LambdaRank, sklearn) with Optuna tuning produce Platt-calibrated win probabilities; a Monte-Carlo Plackett–Luce layer with Henery discounting derives place/forecast/trio probabilities; a quarter-Kelly staking function produces bet recommendations; a React frontend drives everything manually, plus two cron jobs scrape results nightly and per-model schedules can predict upcoming cards each morning.</p>
+  <p>Operationally: production runs on Railway with the database and model artifacts on a persistent volume — <strong>neither exists in this repo, and there is no backup or export path</strong>. Development stopped 4 May 2026, so the production data and models are ~3 months stale. The betting ledger has no way to place a bet from the UI, and settlement is a manual per-bet click that never consults the scraped results.</p>
+  <p>What deserves credit: the two prior in-repo audits (<span class="ref">PREDICTION_FEATURE_AUDIT.md</span>, <span class="ref">FEATURE_SUGGESTIONS.md</span>) correctly diagnosed the train/serve gap on post-race features and shipped real fixes (hard guards, NaN passthrough for GBMs, per-entry data-completeness scores). The failure mode is that those fixes were name-list based and stopped one layer short of the root causes below.</p>
+</section>
+
+<section id="findings">
+  <p class="eyebrow">Section 3</p>
+  <h2>Findings</h2>
+  <p class="prose">Six agents produced ~100 distinct findings. Below are the ones that block profit, grouped by theme and ordered by how directly they cost money. The long tail is in the <a href="#appendix">appendix</a>.</p>
+
+  <h3>A · Model correctness — every past backtest number is invalid</h3>
+
+  <div class="finding crit">
+    <div class="head"><span class="chip crit">Critical</span><strong>Population aggregates are computed over all time — including the future</strong></div>
+    <p>Trap win rates, trainer stats, sire stats, and — worst — the speed-figure normalization baselines are built from the <em>entire</em> table with no date filter, so every historical speed figure is normalized against races that hadn't happened yet, including the target race itself. This inflates cross-validation, and at predict time the same tables are rebuilt over a different population, adding train/serve drift on top. Six speed-figure features plus ~15 race-relative derivatives inherit the contamination.</p>
+    <div class="refs"><span class="ref">race_features.py:610-860</span></div>
+  </div>
+
+  <div class="finding crit">
+    <div class="head"><span class="chip crit">Critical</span><strong>Walk-forward CV — the main anti-leakage control — silently never runs</strong></div>
+    <p>Training rows are materialized newest-first (<code>ORDER BY race_date DESC</code>) and never re-sorted, but the fold generator documents that it requires ascending order. Fed descending data, its embargo check is true for every fold, every fold is skipped, and training silently falls back to a single split. Optuna's "walk-forward" model selection has therefore never actually walked forward. The same unsorted order means LambdaRank's race groups rest on incidental SQLite row order.</p>
+    <div class="refs"><span class="ref">dataset_builder.py:106-125</span> <span class="ref">dataset_builder.py:505-539</span> <span class="ref">training_service.py:584-590</span></div>
+  </div>
+
+  <div class="finding crit">
+    <div class="head"><span class="chip crit">Critical</span><strong>A seeded feature leaks the closing market price past the leakage guard</strong></div>
+    <p>The post-race guard is a hard-coded list of feature <em>names</em>. The user-selectable code feature <code>current_race_sp</code> reads the current race's SP — published only after the race — and is not on the list. Any experiment that includes it trains on the closing market price, produces a spectacular backtest, passes the strict guard, and gets NaN at serve time. Two more escapees: <code>weight_pct_of_career_avg</code> (on-the-night weigh-in) and <code>trap_bias_deviation_going</code> (post-race going).</p>
+    <div class="refs"><span class="ref">seed_features.py:188-200</span> <span class="ref">race_features.py:1690-1698</span> <span class="ref">feature_availability.py:25-50</span></div>
+  </div>
+
+  <div class="finding crit">
+    <div class="head"><span class="chip crit">Critical</span><strong>Served probabilities don't sum to 1 per race — and feed Kelly anyway</strong></div>
+    <p>The LambdaRank path deliberately skips re-normalization after Platt calibration, so per-race win probabilities can sum to 0.8 or 1.3. Those raw numbers go straight into edge computation, Kelly stakes, confidence scores, and the Plackett–Luce combo layer (which then silently renormalizes — so the win column and the forecast/trio columns on the same screen are on different scales). Pointwise models <em>are</em> normalized at serve but <em>not</em> in the backtest, so the backtested edge is not the edge you bet. Any systematic scale error maps directly into wrong stake sizes.</p>
+    <div class="refs"><span class="ref">lambdarank_trainer.py:231-235</span> <span class="ref">prediction_service.py:590-599</span> <span class="ref">race_ordering.py:88</span></div>
+  </div>
+
+  <div class="finding high">
+    <div class="head"><span class="chip high">High</span><strong>Evaluation selects on noise and reports theater metrics</strong></div>
+    <p>The autoresearch loop picks "improvements" by test-set Kelly ROI across hundreds of trials — a maximum over noise (±5pp standard error on ~1,200 test races), with no confidence intervals anywhere. Optuna's betting objectives score <em>uncalibrated</em> probabilities while final metrics use calibrated ones. Headline "accuracy" is a 0.5-threshold binary accuracy on a 17% base rate (≈83% for predicting nobody wins). The final model is never refit on the most recent 15% of data — the races most like the ones we'll bet.</p>
+    <div class="refs"><span class="ref">autoresearch.py:269-387</span> <span class="ref">training_service.py:592-600</span> <span class="ref">evaluation.py:37-39</span></div>
+  </div>
+
+  <h3>B · Market blindness — the profit-critical gap</h3>
+
+  <div class="finding crit">
+    <div class="head"><span class="chip crit">Critical</span><strong>No pre-race odds exist anywhere in the system</strong></div>
+    <p>The only odds ever ingested are starting prices scraped from <em>results</em> pages after the race. On every upcoming race, <code>sp_decimal</code> is NULL and the Kelly engine returns <code>{"bet": false, "reason": "no_odds"}</code> — the staking engine is inert on exactly the races you'd bet. The Betfair integration is three unused config variables; the <code>odds_snapshots</code> table has a full read path, a UI toggle defaulted ON, and no writer. Manually entered odds aren't even persisted.</p>
+    <div class="refs"><span class="ref">prediction_service.py:314</span> <span class="ref">config.py:16-18</span> <span class="ref">app/models/odds.py</span></div>
+  </div>
+
+  <div class="finding crit">
+    <div class="head"><span class="chip crit">Critical</span><strong>Backtests bet at a price that cannot be obtained</strong></div>
+    <p>Every "value bet", every best-bets list, and the entire betting simulation use the final post-race SP as the assumed execution price. Betting at SP-known-in-advance is a fantasy; real edges at real prices are systematically smaller. No commission, no overround haircut, no minimum-odds or liquidity constraint is modeled anywhere.</p>
+    <div class="refs"><span class="ref">evaluation.py:121-284</span> <span class="ref">api/predictions.py:1169-1257</span></div>
+  </div>
+
+  <div class="finding high">
+    <div class="head"><span class="chip high">High</span><strong>No market blending — the one architecture research says separates winners from losers</strong></div>
+    <p>Nothing combines model probability with market probability. Benter's published result (and its modern replications) is blunt: raw model probabilities are biased <em>specifically on the bets the model wants to make</em>; the fix is a second-stage logit on (log model prob + log market implied prob), fitted out-of-sample. One replication reports 17.5% Kelly returns for the two-step vs 0.96% for the one-step on the same model. The model also trains with zero market features by default, yet is evaluated against the market — a structurally unprofitable setup.</p>
+    <div class="refs"><span class="ref">dataset_builder.py:681-758 (built, off)</span></div>
+  </div>
+
+  <h3>C · Staking &amp; settlement — bugs that lose money directly</h3>
+
+  <div class="finding crit">
+    <div class="head"><span class="chip crit">Critical</span><strong>The "Lost" button can settle place/show bets as winners</strong></div>
+    <p>The dashboard's Lost button posts <code>actual_position: 2</code>; the API treats position ≤ 2 as a <em>win</em> for place bets (≤ 3 for show). Clicking "Lost" on a place bet credits the bankroll. Also: a winning bet with NULL odds is booked as a loss; place bets pay full win odds (no place terms); combo bets can't be settled from the UI at all; and nothing ever reconciles the ledger against the scraped results sitting in the same database.</p>
+    <div class="refs"><span class="ref">BankrollDashboard.tsx:356</span> <span class="ref">api/bankroll.py:231-263</span></div>
+  </div>
+
+  <div class="finding high">
+    <div class="head"><span class="chip high">High</span><strong>Five divergent Kelly implementations; the configurable one is dead</strong></div>
+    <p>Serving, combos, backtest, and two frontend paths each hard-code their own fraction / edge-floor / cap (already drifted: min-edge 0.05 vs 0.02 vs 0.10). The <code>BankrollConfig</code> the UI edits is read by none of them. No de-vigging (edge is measured against the raw overround price — the de-vig code exists but is training-only), no commission, and stakes are sized off a query-param bankroll defaulting to 100 rather than the actual ledger balance.</p>
+    <div class="refs"><span class="ref">prediction_service.py:296-349</span> <span class="ref">race_ordering.py:365-417</span> <span class="ref">evaluation.py:205-231</span></div>
+  </div>
+
+  <div class="finding high">
+    <div class="head"><span class="chip high">High</span><strong>No portfolio thinking: up to 250% of bankroll recommended at once</strong></div>
+    <p>Kelly is computed per bet, independently — including for mutually exclusive outcomes in the same race (invalid; needs a simultaneous solve). Best-bets returns up to 50 recommendations each sized at up to 5% of the same bankroll. There is no per-race, per-day, or drawdown cap, and <code>data_completeness</code> — computed and documented as the Kelly downweight for thin-history dogs — is never used in staking.</p>
+    <div class="refs"><span class="ref">api/predictions.py:1169-1257</span> <span class="ref">prediction_service.py:474-481</span></div>
+  </div>
+
+  <h3>D · Data quality — silent corruption and dead columns</h3>
+
+  <div class="finding crit">
+    <div class="head"><span class="chip crit">Critical</span><strong>Results can be written to the wrong dog</strong></div>
+    <p>Entries are upserted by (race, trap), and the update path never touches <code>dog_id</code>. Standard workflow — card scraped days ahead, reserve dog substituted on the night — attaches the actual result (position, time, SP, comment) to the dog that <em>didn't run</em>, poisoning both the training label and both dogs' form history. Dogs are also matched by name alone with no unique constraint: greyhound names recur across generations, merging different dogs into one blended history.</p>
+    <div class="refs"><span class="ref">db_pipeline.py:193-214</span> <span class="ref">db_pipeline.py:65</span></div>
+  </div>
+
+  <div class="finding high">
+    <div class="head"><span class="chip high">High</span><strong>~17 features consume columns that nothing ever populates</strong></div>
+    <p><code>sectional_time</code>, <code>adjusted_time</code>, <code>wide_runner</code>, <code>going_allowance</code>, dog <code>birth_date</code>/<code>sex</code>: all have schema columns, features that read them, and no writer. Five seeded adjusted-time features are silently dropped as all-NaN while the UI reports them active. This matters because <strong>early pace is the single most predictive variable in greyhound racing</strong> — and GRI publishes it (see research: dog-profile pages carry sectionals, running positions, and seeding).</p>
+    <div class="refs"><span class="ref">race_entry.py:14-21</span> <span class="ref">feature_store.py:115-155</span></div>
+  </div>
+
+  <div class="finding high">
+    <div class="head"><span class="chip high">High</span><strong>Scraper failure is indistinguishable from "no racing today"</strong></div>
+    <p>No retries anywhere; any HTTP error or parse failure returns an empty list that callers treat as a legitimately quiet day, and the nightly cron then marks the scrape log "success" unconditionally. The race-header selector breaks (silently, site-wide) if GRI ever nests markup inside a header tag. First-run guards make bad data permanent: a corrected SP/weight/grade on re-scrape is rejected because a value already exists. Close finishes lose the most information: margins like SH/HD/NK parse to NULL and "1½" truncates to 1.0.</p>
+    <div class="refs"><span class="ref">gri_scraper.py:89, 327-333</span> <span class="ref">scheduler.py:62-71</span> <span class="ref">db_pipeline.py:199-210</span></div>
+  </div>
+
+  <h3>E · Operations — fragile but fixable</h3>
+
+  <div class="finding high">
+    <div class="head"><span class="chip high">High</span><strong>All state lives on one un-backed-up volume; automation silently dies</strong></div>
+    <p>Database + model artifacts exist only on the Railway volume — no dump script, no export, no backup. The in-memory scheduler loses any run that coincides with a restart/deploy, permanently and silently; the two built-in scrape crons run in UTC not Irish time (23:00 scrape fires at midnight Irish in summer, targeting the wrong date); the health check returns OK unconditionally; failed migrations don't stop boot; there is no CI, and zero tests cover the 79 API endpoints or the 1,192-line prediction service.</p>
+    <div class="refs"><span class="ref">scheduler.py:216-229</span> <span class="ref">main.py:61-63</span> <span class="ref">start.py:24-31</span></div>
+  </div>
+</section>
+
+<section id="research">
+  <p class="eyebrow">Section 4</p>
+  <h2>Research: what's available online, and what the evidence says</h2>
+
+  <h3>Data sources (verified live this week)</h3>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Source</th><th>What it has</th><th>Access from here</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>GRI results/cards</strong><br><span class="ref">grireland.ie</span></td>
+          <td>Results with SP for every runner (years of history), cards 2–5 days ahead, form pages. Already scraped.</td>
+          <td><span class="chip good">Works</span></td>
+        </tr>
+        <tr>
+          <td><strong>GRI dog-profile pages</strong> <span class="chip good">Key find</span></td>
+          <td>Per-run <strong>sectional times</strong>, <strong>running positions at each call</strong>, <strong>seeding (M/W/R)</strong>, whelp date, trainer/owner, trials, runner grade — everything the DB's dead columns need.</td>
+          <td><span class="chip good">Works</span></td>
+        </tr>
+        <tr>
+          <td><strong>Betfair BSP daily CSVs</strong><br><span class="ref">promo.betfair.com/betfairsp</span></td>
+          <td>Win + place files since 2008, UK+IE+AU combined; BSP, pre-off traded prices/volumes per runner. The historical-odds backbone for honest backtesting.</td>
+          <td><span class="chip med">Geo-blocked (US IP)</span> — Kaggle mirror, or EU egress</td>
+        </tr>
+        <tr>
+          <td><strong>Betfair Exchange API</strong></td>
+          <td>Live win/place markets on Irish greyhounds (eventTypeId 4339, country IE). The only programmatic live-odds source. Liquidity concentrates on Shelbourne Park and SIS-televised meetings, mostly in the final minutes.</td>
+          <td><span class="chip med">Needs account + non-US IP</span></td>
+        </tr>
+        <tr>
+          <td><strong>Barking Buzz</strong> (GRI online tote)</td>
+          <td>Online tote win/place/forecast/trio on Irish races — the online channel for exotic bets. Pools are small (≈€1,500/race average).</td>
+          <td><span class="chip med">JS app; bettable by you</span></td>
+        </tr>
+        <tr>
+          <td><strong>Fixed-odds books</strong> (BoyleSports, Paddy Power, bet365…)</td>
+          <td>Win/EW/forecast/tricast on SIS-covered Irish meetings.</td>
+          <td><span class="chip med">Bot-blocked to scripts; bettable by you</span></td>
+        </tr>
+        <tr>
+          <td>Timeform / Sporting Life / GBGB API / Racing API</td>
+          <td>UK-only or horses-only — <strong>none cover Irish greyhounds</strong>.</td>
+          <td><span class="chip low">Not useful</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="prose">Scale of the opportunity: Ireland runs ~27 meetings and <strong>~280 races per week</strong> across ~20 tracks (busiest: Friday with 8 meetings; Shelbourne Park races Thu/Fri/Sat). Cards publish 2–5 days ahead.</p>
+
+  <h3>Strategy evidence</h3>
+  <div class="grid2">
+    <div class="card">
+      <h3>Channel economics decide everything</h3>
+      <ul>
+        <li>Retail bookmaker win books: <strong>~120–130% overround</strong> — needs a &gt;20% edge to break even.</li>
+        <li>Betfair exchange: ~101% book + 2–5% commission — <strong>the only channel where a realistic 2–10% model edge survives</strong>.</li>
+        <li>Tote Ireland takeout: ~20% win, ~25% place, ~30% exotics — beatable only with a large edge, but tiny stakes don't move the pool, which is a €100 bettor's one structural advantage.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>The Benter blend is non-negotiable</h3>
+      <ul>
+        <li>Model probabilities are biased precisely on the bets the model likes; blending log(model prob) with log(market prob) in a second-stage logit, fitted out-of-sample, corrects it.</li>
+        <li>Published replication: <strong>17.5% Kelly return two-step vs 1.0% one-step</strong>, same underlying model.</li>
+        <li>The right test of our model isn't accuracy — it's whether it adds pseudo-R² <em>on top of</em> the market (Benter's ΔR² test).</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Greyhound-market specifics</h3>
+      <ul>
+        <li>BSP is near-efficient: backing every favourite loses ≈ the commission (−0.9% over 950k races). Naive strategies all lose.</li>
+        <li>Favorite-longshot bias runs in <strong>reverse</strong> in dog pari-mutuel markets (favourites overbet) — don't import horse-racing priors.</li>
+        <li>Early pace / sectional to the first bend is the most predictive single variable; trap bias is real but track-specific and interacts with seeding.</li>
+        <li>Exotics carry more edge per unit of model quality (Benter: two slightly-negative-EV dogs can combine into a +16% EV forecast), but Irish pools are small and takeout is ~30%.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Kelly with €100</h3>
+      <ul>
+        <li>Quarter-Kelly or less for an unvalidated model — overestimating edge 2× makes full Kelly growth-negative.</li>
+        <li>Betfair minimum €2 back stake (or €10-payout rule) means only the largest edges are bettable at this bankroll — which aligns with the standard advice anyway (bet rarely, only big edges).</li>
+        <li>Realistic ceiling for a good blended model on exchange: <strong>2–8% ROI on turnover</strong>. Anyone promising more over 7 days is describing variance.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="plan">
+  <p class="eyebrow">Section 5</p>
+  <h2>The plan</h2>
+  <p class="prose">Sequenced so that every day of the evaluation window has the best system available that day. Phases 0–2 are the pre-flight repairs; Phase 3 is the new subsystem; Phase 4 is the daily race-day loop. I can start Phase 0 immediately on approval.</p>
+
+  <div class="phase">
+    <div class="marker">0</div>
+    <div class="body">
+      <h3>Rebuild the data foundation <span class="when">· day 1 · runs unattended</span></h3>
+      <p class="prose">Stand the backend up in this environment and re-scrape GRI from scratch: ~2 years of results across all tracks (~16k requests, ~5h at a polite 1/s), then a <strong>new dog-profile scraper</strong> to fill the dead columns — sectionals, running positions, seeding, whelp date — for every dog seen. Fix the scraper's corruption bugs first (wrong-dog upsert, permanent-first-write guards, margin parsing, retries with backoff). A fresh scrape is honestly <em>cleaner</em> than the production DB, which has been accumulating the wrong-dog bug for months; if you can export the Railway volume I'll use it for cross-validation of the scrape rather than as the primary source.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="marker">1</div>
+    <div class="body">
+      <h3>Fix model correctness, retrain, measure honestly <span class="when">· day 1–2</span></h3>
+      <p class="prose">Sort chronologically and assert race-group integrity; make every population aggregate as-of-date; delete the three leaking features; renormalize probabilities per race after calibration (one softmax, one place, used everywhere); refit final models on train+val; run <em>real</em> walk-forward evaluation with bootstrap confidence intervals; report log-loss vs the SP-implied market baseline (the ΔR² test) as the headline metric instead of accuracy. This tells us — before risking a euro — whether the model genuinely knows anything the market doesn't.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="marker">2</div>
+    <div class="body">
+      <h3>Build the market layer <span class="when">· day 2–3</span></h3>
+      <p class="prose">Historical: join Betfair BSP files (Kaggle mirror, or EU egress if available) for realistic execution prices; enable SP features for training (they're legitimate historical inputs). Live: a pre-race odds path — fast manual entry against the day's card at minimum, Playwright-scraped or Betfair-API prices if access allows — persisted to <code>odds_snapshots</code> at last. Then the <strong>Benter two-stage blend</strong> fitted on held-out races, and a rebuilt backtest that bets at obtainable prices minus commission/takeout, walk-forward, with confidence intervals.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="marker">3</div>
+    <div class="body">
+      <h3>Strategy generator + honest ledger <span class="when">· day 3</span></h3>
+      <p class="prose">One Kelly implementation, reading the real config and the real bankroll, with de-vig, commission, a simultaneous solve for same-race candidates, and hard caps (per-bet, per-race, per-day, drawdown stop). Output: a <strong>daily bet sheet</strong> where every recommendation is odds-conditional — "back Dog X to win if you can get ≥ 3.2" — because that's robust to us not having a live feed at the moment the bet is placed, and executable by your father in seconds from a betting app. Forecast/trio prices from the Henery layer with exponents fitted to Irish data. Auto-settlement from scraped results; append-only prediction log so the evaluation is tamper-proof; fix the settlement bugs.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="marker">4</div>
+    <div class="body">
+      <h3>The live week <span class="when">· each race day</span></h3>
+      <p class="prose"><strong>Morning:</strong> scrape today's cards + latest dog form, predict, blend against whatever prices are obtainable, publish the day's bet sheet with stakes. <strong>Evening:</strong> scrape results, auto-settle, update the bankroll and a running evaluation page. <strong>Continuously:</strong> every prediction logged before the off, every result reconciled after — so at the end of 7 days the P&amp;L is auditable end-to-end.</p>
+    </div>
+  </div>
+</section>
+
+<section id="week" class="prose">
+  <p class="eyebrow">Section 6</p>
+  <h2>The €100 week: proposed betting policy</h2>
+  <p>Division of labour: the system (and I) produce a daily bet sheet; <strong>your father executes it from Ireland</strong>. That drives the design — every recommendation must be self-contained and checkable in seconds by someone standing at a betting app, not a terminal: dog name, track, race time, bet type, stake in euro, and a minimum acceptable price ("back Swift Sydney, Shelbourne 20:14, WIN €4 — only if odds ≥ 3.2"). His being in Ireland also means Betfair, Barking Buzz, and all Irish books are accessible for execution regardless of the geo-blocks this server sees. The policy itself, to be finalized after Phase 2's backtest:</p>
+  <ul class="tight">
+    <li><strong>Channel order of preference:</strong> Betfair exchange (if you have an account) → fixed-odds books at published early prices → Barking Buzz tote for exotics. The required edge roughly doubles at each step right.</li>
+    <li><strong>Bet types:</strong> primarily <strong>win singles</strong> in the 2.5–8.0 price band (where the model has the most room and dog markets overbet favourites); <strong>selective forecasts/trios</strong> only where the blended edge is large enough to clear ~30% tote takeout — evidence says exotics are where model edge concentrates, and €1–2 stakes don't dilute small pools.</li>
+    <li><strong>Staking:</strong> quarter-Kelly on the <em>blended</em> probability, €2 minimum / €5 initial maximum per bet, at most 2 bets per race after a simultaneous solve, daily exposure cap 25% of current bankroll, hard stop for the day at −20%.</li>
+    <li><strong>Cadence:</strong> roughly 3–8 bets/day across ~40 daily races, concentrated on meetings with the best price availability (Shelbourne Thu–Sat, Friday's 8-meeting card). No bet is ever forced — a day with no qualifying edge is a €0 day, and that's the system working.</li>
+    <li><strong>Honesty clause:</strong> with €100 over one week, variance dominates any realistic edge — a genuinely +5% EV week still loses money ~45% of the time. The policy maximizes expected log-growth and auditability; it cannot promise a green week. What it can promise is that every bet had positive expected value at the price taken, with the reasoning logged before the off.</li>
+  </ul>
+</section>
+
+<section id="asks">
+  <p class="eyebrow">Section 7</p>
+  <h2>Decisions &amp; resources I need from you</h2>
+  <ol class="asklist">
+    <li><strong>Green light on the repair plan</strong> (Phases 0–3 above) — or tell me where you want a different call. Phase 0's ~5-hour scrape can start today and runs unattended.</li>
+    <li><strong>Betting channels:</strong> which does your father have accounts with — Betfair exchange? BoyleSports / Paddy Power / bet365? Barking Buzz? The bet sheets will target only channels he can execute, and exchange access would meaningfully improve the prices we can take.</li>
+    <li><strong>Betfair account / API key</strong> (optional but high value): if your father (or you) has a Betfair account, an app key plus any EU egress point (your Railway service, a €5 EU VPS, or even a script run from an Irish home connection) gets us live exchange odds programmatically and the full BSP history for backtesting. Without it, we run on GRI SP + prices read manually off the betting apps — workable, but blunter.</li>
+    <li><strong>Railway access</strong> (optional): a copy of <span class="ref">/app/data/greyhound.db</span> from the volume would let me cross-check the fresh scrape and salvage the existing experiment history. If it's easy, grab it; if not, the re-scrape covers us. Either way I'd add an automated backup after this week.</li>
+    <li><strong>Where the daily loop runs during the eval week:</strong> this environment (I drive it daily) vs. patched Railway deployment. I recommend here for the week — faster iteration, no deploy risk mid-evaluation — then promote to Railway after.</li>
+  </ol>
+</section>
+
+<section id="appendix">
+  <p class="eyebrow">Section 8</p>
+  <h2>Appendix: the long tail</h2>
+
+  <details>
+    <summary>Scraping — 20 further findings</summary>
+    <ul class="tight">
+      <li>Column misalignment risk: rows are parsed by negative index against an assumed 14-column table, but the guard only requires 10 cells — a 10–13-cell row mis-maps every field silently <span class="ref">gri_scraper.py:172,228-293</span>.</li>
+      <li><code>find_next()</code> lookups can cross race/row boundaries, attaching the wrong table or the wrong dam <span class="ref">gri_scraper.py:100-104,206,215</span>.</li>
+      <li><code>finish_time</code> is GRI's <em>estimated</em> time (winner time + margin conversion), stored with no flag <span class="ref">gri_scraper.py:259-263</span>.</li>
+      <li><code>win_time</code> parsed every row, never persisted; Tier-2 form scrape discards <code>owner_name</code> and <code>best_time</code> after fetching them <span class="ref">db_pipeline.py:216-232</span>.</li>
+      <li>Distance stored in a column named <code>distance_m</code> actually holds yards on Irish cards; seed data mixes units <span class="ref">gri_scraper.py:412</span>.</li>
+      <li>Race status is a one-way ratchet inferred from <code>any(finish_position)</code>; partial results flip a race to "resulted" prematurely; abandoned/void never represented <span class="ref">db_pipeline.py:123-142</span>.</li>
+      <li><code>num_runners</code> and <code>race_type</code> set only on insert, never refreshed <span class="ref">db_pipeline.py:140</span>.</li>
+      <li>Parse-failure writes <code>distance_m=0</code> into a NOT NULL column, corrupting distance-bucketed features <span class="ref">db_pipeline.py:135</span>.</li>
+      <li>Track "discovery" endpoint/CLI returns a frozen hard-coded dict — two independent track lists must be manually synced <span class="ref">gri_scraper.py:374-376</span>.</li>
+      <li>Per-entry MAX() aggregate query → ~10⁶ queries on a full backfill; CLI backfill opens a fresh TLS connection per day <span class="ref">db_pipeline.py:35-55</span>, <span class="ref">backfill.py:105</span>.</li>
+      <li>No scrape lock: cron + manual backfill + schedule job can hammer GRI concurrently; sleep constants hard-coded at 7 sites while <code>settings.scrape_delay</code> is read by nothing.</li>
+      <li>Unauthenticated GET <span class="ref">/scraping/test-scrape</span> writes to the database; all scraping endpoints unauthenticated with wildcard CORS.</li>
+      <li>Sire/dam casing differs by page (<code>.title()</code> vs raw), and first-write-wins makes the split permanent <span class="ref">gri_scraper.py:604-605</span>.</li>
+      <li>Locale-dependent <code>%b</code> in URL dates; header comment claims Playwright is used (it isn't); dead <code>scrape_date_range</code>; empty vestigial <code>spiders/</code> dir; docs reference a nonexistent track code.</li>
+      <li>Coverage-gap detection only fires on &gt;14-day gaps — single failed days and one consistently-failing track are invisible <span class="ref">data_integrity.py:28</span>.</li>
+      <li>Scheduled card scrapes create no ScrapeLog at all — invisible to every status view <span class="ref">schedule_service.py:48-105</span>.</li>
+      <li>Automated scrapes never set provenance (<code>scrape_log_id</code>) on rows they write.</li>
+      <li>Dropped entries (missing trap/name) still counted in "entries added" stats.</li>
+      <li>Heartbeat writes swallowed by bare <code>except: pass</code> — exactly what the stale-job reaper depends on <span class="ref">api/scraping.py:318-319</span>.</li>
+      <li>Prize money unparseable → stored as 0.0, conflating "unknown" with "no prize" <span class="ref">gri_scraper.py:121</span>.</li>
+    </ul>
+  </details>
+
+  <details>
+    <summary>ML pipeline — 12 further findings</summary>
+    <ul class="tight">
+      <li>Train/serve imputation-order asymmetry: at train, median-fill happens after race-relative derivation; at serve (median-fill path) before — different feature semantics for every sklearn/legacy artifact <span class="ref">prediction_service.py:507-516</span>.</li>
+      <li>SP-trained models backtested on resulted races silently get medians for all 11 SP columns (<code>_add_sp_features</code> never called at predict) <span class="ref">prediction_service.py</span>.</li>
+      <li><code>include_sp_features=True</code> is a silent no-op unless the post-race exclusion is also disabled — columns built, then dropped <span class="ref">dataset_builder.py:211-250</span>.</li>
+      <li>~340 columns vs ≤50k rows with no L1/L2 in the Optuna search and no early stopping; race-relative variants are near-collinear by construction.</li>
+      <li>Dataset silently capped at 50,000 entries (~8,000 races) by default <span class="ref">dataset_builder.py:103</span>.</li>
+      <li>Speed-figure "best at this track+distance" actually keys only on distance — any track counts <span class="ref">race_features.py:1275-1281</span>.</li>
+      <li>Henery exponents (0.81/0.65) are literature defaults never fitted to Irish data; no dead-heat/non-runner/Rule-4 handling in combo pricing <span class="ref">race_ordering.py:42-48</span>.</li>
+      <li>Combo selection bias: picking the best-looking of ~120 Monte-Carlo-estimated trio cells biases the chosen probability upward, straight into the edge test.</li>
+      <li>Calibration fitted on the same validation data Optuna selects on; final artifact calibrated on data older than everything it will predict.</li>
+      <li>Prediction history is mutable — the daily tracker re-predicts and overwrites earlier predictions in place, so "locked in before the race" doesn't hold <span class="ref">prediction_service.py:1017-1020</span>.</li>
+      <li>Backtest silently drops entries with no SP from the ROI denominator (survivorship) <span class="ref">evaluation.py:159</span>.</li>
+      <li>Five seeded adjusted-time features are all-NaN (loader never selects the column) and dropped, while the identically-named seeded trap feature is silently overridden by a different built-in <span class="ref">feature_store.py:115-155</span>.</li>
+    </ul>
+  </details>
+
+  <details>
+    <summary>Serving, bankroll &amp; ops — 12 further findings</summary>
+    <ul class="tight">
+      <li>Two contradictory "value" definitions in the same function (absolute 5pp edge vs relative 5%) — UI colors and staking disagree <span class="ref">prediction_service.py:320,756</span>.</li>
+      <li>Cached predictions ignore the bankroll parameter — displayed stakes can be sized to a weeks-old bankroll <span class="ref">api/predictions.py:308-315</span>.</li>
+      <li>Race-level confidence copied to every dog row; log-loss computed on un-normalized probabilities (not a proper scoring rule as applied).</li>
+      <li>No stake validation (bankroll can go negative); no transaction isolation on balance mutations; double-submit double-deducts.</li>
+      <li>Tote dividends fed into fixed-odds Kelly and settled at bet-time guesses; no tote/fixed discriminator in the schema.</li>
+      <li>No way to place a bet from the UI at all — the Kelly verdict and the ledger are disconnected.</li>
+      <li>Manually entered odds are discarded after computing Kelly (only a rounded implied prob survives) — guaranteeing <code>odds_snapshots</code> never self-populates.</li>
+      <li>CORS wildcard + credentials (invalid combo, and the configured origins are ignored) on an unauthenticated app that mutates a financial ledger <span class="ref">main.py:35-41</span>.</li>
+      <li>Health check returns OK unconditionally; failed migrations, dead scheduler, and missing scraping router all boot "healthy".</li>
+      <li>In-memory scheduler jobstore: any restart during a cron window silently skips that run forever; built-in crons run in UTC against Irish-time racing.</li>
+      <li><code>.env.example</code> points model artifacts outside the persistent volume — following it loses all models on redeploy <span class="ref">.env.example</span> vs <span class="ref">config.py:21</span>.</li>
+      <li>No CI; 79 tests cover pure ML functions only; zero coverage of the API, prediction service, training service, sandbox, or scraper. Version drifts across 4 files.</li>
+    </ul>
+  </details>
+
+  <p class="prose" style="color: var(--muted); font-size: 0.88rem;">Full agent reports (scraping, ML, serving/bankroll, infra, data-source research, strategy research) are available in the session and can be exported on request. Key external references: Benter (1994); Betfair Data Scientists' greyhound pipeline; Lyons (2016) MSc on Shelbourne Park data; BetAngel all-time BSP backtest; GRI 2024 annual report.</p>
+</section>
+
+</div>
+</body></html>

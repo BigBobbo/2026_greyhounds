@@ -39,10 +39,9 @@ from app.services.prediction_service import predict_race, save_predictions
 logger = logging.getLogger(__name__)
 
 
-# Default starting bankroll passed into predict_race purely so the
-# existing Kelly snapshot fields aren't NaN. Phase 1 doesn't use these
-# values for any P&L computation, but predict_race expects a number.
-DEFAULT_PREDICTION_BANKROLL = 100.0
+# None -> predict_race sizes stakes off the real BankrollConfig ledger
+# balance (the whole point of the canonical staking module).
+DEFAULT_PREDICTION_BANKROLL = None
 
 
 def _scrape_upcoming_window(db: Session, start_date: date, days_ahead: int) -> dict[str, Any]:
@@ -157,6 +156,17 @@ def run_schedule_job(schedule_id: int, trigger: str = "scheduled") -> int:
             except Exception as e:
                 logger.error("Scheduled card scrape failed: %s", e)
                 scrape_stats = {"error": str(e)}
+
+        # Weather for the prediction window: fill today's (and the next
+        # days') per-track rows from the forecast API so the weather
+        # features are populated at serve time exactly like in training.
+        try:
+            from ml.weather import ensure_weather_for_date
+
+            for offset in range(schedule.predict_days_ahead + 1):
+                ensure_weather_for_date(db, run_date + timedelta(days=offset))
+        except Exception as e:
+            logger.warning("Weather fetch for prediction window failed: %s", e)
 
         end_date = run_date + timedelta(days=schedule.predict_days_ahead)
         scheduled_races = (

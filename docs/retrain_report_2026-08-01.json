@@ -1,0 +1,170 @@
+{
+ "dataset": {
+  "total_entries": 250000,
+  "total_features": 205,
+  "train_size": 189463,
+  "val_size": 29982,
+  "test_size": 30555,
+  "nan_features_dropped": 1,
+  "train_cutoff_date": "2025-11-07",
+  "test_cutoff_date": "2026-03-28",
+  "only_complete_data": false,
+  "feature_version_id": null
+ },
+ "n_features": 205,
+ "train_metrics": {
+  "accuracy": 0.6980521646321126,
+  "f1_score": 0.72788309874915,
+  "base_rate": 0.17090254152491494,
+  "calibration_slope": 0.8609726205288586,
+  "calibration_intercept": -1.3405223478077384,
+  "log_loss": 0.5580033522816727,
+  "roc_auc": 0.6907809660982107,
+  "brier_score": 0.19077235811785556,
+  "winner_recall": 0.523224043715847,
+  "winner_precision": 0.28855882036379293
+ },
+ "test_classification": {
+  "accuracy": 0.8361315660284733,
+  "f1_score": 0.7721771448056199,
+  "base_rate": 0.1706431026018655,
+  "calibration_slope": 0.9453735180517138,
+  "calibration_intercept": -0.0939545018288714,
+  "log_loss": 0.42016540685611287,
+  "roc_auc": 0.6868439229984712,
+  "brier_score": 0.13001975409838215,
+  "winner_recall": 0.05523590333716916,
+  "winner_precision": 0.7804878048780488
+ },
+ "test_betting": {
+  "top_pick_pnl": -337.62,
+  "top_pick_roi": -7.15,
+  "top_pick_roi_ci90": [
+   -10.22,
+   -3.64
+  ],
+  "top_pick_races": 4719,
+  "top_pick_winners": 1602,
+  "top_pick_strike_rate": 33.9,
+  "value_bet_pnl": -83.68,
+  "value_bet_roi": -4.14,
+  "value_bet_roi_ci90": [
+   -11.47,
+   3.16
+  ],
+  "value_bet_count": 2023,
+  "value_bet_winners": 511,
+  "kelly_pnl": 1225.92,
+  "kelly_roi": 28.94,
+  "kelly_roi_ci90": [
+   19.79,
+   39.95
+  ],
+  "kelly_races": 1607,
+  "kelly_total_staked": 4235.94,
+  "favourite_pnl": -605.1,
+  "favourite_roi": -12.82,
+  "favourite_roi_ci90": [
+   -15.41,
+   -10.13
+  ],
+  "execution_model": {
+   "commission_rate": 0.05,
+   "slippage": 0.05,
+   "min_odds": 1.5,
+   "note": "All P&L at price 1+(SP-1)*(1-slippage) with commission on net winnings \u2014 SP itself is unobtainable in advance."
+  }
+ },
+ "blend": {
+  "alpha": 0.7124744889059822,
+  "beta": 1.1195819096432853
+ },
+ "test_classification_blended": {
+  "accuracy": 0.8378334151530028,
+  "f1_score": 0.7849279869779529,
+  "base_rate": 0.1706431026018655,
+  "calibration_slope": 0.965028239120325,
+  "calibration_intercept": -0.04266399314052018,
+  "log_loss": 0.40451642416251116,
+  "roc_auc": 0.7274453629327579,
+  "brier_score": 0.12504971042166513,
+  "winner_recall": 0.10203298810893748,
+  "winner_precision": 0.6608695652173913
+ },
+ "test_betting_blended": {
+  "top_pick_pnl": -408.96,
+  "top_pick_roi": -8.67,
+  "top_pick_roi_ci90": [
+   -11.41,
+   -5.83
+  ],
+  "top_pick_races": 4719,
+  "top_pick_winners": 1846,
+  "top_pick_strike_rate": 39.1,
+  "value_bet_pnl": 305.73,
+  "value_bet_roi": 35.34,
+  "value_bet_roi_ci90": [
+   27.57,
+   44.39
+  ],
+  "value_bet_count": 865,
+  "value_bet_winners": 457,
+  "kelly_pnl": 1397.03,
+  "kelly_roi": 50.84,
+  "kelly_roi_ci90": [
+   43.69,
+   59.0
+  ],
+  "kelly_races": 1052,
+  "kelly_total_staked": 2747.87,
+  "favourite_pnl": -605.1,
+  "favourite_roi": -12.82,
+  "favourite_roi_ci90": [
+   -15.41,
+   -10.13
+  ],
+  "execution_model": {
+   "commission_rate": 0.05,
+   "slippage": 0.05,
+   "min_odds": 1.5,
+   "note": "All P&L at price 1+(SP-1)*(1-slippage) with commission on net winnings \u2014 SP itself is unobtainable in advance."
+  }
+ },
+ "test_period": {
+  "from": "2026-03-28",
+  "to": "2026-07-29",
+  "races": 5192
+ },
+ "top_features": {
+  "dam_progeny_win_rate": 991,
+  "sire_progeny_win_rate_at_dist": 902,
+  "dam_progeny_mean_time_at_dist": 853,
+  "dog_age_years": 814,
+  "dog_median_career_grade_index__z_in_field": 811,
+  "position_consistency": 779,
+  "trainer_win_rate_at_track_365d": 732,
+  "trap_win_rate_at_track": 730,
+  "dog_median_career_grade_index__vs_field": 718,
+  "sire_progeny_mean_time_at_dist": 711,
+  "early_speed_vs_field": 637,
+  "trainer_win_rate_30d": 631,
+  "expected_lead_probability": 608,
+  "led_at_bend1_rate_last10__z_in_field": 607,
+  "avg_opponent_early_speed": 606,
+  "bend1_position_mean_last5": 605,
+  "track_speed_rating__z_in_field": 589,
+  "track_speed_rating": 576,
+  "track_speed_rating__vs_field": 571,
+  "days_since_last": 568,
+  "early_speed_x_trap": 530,
+  "race_day_temp_c": 528,
+  "race_day_wind_kmh": 528,
+  "precip_last48h_mm": 528,
+  "trap_bias_deviation": 519,
+  "trap_bias_x_front_runner": 519,
+  "trainer_form_delta_90d": 510,
+  "track_speed_rating__gap_to_best": 506,
+  "trainer_win_rate_90d": 482,
+  "trainer_runs_90d": 467
+ }
+}

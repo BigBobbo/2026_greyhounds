@@ -10,6 +10,7 @@ stadium.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, timedelta
 from typing import Iterable
 
@@ -81,17 +82,36 @@ def _add_prev48(rows: dict[date, dict]) -> None:
             vals["precip_prev48h_mm"] = (p1 or 0.0) + (p2 or 0.0)
 
 
+# Successive waits after a 429. Multi-year archive calls are weighted
+# heavily against Open-Meteo's free per-minute/hourly budgets, so a burst
+# of town fetches can trip the limit mid-backfill; waiting out the window
+# beats failing the whole run.
+_RETRY_DELAYS = (30, 90, 300, 900)
+
+
 def fetch_archive(lat: float, lon: float, start: date, end: date) -> dict[date, dict]:
-    """One archive call for a full date range (multi-year is fine)."""
-    resp = httpx.get(ARCHIVE_URL, params={
-        "latitude": lat, "longitude": lon,
-        "start_date": str(start), "end_date": str(end),
-        "daily": DAILY_VARS, "timezone": "Europe/Dublin",
-    }, timeout=120)
-    resp.raise_for_status()
-    rows = _rows_from_payload(resp.json())
-    _add_prev48(rows)
-    return rows
+    """One archive call for a full date range (multi-year is fine).
+
+    Retries on 429, honouring Retry-After when the API sends one.
+    """
+    for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+        resp = httpx.get(ARCHIVE_URL, params={
+            "latitude": lat, "longitude": lon,
+            "start_date": str(start), "end_date": str(end),
+            "daily": DAILY_VARS, "timezone": "Europe/Dublin",
+        }, timeout=120)
+        if resp.status_code == 429 and delay is not None:
+            retry_after = resp.headers.get("Retry-After")
+            wait = max(delay, int(retry_after)) if (
+                retry_after and retry_after.isdigit()) else delay
+            logger.warning("Open-Meteo 429 (attempt %d), waiting %ds",
+                           attempt + 1, wait)
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        rows = _rows_from_payload(resp.json())
+        _add_prev48(rows)
+        return rows
 
 
 def fetch_forecast(lat: float, lon: float) -> dict[date, dict]:
@@ -174,11 +194,33 @@ def backfill_archive(db: Session, log=None) -> dict:
             rd = date.fromisoformat(rd)
         race_dates.setdefault(tid, set()).add(rd)
 
+    # Dates already covered, so an interrupted run resumes where it left
+    # off instead of re-spending API budget on towns it finished.
+    covered: dict[int, set] = {}
+    for tid, d in db.query(TrackWeather.track_id, TrackWeather.date).filter(
+            TrackWeather.precip_mm.isnot(None)):
+        if isinstance(d, str):
+            d = date.fromisoformat(d)
+        covered.setdefault(tid, set()).add(d)
+
     inserted = 0
+    fetched_any = False
     for i, (coords, town_tracks) in enumerate(by_coords.items(), 1):
+        town_needed = {
+            t.id: {d for d in race_dates.get(t.id, set()) if d <= end}
+            - covered.get(t.id, set())
+            for t in town_tracks
+        }
+        if not any(town_needed.values()):
+            say(f"[{i}/{len(by_coords)}] {[t.code for t in town_tracks]} "
+                f"already covered — skipped")
+            continue
+        if fetched_any:
+            time.sleep(8)  # pace the burst — see _RETRY_DELAYS note
         say(f"[{i}/{len(by_coords)}] fetching {coords} "
             f"for {[t.code for t in town_tracks]}")
         rows = fetch_archive(coords[0], coords[1], start, end)
+        fetched_any = True
         for t in town_tracks:
             dates = race_dates.get(t.id)
             if not dates:

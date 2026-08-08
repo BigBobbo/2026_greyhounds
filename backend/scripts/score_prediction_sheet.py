@@ -15,6 +15,10 @@ Methodology is fixed here BEFORE results exist (pre-registered):
 Usage (from backend/):
     DATABASE_URL=... python3 scripts/score_prediction_sheet.py \
         --csv ../docs/predictions/2026-08-01.csv
+
+Import surface: ``score(csv_path)`` returns ``(report_text, summary)``
+where summary holds the strict-cohort headline numbers for the running
+record. The methodology above is unchanged by the refactor.
 """
 
 import argparse
@@ -38,11 +42,16 @@ BUCKETS = [(0, 0.05), (0.05, 0.10), (0.10, 0.15), (0.15, 0.20),
            (0.20, 0.30), (0.30, 0.40), (0.40, 1.01)]
 
 
-def main(csv_path: str) -> None:
+def score(csv_path: str):
+    """Score a sheet. Returns (report_text, summary_dict)."""
+    lines: list[str] = []
+
+    def out(s: str = "") -> None:
+        lines.append(s)
+
     rows = list(csv.DictReader(open(csv_path)))
     if not rows:
-        print("Empty sheet")
-        return
+        return "Empty sheet", {}
     generated_at = None
     if rows[0].get("generated_at"):
         generated_at = datetime.strptime(
@@ -78,11 +87,11 @@ def main(csv_path: str) -> None:
                                  tzinfo=DUBLIN)
         return start > generated_at
 
-    def report(cohort: str, race_ids: list[int]) -> None:
+    def report(cohort: str, race_ids: list[int]) -> dict:
         scored = [rid for rid in race_ids if rid in winners]
         if not scored:
-            print(f"\n== {cohort}: no races with results yet ==")
-            return
+            out(f"\n== {cohort}: no races with results yet ==")
+            return {}
         hits = 0
         exp_hits = 0.0
         logloss = 0.0
@@ -90,7 +99,7 @@ def main(csv_path: str) -> None:
         brier = 0.0
         base_brier = 0.0
         n_runners = 0
-        bucket_stats = {b: [0, 0.0] for b in BUCKETS}  # wins, sum_p / count
+        bucket_stats = {b: [0, 0.0] for b in BUCKETS}
         bucket_n = {b: 0 for b in BUCKETS}
         tier_stats: dict[str, list[int]] = defaultdict(lambda: [0, 0])
 
@@ -131,36 +140,58 @@ def main(csv_path: str) -> None:
                         break
 
         n = len(scored)
-        print(f"\n== {cohort}: {n} races scored ==")
-        print(f"Top-pick hit rate : {hits}/{n} = {hits / n:.1%} "
-              f"(model expected {exp_hits / n:.1%})")
-        print(f"Winner log loss   : {logloss / n:.4f} "
-              f"(uniform baseline {base_logloss / n:.4f})")
-        print(f"Brier / runner    : {brier / n_runners:.4f} "
-              f"(uniform baseline {base_brier / n_runners:.4f})")
-        print("Reliability (predicted bucket -> observed win rate):")
+        out(f"\n== {cohort}: {n} races scored ==")
+        out(f"Top-pick hit rate : {hits}/{n} = {hits / n:.1%} "
+            f"(model expected {exp_hits / n:.1%})")
+        out(f"Winner log loss   : {logloss / n:.4f} "
+            f"(uniform baseline {base_logloss / n:.4f})")
+        out(f"Brier / runner    : {brier / n_runners:.4f} "
+            f"(uniform baseline {base_brier / n_runners:.4f})")
+        out("Reliability (predicted bucket -> observed win rate):")
         for b in BUCKETS:
             cnt = bucket_n[b]
             if not cnt:
                 continue
             wins, sump = bucket_stats[b]
-            print(f"  {b[0]:>4.0%}–{b[1]:>4.0%}: predicted {sump / cnt:.1%}  "
-                  f"observed {wins / cnt:.1%}  (n={cnt})")
-        print("Top-pick hit rate by confidence tier:")
+            out(f"  {b[0]:>4.0%}–{b[1]:>4.0%}: predicted {sump / cnt:.1%}  "
+                f"observed {wins / cnt:.1%}  (n={cnt})")
+        out("Top-pick hit rate by confidence tier:")
         for tier in ("strong", "moderate", "weak", "avoid"):
             wins, cnt = tier_stats.get(tier, (0, 0))
             if cnt:
-                print(f"  {tier:>8s}: {wins}/{cnt} = {wins / cnt:.1%}")
+                out(f"  {tier:>8s}: {wins}/{cnt} = {wins / cnt:.1%}")
+        return {
+            "races": n, "hits": hits,
+            "hit_rate": round(hits / n, 4),
+            "expected_hit_rate": round(exp_hits / n, 4),
+            "log_loss": round(logloss / n, 4),
+            "log_loss_uniform": round(base_logloss / n, 4),
+            "brier": round(brier / n_runners, 4),
+            "brier_uniform": round(base_brier / n_runners, 4),
+        }
 
     all_ids = list(by_race.keys())
     report("ALL RACES", all_ids)
     strict = [rid for rid in all_ids if is_strict(rid)]
+    summary = {}
     if generated_at is not None and len(strict) < len(all_ids):
-        report(f"STRICT PRE-RACE (start after {generated_at:%H:%M} UTC, "
-               f"{len(all_ids) - len(strict)} excluded)", strict)
+        summary = report(
+            f"STRICT PRE-RACE (start after {generated_at:%H:%M} UTC, "
+            f"{len(all_ids) - len(strict)} excluded)", strict)
+    else:
+        # Sheet generated before every race: the full set IS the strict set.
+        summary = report("STRICT PRE-RACE (= all races)", strict) \
+            if generated_at is not None else {}
     missing = [rid for rid in all_ids if rid not in winners]
     if missing:
-        print(f"\n{len(missing)} race(s) still without results.")
+        out(f"\n{len(missing)} race(s) still without results.")
+    summary["races_missing_results"] = len(missing)
+    return "\n".join(lines), summary
+
+
+def main(csv_path: str) -> None:
+    text, _ = score(csv_path)
+    print(text)
 
 
 if __name__ == "__main__":

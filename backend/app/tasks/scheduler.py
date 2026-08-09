@@ -25,6 +25,7 @@ from quiet days.
 
 import asyncio
 import logging
+import os
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -163,6 +164,43 @@ def _rescrape_trailing_window(days: int = 14):
     )
 
 
+def _enrich_new_dogs():
+    """Profile-scrape dogs that appeared since the last run (sex IS NULL
+    marks un-enriched). Cheap nightly: typically a few dozen dogs."""
+    import subprocess
+    import sys
+
+    backend_root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    try:
+        proc = subprocess.run(
+            [sys.executable,
+             os.path.join("scripts", "backfill_dog_profiles.py"),
+             "--concurrency", "2"],
+            cwd=backend_root, capture_output=True, text=True, timeout=7200,
+        )
+        tail = (proc.stdout or "").strip().splitlines()[-2:]
+        logger.info("Nightly dog enrichment (rc=%d): %s",
+                    proc.returncode, " | ".join(tail))
+    except Exception as e:
+        logger.error("Nightly dog enrichment failed: %s", e)
+
+
+def _weather_archive_topup():
+    """Replace forecast-sourced weather rows with archive actuals and fill
+    any gaps. Skip-covered logic makes this cheap; weekly is plenty."""
+    db = SessionLocal()
+    try:
+        from ml.weather import backfill_archive
+
+        result = backfill_archive(db)
+        logger.info("Weather archive top-up: %s", result)
+    except Exception as e:
+        logger.error("Weather archive top-up failed: %s", e)
+    finally:
+        db.close()
+
+
 # --- Per-schedule prediction jobs ---
 
 
@@ -283,6 +321,27 @@ def start_scheduler():
         trigger=CronTrigger(hour="12-22", minute=15, timezone=DUBLIN),
         id="betfair_odds_capture",
         name="Betfair odds capture (hourly, race hours)",
+        replace_existing=True,
+    )
+
+    # Profile-scrape newly-appeared dogs at 05:30 Dublin (after the
+    # amendment re-scrape may have introduced them).
+    scheduler.add_job(
+        _enrich_new_dogs,
+        trigger=CronTrigger(hour=5, minute=30, timezone=DUBLIN),
+        id="dog_enrichment",
+        name="Nightly dog-profile enrichment (new dogs)",
+        replace_existing=True,
+    )
+
+    # Weekly (Sunday 06:00 Dublin): overwrite forecast-sourced weather
+    # with archive actuals once the archive catches up.
+    scheduler.add_job(
+        _weather_archive_topup,
+        trigger=CronTrigger(day_of_week="sun", hour=6, minute=0,
+                            timezone=DUBLIN),
+        id="weather_archive_topup",
+        name="Weekly weather archive top-up",
         replace_existing=True,
     )
 

@@ -139,3 +139,84 @@ def weather_backfill_status(authorization: str | None = Header(default=None)):
     """Progress/result of the last (or current) weather backfill run."""
     _require_token(authorization)
     return dict(_weather_state)
+
+
+# --- Dog-profile enrichment (long-running subprocess job) ---
+
+_dogs_state: dict = {"status": "idle"}
+_dogs_lock = threading.Lock()
+
+_BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))
+
+
+def _run_dog_backfill() -> None:
+    import subprocess
+    import sys
+
+    cmd = [sys.executable, os.path.join("scripts", "backfill_dog_profiles.py"),
+           "--concurrency", "2"]
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=_BACKEND_ROOT, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True,
+        )
+        for line in proc.stdout:
+            line = line.strip()
+            if line:
+                logger.info("dog backfill: %s", line)
+                _dogs_state["last_message"] = line
+        code = proc.wait()
+        _dogs_state.update(
+            status="done" if code == 0 else "failed",
+            exit_code=code, finished_at=datetime.utcnow().isoformat(),
+        )
+    except Exception as e:
+        logger.exception("dog backfill crashed")
+        _dogs_state.update(status="failed", error=str(e)[:2000],
+                           finished_at=datetime.utcnow().isoformat())
+
+
+@router.post("/backfill-dogs", status_code=202)
+def start_dog_backfill(authorization: str | None = Header(default=None)):
+    """Enrich every dog missing profile data from its GRI profile page
+    (sectionals, running positions, birth date, trainer, pedigree fields
+    on entries). Resume-safe; a full first run takes hours, nightly
+    top-ups take minutes. Poll GET /admin/backfill-dogs."""
+    _require_token(authorization)
+    with _dogs_lock:
+        if _dogs_state.get("status") == "running":
+            raise HTTPException(status_code=409, detail="Backfill already running")
+        _dogs_state.clear()
+        _dogs_state.update(status="running",
+                           started_at=datetime.utcnow().isoformat())
+    threading.Thread(target=_run_dog_backfill, name="dog-backfill",
+                     daemon=True).start()
+    return {"status": "running", "poll": "/api/admin/backfill-dogs"}
+
+
+@router.get("/backfill-dogs")
+def dog_backfill_status(authorization: str | None = Header(default=None)):
+    """Progress/result of the last (or current) dog-profile backfill."""
+    _require_token(authorization)
+    return dict(_dogs_state)
+
+
+@router.post("/register-model")
+def register_model(authorization: str | None = Header(default=None)):
+    """Register the committed retrain model as an experiment (idempotent).
+    Runs scripts/register_retrain_model.py and returns its output."""
+    import subprocess
+    import sys
+
+    _require_token(authorization)
+    proc = subprocess.run(
+        [sys.executable, os.path.join("scripts", "register_retrain_model.py")],
+        cwd=_BACKEND_ROOT, capture_output=True, text=True, timeout=120,
+    )
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=(proc.stderr or proc.stdout or "registration failed")[-2000:],
+        )
+    return {"output": proc.stdout.strip()}

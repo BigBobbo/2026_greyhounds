@@ -140,7 +140,7 @@ def main(max_entries: int, test_pct: float, val_pct: float) -> None:
             "blend_alpha": blender.alpha,
             "blend_beta": blender.beta,
         },
-        os.path.join("data", "retrain_model.joblib"),
+        os.path.join("models_store", "retrain_model.joblib"),
     )
 
     report = {

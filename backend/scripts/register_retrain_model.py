@@ -18,7 +18,9 @@ from app.database import SessionLocal  # noqa: E402
 from app.models.experiment import Experiment  # noqa: E402
 
 NAME = "retrain-2026-08-01"
-MODEL_PATH = os.path.join("data", "retrain_model.joblib")
+# models_store/ is inside the git tree (and the Docker image) — data/ is
+# not: it's gitignored locally and shadowed by the volume mount in prod.
+MODEL_PATH = os.path.join("models_store", "retrain_model.joblib")
 
 
 def main() -> int:

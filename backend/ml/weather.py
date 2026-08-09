@@ -195,12 +195,18 @@ def backfill_archive(db: Session, log=None) -> dict:
         race_dates.setdefault(tid, set()).add(rd)
 
     # Dates already covered, so an interrupted run resumes where it left
-    # off instead of re-spending API budget on towns it finished.
+    # off instead of re-spending API budget on towns it finished. The
+    # trailing two weeks never count as covered: those rows may hold
+    # forecast values (written at serve time) that the archive's actuals
+    # should overwrite once available.
+    refresh_after = end - timedelta(days=14)
     covered: dict[int, set] = {}
     for tid, d in db.query(TrackWeather.track_id, TrackWeather.date).filter(
             TrackWeather.precip_mm.isnot(None)):
         if isinstance(d, str):
             d = date.fromisoformat(d)
+        if d > refresh_after:
+            continue
         covered.setdefault(tid, set()).add(d)
 
     inserted = 0

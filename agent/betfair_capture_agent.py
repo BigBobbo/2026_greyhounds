@@ -96,9 +96,64 @@ def login(cfg: dict) -> str:
             )
         sys.exit(f"Betfair login failed: HTTP {e.code}")
     if payload.get("status") != "SUCCESS":
-        sys.exit(f"Betfair login rejected: {payload.get('error')} "
-                 "(check username, password and that the app key is active)")
+        code = payload.get("error") or payload.get("status") or "UNKNOWN"
+        sys.exit(f"Betfair login rejected: {code}\n\n{explain_login_error(code)}")
     return payload["token"]
+
+
+# Betfair answers a rejected login with a specific code. Anything other
+# than INVALID_USERNAME_OR_PASSWORD means the credentials were accepted
+# and something about the ACCOUNT needs attention — so don't send people
+# back to re-check a password that is provably fine.
+LOGIN_ERRORS = {
+    "INVALID_USERNAME_OR_PASSWORD":
+        "The username or password is wrong. Note Betfair wants the "
+        "username, not the email address.",
+    "EMAIL_LOGIN_NOT_ALLOWED":
+        "An email address was used. Use the Betfair username instead.",
+    "SUSPENDED":
+        "The Betfair account is suspended — the login itself worked. For a "
+        "new account this is normally identity verification: log in at "
+        "betfair.com in a browser and complete whatever it asks for "
+        "(usually photo ID and proof of address).",
+    "KYC_SUSPEND":
+        "Betfair needs identity documents before the account can be used. "
+        "Log in at betfair.com and upload what it asks for.",
+    "ACCOUNT_NOT_FULLY_REGISTERED":
+        "Registration was never finished. Log in at betfair.com and "
+        "complete the remaining steps.",
+    "ACCOUNT_NOW_LOCKED": "The account has just been locked. Contact Betfair.",
+    "ACCOUNT_ALREADY_LOCKED": "The account is locked. Contact Betfair.",
+    "PENDING_AUTH": "The account is awaiting authorisation from Betfair.",
+    "CHANGE_PASSWORD_REQUIRED":
+        "Betfair wants the password changed. Do that at betfair.com, then "
+        "update agent.env with the new one.",
+    "PERSONAL_MESSAGE_REQUIRED":
+        "Betfair needs a personal message set on the account. Log in at "
+        "betfair.com to set one.",
+    "INTERNATIONAL_TERMS_ACCEPTANCE_REQUIRED":
+        "New terms need accepting. Log in at betfair.com once and accept.",
+    "CERT_AUTH_REQUIRED":
+        "This account requires certificate-based login rather than a "
+        "password. Tell Rob — the agent needs a different login method.",
+    "SECURITY_RESTRICTED_LOCATION":
+        "Betfair is blocking this location. Check the machine is in "
+        "Ireland or the UK and not on a VPN.",
+    "BETTING_RESTRICTED_LOCATION":
+        "Betfair does not allow betting from this location.",
+    "TEMPORARY_BAN_TOO_MANY_REQUESTS":
+        "Too many login attempts. Wait a while before trying again.",
+    "SELF_EXCLUDED": "The account is self-excluded and cannot be used.",
+    "CLOSED": "The account is closed.",
+}
+
+
+def explain_login_error(code: str) -> str:
+    return LOGIN_ERRORS.get(code, (
+        "The credentials were accepted but Betfair would not open a "
+        "session. Logging in at betfair.com in a browser usually reveals "
+        "what the account needs."
+    ))
 
 
 def api(cfg: dict, token: str, path: str, body: dict):

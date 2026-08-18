@@ -318,9 +318,9 @@ def start_scheduler():
     # dormant no-ops until Betfair credentials are configured.
     scheduler.add_job(
         _capture_betfair_odds,
-        trigger=CronTrigger(hour="12-22", minute=15, timezone=DUBLIN),
+        trigger=CronTrigger(hour="12-22", minute="0,20,40", timezone=DUBLIN),
         id="betfair_odds_capture",
-        name="Betfair odds capture (hourly, race hours)",
+        name="Betfair odds capture (every 20min, race hours)",
         replace_existing=True,
     )
 

@@ -220,12 +220,35 @@ class BetfairClient:
         })
 
 
-def capture_once(db: Session, client: BetfairClient) -> int:
+def imminent(markets: list[dict[str, Any]], within_minutes: int) -> list[dict[str, Any]]:
+    """Markets starting within the next `within_minutes`.
+
+    Price books are only fetched for these: prices far from the off are
+    thin and unrepresentative, and Betfair's data-request charging counts
+    every runner returned, so pulling a full 12-hour card every pass
+    wastes weight on markets nobody will bet."""
+    now = datetime.now(timezone.utc)
+    out = []
+    for m in markets:
+        start = datetime.fromisoformat(m["marketStartTime"].replace("Z", "+00:00"))
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if 0 <= (start - now).total_seconds() <= within_minutes * 60:
+            out.append(m)
+    return out
+
+
+def capture_once(db: Session, client: BetfairClient,
+                 within_minutes: int = 120) -> int:
     """One capture pass: snapshot best back prices for every upcoming
     Irish win market that matches a scheduled race. Returns rows written."""
     markets = client.irish_win_markets()
     if not markets:
         logger.info("Odds capture: no upcoming Irish win markets")
+        return 0
+    markets = imminent(markets, within_minutes)
+    if not markets:
+        logger.info("Odds capture: no markets within %d minutes", within_minutes)
         return 0
 
     dates = {market_local_date_time(m["marketStartTime"])[0] for m in markets}
@@ -277,3 +300,108 @@ def capture_from_settings(db: Session) -> int:
         settings.betfair_password,
     )
     return capture_once(db, client)
+
+
+def _redact(text: str) -> str:
+    """Strip anything credential-shaped from a message before it leaves
+    the process — diagnostics are read by people who shouldn't see keys."""
+    out = str(text)
+    for secret in (settings.betfair_password, settings.betfair_api_key,
+                   settings.betfair_username):
+        if secret and len(secret) > 3:
+            out = out.replace(secret, "***")
+    return out[:500]
+
+
+def diagnose(db: Session) -> dict[str, Any]:
+    """End-to-end connectivity check that never returns credentials.
+
+    Reports whether config is present, whether login succeeds, how many
+    Irish win markets Betfair offers, and how many of them match races we
+    have scheduled — the last number being the one that actually matters,
+    since a market we can't match is a market we can't price.
+    """
+    result: dict[str, Any] = {
+        "configured": bool(settings.betfair_api_key and settings.betfair_username
+                           and settings.betfair_password),
+        "app_key_present": bool(settings.betfair_api_key),
+        "username_present": bool(settings.betfair_username),
+        "password_present": bool(settings.betfair_password),
+    }
+    if not result["configured"]:
+        result["status"] = "not_configured"
+        result["hint"] = ("Set BETFAIR_API_KEY, BETFAIR_USERNAME and "
+                          "BETFAIR_PASSWORD in the deployment environment")
+        return result
+
+    try:
+        client = BetfairClient.login_interactive(
+            settings.betfair_api_key,
+            settings.betfair_username,
+            settings.betfair_password,
+        )
+    except Exception as e:
+        result["status"] = "login_failed"
+        result["error"] = f"{type(e).__name__}: {_redact(e)}"
+        result["hint"] = (
+            "Common causes: wrong username/password; the app key is not yet "
+            "activated; two-factor authentication on the account (use a "
+            "certificate login instead); or Betfair geo-blocking the "
+            "server's country."
+        )
+        return result
+    result["login"] = "ok"
+
+    try:
+        markets = client.irish_win_markets()
+    except Exception as e:
+        result["status"] = "market_list_failed"
+        result["error"] = f"{type(e).__name__}: {_redact(e)}"
+        return result
+
+    result["markets_next_12h"] = len(markets)
+    soon = imminent(markets, 120)
+    result["markets_next_2h"] = len(soon)
+
+    dates = {market_local_date_time(m["marketStartTime"])[0] for m in markets}
+    races = (
+        db.query(Race, Track.name.label("track_name"))
+        .join(Track, Race.track_id == Track.id)
+        .filter(Race.race_date.in_(list(dates)))
+        .all()
+    )
+    race_rows = [
+        type("RaceRow", (), {
+            "id": r.Race.id, "race_time": r.Race.race_time,
+            "race_number": r.Race.race_number, "track_name": r.track_name,
+        })()
+        for r in races
+    ]
+    matched = 0
+    unmatched_venues: list[str] = []
+    samples: list[dict[str, Any]] = []
+    for market in markets:
+        race = match_market_to_race(market, race_rows)
+        venue = (market.get("event") or {}).get("venue", "")
+        _, hhmm = market_local_date_time(market["marketStartTime"])
+        if race is None:
+            if venue not in unmatched_venues:
+                unmatched_venues.append(venue)
+            continue
+        matched += 1
+        if len(samples) < 5:
+            samples.append({"venue": venue, "time": hhmm,
+                            "race_id": race.id,
+                            "race_number": race.race_number})
+
+    result["markets_matched_to_races"] = matched
+    result["unmatched_venues"] = unmatched_venues[:10]
+    result["sample_matches"] = samples
+    result["status"] = "ok" if matched else "no_matches"
+    if not matched and markets:
+        result["hint"] = (
+            "Betfair markets were listed but none matched a scheduled race. "
+            "Either today's cards haven't been scraped yet, or a venue name "
+            "needs an alias in VENUE_ALIASES (see unmatched_venues)."
+        )
+    return result

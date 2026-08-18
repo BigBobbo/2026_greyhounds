@@ -47,3 +47,6 @@ Thumbs.db
 
 # Playwright
 backend/scraping/browsers/
+
+# Capture agent config — holds a Betfair login, must never be committed
+agent/agent.env

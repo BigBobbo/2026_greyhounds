@@ -1,7 +1,14 @@
 """Unit tests for the Betfair odds-capture mapping logic (no network)."""
 
-from datetime import time, datetime, timedelta, timezone
+from datetime import date, time, datetime, timedelta, timezone
+from types import SimpleNamespace
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.database import Base
 from scraping.betfair_odds import (
     imminent,
     market_local_date_time,
@@ -38,6 +45,122 @@ class Entry:
     def __init__(self, trap, dog_id):
         self.trap = trap
         self.dog_id = dog_id
+
+
+@pytest.fixture
+def db_session():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    yield db
+    db.close()
+
+
+@pytest.fixture
+def seeded_race(db_session):
+    """One 20:14 Irish race with six traps. August is UTC+1 in Dublin, so
+    the equivalent Betfair marketStartTime is 19:14 UTC."""
+    from app.models.dog import Dog
+    from app.models.race import Race
+    from app.models.race_entry import RaceEntry
+    from app.models.track import Track
+
+    track = Track(name="Shelbourne Park", code="SHP", location="Dublin")
+    db_session.add(track)
+    db_session.flush()
+
+    race = Race(track_id=track.id, race_date=date(2026, 8, 20),
+                race_time=time(20, 14), race_number=5, distance_m=525,
+                status="scheduled")
+    db_session.add(race)
+    db_session.flush()
+
+    entries = []
+    for trap in range(1, 7):
+        dog = Dog(name=f"DOG {trap}")
+        db_session.add(dog)
+        db_session.flush()
+        entry = RaceEntry(race_id=race.id, dog_id=dog.id, trap=trap)
+        db_session.add(entry)
+        entries.append(entry)
+    db_session.commit()
+
+    return SimpleNamespace(
+        id=race.id,
+        track_name="Shelbourne Park",
+        market_start_iso="2026-08-20T19:14:00.000Z",
+    ), entries
+
+
+def test_ingest_maps_agent_payload_to_snapshots(db_session, seeded_race):
+    """The agent forwards venue/time/runner-name/price; the server does
+    all the matching. One market in -> one snapshot per priced runner."""
+    from scraping.betfair_odds import ingest_snapshots
+    from app.models.odds import OddsSnapshot
+
+    race, entries = seeded_race
+    payload = [{
+        "market_id": "1.999",
+        "venue": race.track_name,
+        "market_start_time": race.market_start_iso,
+        "runners": [
+            {"runner_name": f"{e.trap}. Dog {e.trap}", "price": 2.0 + e.trap}
+            for e in entries
+        ] + [{"runner_name": "9. Not In This Race", "price": 5.0}],
+    }]
+    result = ingest_snapshots(db_session, payload)
+
+    assert result["markets_matched"] == 1
+    assert result["markets_unmatched"] == 0
+    # the trap-9 runner has no matching entry and is dropped
+    assert result["snapshots_written"] == len(entries)
+
+    rows = db_session.query(OddsSnapshot).all()
+    assert {r.dog_id for r in rows} == {e.dog_id for e in entries}
+    assert all(r.bookmaker == "betfair_exchange" for r in rows)
+    assert all(not r.is_sp for r in rows)
+    by_dog = {r.dog_id: r for r in rows}
+    first = entries[0]
+    assert by_dog[first.dog_id].odds_decimal == 2.0 + first.trap
+    assert abs(by_dog[first.dog_id].implied_prob
+               - 1 / (2.0 + first.trap)) < 1e-9
+
+
+def test_ingest_reports_unmatched_markets(db_session, seeded_race):
+    """A venue we don't run reports back rather than failing silently —
+    that's how a track-name mismatch becomes visible."""
+    from scraping.betfair_odds import ingest_snapshots
+
+    race, _ = seeded_race
+    result = ingest_snapshots(db_session, [{
+        "venue": "Nowhere Park",
+        "market_start_time": race.market_start_iso,
+        "runners": [{"runner_name": "1. Ghost", "price": 3.0}],
+    }])
+    assert result["snapshots_written"] == 0
+    assert result["markets_unmatched"] == 1
+    assert "Nowhere Park" in result["unmatched"][0]
+
+
+def test_ingest_skips_invalid_prices(db_session, seeded_race):
+    from scraping.betfair_odds import ingest_snapshots
+
+    race, entries = seeded_race
+    result = ingest_snapshots(db_session, [{
+        "venue": race.track_name,
+        "market_start_time": race.market_start_iso,
+        "runners": [
+            {"runner_name": f"{entries[0].trap}. A", "price": 1.0},
+            {"runner_name": f"{entries[1].trap}. B", "price": 0},
+            {"runner_name": f"{entries[2].trap}. C", "price": 4.5},
+        ],
+    }])
+    assert result["snapshots_written"] == 1
 
 
 def test_trap_parsing():

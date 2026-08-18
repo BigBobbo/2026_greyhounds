@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     # ML
     model_artifacts_dir: str = "./data/models"
 
+    # Bearer token for the odds-ingest endpoint used by the external
+    # capture agent. Kept separate from admin_backup_token so the agent
+    # machine holds a credential that can only post prices — it cannot
+    # download the database. Empty disables ingestion.
+    odds_ingest_token: str = ""
+
     # Admin: bearer token protecting the database-backup download endpoint.
     # Empty string disables the endpoint entirely. Set a long random value
     # in the deployment environment to enable HTTPS backups (the hosting

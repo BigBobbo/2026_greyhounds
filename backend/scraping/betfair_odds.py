@@ -290,16 +290,118 @@ def capture_once(db: Session, client: BetfairClient,
 
 def capture_from_settings(db: Session) -> int:
     """Entry point for the scheduler: builds a client from env settings.
-    No-op (returns -1) until credentials are configured."""
+
+    Returns -1 when dormant (no credentials) and -2 when Betfair refuses
+    the connection outright — a 403 at the HTTP layer means the host's
+    region is blocked, which no retry fixes. Prices then arrive through
+    the external agent and /admin/odds-ingest instead, so this stays a
+    quiet no-op rather than an error every 20 minutes.
+    """
     if not settings.betfair_api_key or not settings.betfair_username:
         logger.info("Odds capture dormant: Betfair credentials not configured")
         return -1
-    client = BetfairClient.login_interactive(
-        settings.betfair_api_key,
-        settings.betfair_username,
-        settings.betfair_password,
-    )
+    try:
+        client = BetfairClient.login_interactive(
+            settings.betfair_api_key,
+            settings.betfair_username,
+            settings.betfair_password,
+        )
+    except Exception as e:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status == 403:
+            logger.info(
+                "Odds capture skipped: Betfair blocks this host's region; "
+                "prices are expected via the external capture agent"
+            )
+            return -2
+        logger.warning("Odds capture login failed: %s", _redact(e))
+        return -2
     return capture_once(db, client)
+
+
+def ingest_snapshots(
+    db: Session,
+    markets: list[dict[str, Any]],
+    captured_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Write price snapshots captured by an external agent.
+
+    Betfair geo-blocks the hosting region, so prices are captured by a
+    small agent running where the account holder actually is and posted
+    here. The agent stays deliberately dumb — it forwards venue, start
+    time, runner names and prices — and all matching happens here, in the
+    same unit-tested code path the direct capture would have used.
+
+    Returns per-market accounting so the agent can log what landed.
+    """
+    stamp = captured_at or datetime.utcnow()
+    if not markets:
+        return {"snapshots_written": 0, "markets_matched": 0,
+                "markets_unmatched": 0, "unmatched": []}
+
+    dates = {market_local_date_time(m["market_start_time"])[0] for m in markets}
+    races = (
+        db.query(Race, Track.name.label("track_name"))
+        .join(Track, Race.track_id == Track.id)
+        .filter(Race.race_date.in_(list(dates)))
+        .all()
+    )
+    race_rows = [
+        type("RaceRow", (), {
+            "id": r.Race.id, "race_time": r.Race.race_time,
+            "race_number": r.Race.race_number, "track_name": r.track_name,
+        })()
+        for r in races
+    ]
+
+    written = 0
+    matched = 0
+    unmatched: list[str] = []
+    for market in markets:
+        # match_market_to_race speaks the Betfair catalogue shape.
+        as_catalogue = {
+            "event": {"venue": market.get("venue", "")},
+            "marketStartTime": market["market_start_time"],
+        }
+        race = match_market_to_race(as_catalogue, race_rows)
+        if race is None:
+            label = f"{market.get('venue', '?')} "
+            label += market_local_date_time(market["market_start_time"])[1]
+            if label not in unmatched:
+                unmatched.append(label)
+            continue
+        matched += 1
+
+        entries = db.query(RaceEntry).filter(RaceEntry.race_id == race.id).all()
+        by_trap = {e.trap: e for e in entries}
+        for runner in market.get("runners", []):
+            trap = parse_runner_trap(runner.get("runner_name", ""))
+            entry = by_trap.get(trap)
+            if entry is None:
+                continue
+            price = runner.get("price")
+            if not price or float(price) <= 1.0:
+                continue
+            price = float(price)
+            db.add(OddsSnapshot(
+                race_id=race.id,
+                dog_id=entry.dog_id,
+                bookmaker="betfair_exchange",
+                odds_decimal=price,
+                implied_prob=1.0 / price,
+                scraped_at=stamp,
+                is_sp=False,
+            ))
+            written += 1
+    db.commit()
+    logger.info("Odds ingest: %d snapshots across %d markets (%d unmatched)",
+                written, matched, len(unmatched))
+    return {
+        "snapshots_written": written,
+        "markets_matched": matched,
+        "markets_unmatched": len(unmatched),
+        "unmatched": unmatched[:10],
+    }
 
 
 def _redact(text: str) -> str:

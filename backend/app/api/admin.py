@@ -23,6 +23,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from app.config import settings
 
@@ -202,6 +203,62 @@ def dog_backfill_status(authorization: str | None = Header(default=None)):
     return dict(_dogs_state)
 
 
+class IngestRunner(BaseModel):
+    runner_name: str
+    price: float
+
+
+class IngestMarket(BaseModel):
+    market_id: str | None = None
+    venue: str
+    market_start_time: str
+    runners: list[IngestRunner] = []
+
+
+class IngestPayload(BaseModel):
+    captured_at: str | None = None
+    markets: list[IngestMarket] = []
+
+
+@router.post("/odds-ingest")
+def odds_ingest(payload: IngestPayload,
+                authorization: str | None = Header(default=None)):
+    """Receive exchange prices captured by the external agent.
+
+    Betfair geo-blocks this host's region, so prices are captured where
+    the account holder is and posted here. Authenticated with
+    ODDS_INGEST_TOKEN — a narrower credential than the admin token, since
+    it lives on someone's home machine.
+    """
+    token = settings.odds_ingest_token
+    if not token:
+        raise HTTPException(status_code=404, detail="Not found")
+    if authorization != f"Bearer {token}":
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    from app.database import SessionLocal
+    from scraping.betfair_odds import ingest_snapshots
+
+    captured_at = None
+    if payload.captured_at:
+        try:
+            captured_at = datetime.fromisoformat(
+                payload.captured_at.replace("Z", "+00:00")
+            ).replace(tzinfo=None)
+        except ValueError:
+            pass
+
+    db = SessionLocal()
+    try:
+        return ingest_snapshots(
+            db,
+            [m.model_dump() for m in payload.markets],
+            captured_at=captured_at,
+        )
+    finally:
+        db.close()
+
+
 @router.get("/betfair-check")
 def betfair_check(authorization: str | None = Header(default=None)):
     """Verify Betfair credentials end to end without returning any of them.
@@ -232,9 +289,14 @@ def capture_odds_now(authorization: str | None = Header(default=None)):
     db = SessionLocal()
     try:
         written = capture_from_settings(db)
-        if written < 0:
+        if written == -1:
             raise HTTPException(status_code=400,
                                 detail="Betfair credentials not configured")
+        if written == -2:
+            raise HTTPException(
+                status_code=502,
+                detail=("Betfair refused the connection from this host's "
+                        "region; use the external capture agent"))
         return {"snapshots_written": written}
     finally:
         db.close()

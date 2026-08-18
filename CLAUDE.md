@@ -75,3 +75,5 @@ GRI Ireland scraper (httpx + BeautifulSoup)
 
 See `backend/.env.example`: DATABASE_URL, CORS_ORIGINS, BETFAIR_API credentials, MODEL_ARTIFACTS_DIR.
 Frontend uses `VITE_API_URL` to point at the backend.
+
+Betfair activation (credentials, verification endpoints, the live bet sheet): `docs/BETFAIR_SETUP.md`.

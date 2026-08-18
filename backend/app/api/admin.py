@@ -240,6 +240,65 @@ def capture_odds_now(authorization: str | None = Header(default=None)):
         db.close()
 
 
+@router.post("/settle-bsp")
+def settle_bsp(
+    target_date: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Read back the Betfair Starting Price for markets priced on a date
+    (defaults to today, Irish time). Idempotent — markets already settled
+    are skipped, so re-running only picks up late reconciliations."""
+    _require_token(authorization)
+    from datetime import date as date_cls
+
+    from app.database import SessionLocal
+    from scraping.betfair_odds import capture_bsp_from_settings
+
+    parsed = date_cls.fromisoformat(target_date) if target_date else None
+    db = SessionLocal()
+    try:
+        result = capture_bsp_from_settings(db, parsed)
+        if result.get("markets", 0) < 0:
+            raise HTTPException(status_code=400,
+                                detail="Betfair credentials not configured")
+        return result
+    finally:
+        db.close()
+
+
+@router.post("/live-bet-sheet")
+def live_bet_sheet(
+    experiment_id: int,
+    target_date: str | None = None,
+    min_confidence: str = "moderate",
+    max_age_minutes: int = 45,
+    authorization: str | None = Header(default=None),
+):
+    """Generate the blended live bet sheet and return it as markdown.
+
+    Runs the same script the operator would run by hand; the host has no
+    reachable shell, so this is how the sheet gets produced in production.
+    """
+    import subprocess
+    import sys
+
+    _require_token(authorization)
+    cmd = [sys.executable, os.path.join("scripts", "generate_live_bet_sheet.py"),
+           "--experiment-id", str(experiment_id),
+           "--min-confidence", min_confidence,
+           "--max-age-minutes", str(max_age_minutes)]
+    if target_date:
+        cmd += ["--date", target_date]
+    proc = subprocess.run(cmd, cwd=_BACKEND_ROOT, capture_output=True,
+                          text=True, timeout=3600)
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=(proc.stderr or proc.stdout or "sheet generation failed")[-4000:],
+        )
+    return {"sheet": proc.stdout, "log": proc.stderr[-4000:]}
+
+
 @router.post("/register-model")
 def register_model(authorization: str | None = Header(default=None)):
     """Register the committed retrain model as an experiment (idempotent).

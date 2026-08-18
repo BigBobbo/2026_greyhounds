@@ -3,6 +3,7 @@
 from datetime import time, datetime, timedelta, timezone
 
 from scraping.betfair_odds import (
+    bsp_rows,
     imminent,
     market_local_date_time,
     match_market_to_race,
@@ -113,3 +114,48 @@ def test_snapshot_rows_map_traps_and_prices():
     assert abs(rows[0]["implied_prob"] - 1 / 3.5) < 1e-9
     assert rows[1]["dog_id"] == 502
     assert rows[0]["is_sp"] is False
+
+
+def test_snapshot_rows_carry_betfair_identifiers():
+    """market/selection ids must survive into the row: settling the same
+    market for its BSP after the off needs the exact marketId back, and it
+    cannot be re-derived once the market has left the catalogue."""
+    catalogue = {"marketId": "1.234", "runners": [
+        {"selectionId": 101, "runnerName": "1. Fast Dog"},
+    ]}
+    book = {"marketId": "1.234", "runners": [
+        {"selectionId": 101, "status": "ACTIVE",
+         "ex": {"availableToBack": [{"price": 3.5, "size": 20}]}},
+    ]}
+    rows = snapshot_rows(book, catalogue, race_id=42,
+                         entries_by_trap={1: Entry(1, 501)})
+    assert rows[0]["market_id"] == "1.234"
+    assert rows[0]["selection_id"] == 101
+
+
+def test_bsp_rows_read_actual_sp_and_skip_unreconciled():
+    book = {"marketId": "1.234", "runners": [
+        {"selectionId": 101, "status": "WINNER", "sp": {"actualSP": 4.2}},
+        {"selectionId": 102, "status": "LOSER", "sp": {"actualSP": 7.8}},
+        # Not yet reconciled — no actualSP, so no row (retried later).
+        {"selectionId": 103, "status": "LOSER", "sp": {"nearPrice": 5.0}},
+        # Withdrawn before the off — never bettable, never priced.
+        {"selectionId": 104, "status": "REMOVED", "sp": {"actualSP": 2.0}},
+    ]}
+    rows = bsp_rows(book, {101: 501, 102: 502, 103: 503, 104: 504},
+                    race_id=42, scraped_at=datetime(2026, 7, 20, 23, 30))
+    assert [r["dog_id"] for r in rows] == [501, 502]
+    assert rows[0]["odds_decimal"] == 4.2
+    assert rows[0]["bookmaker"] == "betfair_sp"
+    assert rows[0]["is_sp"] is True
+    assert rows[0]["market_id"] == "1.234"
+    assert abs(rows[1]["implied_prob"] - 1 / 7.8) < 1e-9
+
+
+def test_bsp_rows_ignore_runners_we_never_mapped():
+    """A selection with no snapshot history has no dog to attach to; it is
+    dropped rather than guessed at."""
+    book = {"marketId": "1.9", "runners": [
+        {"selectionId": 999, "status": "LOSER", "sp": {"actualSP": 3.0}},
+    ]}
+    assert bsp_rows(book, {101: 501}, race_id=42) == []

@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     betfair_api_key: str = ""
     betfair_username: str = ""
     betfair_password: str = ""
+    # Optional client-certificate pair. When both are set the client uses
+    # Betfair's certificate login instead of the interactive one — the
+    # only path that works on an account with two-factor authentication.
+    betfair_cert_file: str = ""
+    betfair_cert_key_file: str = ""
 
     # ML
     model_artifacts_dir: str = "./data/models"

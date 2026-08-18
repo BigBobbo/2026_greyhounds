@@ -15,3 +15,10 @@ class OddsSnapshot(Base):
     implied_prob = Column(Float)
     scraped_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     is_sp = Column(Boolean, default=False)
+
+    # Betfair identifiers for the market/runner this price came from.
+    # Kept so the same market can be re-listed after the off to settle its
+    # Betfair Starting Price — a closed market cannot be found again from
+    # (race, dog) alone.
+    market_id = Column(String, index=True)
+    selection_id = Column(Integer)

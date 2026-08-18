@@ -154,6 +154,32 @@ def _capture_betfair_odds():
         db.close()
 
 
+def _settle_betfair_bsp():
+    """Read back the Betfair Starting Price for every market we priced
+    today, once the exchange has reconciled them.
+
+    The pre-race snapshots record what was showing when we looked; the BSP
+    is the price a bet actually struck at the off. Storing both is what
+    lets the model/market blend eventually be refitted on exchange prices
+    rather than on the bookmaker SPs scraped from GRI. Idempotent, so
+    running it twice (some markets reconcile late) is free.
+
+    Settles yesterday as well as today: the mop-up pass fires after
+    midnight Dublin, by which point "today" is a day with no card yet and
+    the markets that reconciled late belong to the previous date."""
+    db = SessionLocal()
+    try:
+        from scraping.betfair_odds import capture_bsp_from_settings
+
+        today = _irish_today()
+        for target in (today, today - timedelta(days=1)):
+            capture_bsp_from_settings(db, target)
+    except Exception as e:
+        logger.error("BSP settlement failed: %s", e)
+    finally:
+        db.close()
+
+
 def _rescrape_trailing_window(days: int = 14):
     """Re-scrape the trailing window to pick up GRI's post-publication
     amendments (corrected SPs, weights, comments, runner identities)."""
@@ -321,6 +347,17 @@ def start_scheduler():
         trigger=CronTrigger(hour="12-22", minute="0,20,40", timezone=DUBLIN),
         id="betfair_odds_capture",
         name="Betfair odds capture (every 20min, race hours)",
+        replace_existing=True,
+    )
+
+    # Settle the day's captured markets at their Betfair SP. Runs twice:
+    # 23:15 catches everything from a normal card, 00:15 mops up markets
+    # that reconciled late. Both are no-ops without credentials.
+    scheduler.add_job(
+        _settle_betfair_bsp,
+        trigger=CronTrigger(hour="23,0", minute=15, timezone=DUBLIN),
+        id="betfair_bsp_settle",
+        name="Betfair SP settlement",
         replace_existing=True,
     )
 

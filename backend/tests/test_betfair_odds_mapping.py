@@ -1,14 +1,29 @@
 """Unit tests for the Betfair odds-capture mapping logic (no network)."""
 
-from datetime import time, datetime
+from datetime import time, datetime, timedelta, timezone
 
 from scraping.betfair_odds import (
+    imminent,
     market_local_date_time,
     match_market_to_race,
     normalise_venue,
     parse_runner_trap,
     snapshot_rows,
 )
+
+
+def test_imminent_window_excludes_started_and_distant_markets():
+    now = datetime.now(timezone.utc)
+
+    def market(minutes_from_now):
+        start = now + timedelta(minutes=minutes_from_now)
+        return {"marketStartTime": start.isoformat().replace("+00:00", "Z")}
+
+    markets = [market(-30), market(5), market(90), market(240)]
+    picked = imminent(markets, 120)
+    assert len(picked) == 2  # the +5 and +90 only
+    assert imminent(markets, 10) == [markets[1]]
+    assert imminent(markets, 0) == []
 
 
 class Row:

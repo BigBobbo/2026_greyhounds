@@ -202,6 +202,44 @@ def dog_backfill_status(authorization: str | None = Header(default=None)):
     return dict(_dogs_state)
 
 
+@router.get("/betfair-check")
+def betfair_check(authorization: str | None = Header(default=None)):
+    """Verify Betfair credentials end to end without returning any of them.
+
+    Reports config presence, login success, market counts, and how many
+    markets match scheduled races — enough to confirm the integration is
+    live, safe to read over the wire.
+    """
+    _require_token(authorization)
+    from app.database import SessionLocal
+    from scraping.betfair_odds import diagnose
+
+    db = SessionLocal()
+    try:
+        return diagnose(db)
+    finally:
+        db.close()
+
+
+@router.post("/capture-odds")
+def capture_odds_now(authorization: str | None = Header(default=None)):
+    """Run one odds-capture pass immediately (the cron does this on a
+    schedule; this is for verifying the first one by hand)."""
+    _require_token(authorization)
+    from app.database import SessionLocal
+    from scraping.betfair_odds import capture_from_settings
+
+    db = SessionLocal()
+    try:
+        written = capture_from_settings(db)
+        if written < 0:
+            raise HTTPException(status_code=400,
+                                detail="Betfair credentials not configured")
+        return {"snapshots_written": written}
+    finally:
+        db.close()
+
+
 @router.post("/register-model")
 def register_model(authorization: str | None = Header(default=None)):
     """Register the committed retrain model as an experiment (idempotent).

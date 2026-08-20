@@ -172,7 +172,8 @@ def _post(url: str, data: bytes, headers: dict, timeout: int = 30):
     ctx = ssl.create_default_context()
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            return json.loads(resp.read().decode() or "{}")
+            raw = resp.read().decode(errors="replace").strip()
+            status = resp.getcode()
     except urllib.error.HTTPError as e:
         body = ""
         try:
@@ -180,6 +181,16 @@ def _post(url: str, data: bytes, headers: dict, timeout: int = 30):
         except Exception:
             pass
         raise BetfairError(e.code, _aping_code(body), body) from None
+
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except ValueError:
+        # A 200 whose body is not JSON — Betfair answers some rejections
+        # with an XML fault and an OK status. Surface the body (and the
+        # error code inside it) instead of dying in the JSON decoder.
+        raise BetfairError(status, _aping_code(raw), raw) from None
 
 
 def login(cfg: dict) -> str:

@@ -58,7 +58,11 @@ A laptop that sleeps will miss races. Two options:
 | Message | What it means |
 |---|---|
 | `403 Forbidden` | The connection is being blocked. Check you are not on a VPN routing through another country. |
-| `Betfair login rejected` | Wrong username or password, or the application key is not active yet. |
+| `Betfair login rejected: SUSPENDED` | The login worked — the Betfair account itself needs attention. Log in at betfair.com in a browser; for a new account this is usually identity verification (photo ID and proof of address). |
+| `Betfair login rejected: INVALID_USERNAME_OR_PASSWORD` | Wrong details. Betfair wants the username, not the email address. |
+| `Betfair login rejected: <anything else>` | The message now explains the specific code and what to do. |
+| `INVALID_APP_KEY` | The app key does not belong to the account you logged in with. If you switched Betfair accounts, create a new app key from the NEW account. |
+| `Check FAILED` | The check found a real problem — the message above it says what. Nothing was sent. |
 | `no Irish markets in the next 120 min` | Normal outside racing hours, or when no Irish meetings are on. |
 | `could not reach the app` | Internet problem, or the app is restarting. It will retry on the next check. |
 | `unmatched: ...` | Prices arrived but the app could not match that track to a race. Worth reporting — usually a track-name spelling difference. |

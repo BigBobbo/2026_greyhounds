@@ -31,6 +31,17 @@ prices, using a token that can do nothing except send prices.
    Success looks like a list of upcoming races and "Config looks good."
    Nothing is sent to the app in check mode.
 
+## Checking what Betfair offers
+
+```
+python3 betfair_capture_agent.py --explore
+```
+
+Lists every greyhound race Betfair is pricing in the next 24 hours,
+grouped by country. Use this if `--check` keeps saying "no Irish
+markets" — it distinguishes "nothing on right now" from "Betfair does
+not cover these tracks".
+
 ## Running it
 
 ```

@@ -19,6 +19,11 @@ Setup: copy agent.env.example to agent.env, fill it in, then run
     python3 betfair_capture_agent.py --check    # verify config, no posting
 """
 
+# Keeps modern type hints readable while still running on the Python 3.9
+# that ships with macOS — without this, "str | None" in a signature is
+# evaluated at import time and raises TypeError there.
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -29,6 +34,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+
+if sys.version_info < (3, 8):
+    sys.exit(
+        f"This needs Python 3.8 or newer; found {sys.version.split()[0]}. "
+        "On a Mac, install the latest from python.org."
+    )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOGIN_URL = "https://identitysso.betfair.com/api/login"

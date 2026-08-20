@@ -113,6 +113,33 @@ def bootstrap_ci(pnls: list[float], stakes: list[float], n: int = 2000):
     return (rois[int(0.05 * len(rois))], rois[int(0.95 * len(rois))])
 
 
+RULES = {
+    # What the bet sheet prints: min_edge from the live bankroll config
+    # (0.05), measured after commission.
+    "sheet (min_edge 0.05, net)": dict(min_edge=None, net_space=True),
+    # What the backtest that produced +28.9% actually used: min_edge 0.02,
+    # measured against gross odds.
+    "backtest (min_edge 0.02, gross)": dict(min_edge=0.02, net_space=False),
+    # The sheet's threshold measured the backtest's way, to separate the
+    # two differences.
+    "min_edge 0.05, gross": dict(min_edge=0.05, net_space=False),
+    "min_edge 0.02, net": dict(min_edge=0.02, net_space=True),
+}
+
+
+def qualifies(prob: float, sp: float, cfg: dict, rule: dict):
+    """Return (bet: bool, stake_price: float) under one rule."""
+    commission = float(cfg["commission_rate"])
+    min_edge = rule["min_edge"]
+    if min_edge is None:
+        min_edge = float(cfg["min_edge"])
+    if sp < float(cfg["min_odds"]):
+        return False, sp
+    implied = (1.0 / (1.0 + (sp - 1.0) * (1.0 - commission))
+               if rule["net_space"] else 1.0 / sp)
+    return (prob - implied) >= min_edge, sp
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--from", dest="start", type=date_cls.fromisoformat, required=True)
@@ -128,6 +155,7 @@ def main() -> int:
     commission = float(cfg["commission_rate"])
 
     considered = skipped_no_sp = skipped_post_hoc = 0
+    arms = {name: {"pnl": [], "stake": [], "win": 0} for name in RULES}
     placed_pnl: list[float] = []
     placed_stake: list[float] = []
     placed_win = 0
@@ -186,6 +214,18 @@ def main() -> int:
             floor = min_odds_for(prob, cfg)
             completeness = float(top.get("data_completeness") or 1.0)
 
+            for name, rule in RULES.items():
+                ok, price = qualifies(prob, sp, cfg, rule)
+                if not ok:
+                    continue
+                st = stake_for(prob, price, cfg, completeness)
+                if st < 0.01:
+                    continue
+                arms[name]["pnl"].append(
+                    st * (price - 1.0) * (1.0 - commission) if won else -st)
+                arms[name]["stake"].append(st)
+                arms[name]["win"] += int(won)
+
             # The sheet's rule: stake sized at the floor, bet only if the
             # price is at or above it.
             if floor is not None:
@@ -239,6 +279,18 @@ def main() -> int:
         print(f"  ROI             : {roi:+.1f}%   (90% CI {lo:+.1f}% .. {hi:+.1f}%)")
     else:
         print("\nBET SHEET RULE — no qualifying bets in this window")
+
+    print("\nRULE COMPARISON (all settled at SP, commission applied)")
+    print(f"  {'rule':34s} {'bets':>5s} {'win%':>6s} {'ROI':>8s}   90% CI")
+    for name, a in arms.items():
+        if not a["pnl"]:
+            print(f"  {name:34s} {'0':>5s}")
+            continue
+        n = len(a["pnl"])
+        roi = 100.0 * sum(a["pnl"]) / sum(a["stake"])
+        lo, hi = bootstrap_ci(a["pnl"], a["stake"])
+        print(f"  {name:34s} {n:5d} {a['win'] / n:6.1%} {roi:+7.1f}%   "
+              f"[{lo:+.1f}%, {hi:+.1f}%]")
 
     if all_pnl:
         roi = 100.0 * sum(all_pnl) / sum(all_stake)

@@ -68,11 +68,86 @@ def load_config() -> dict:
     return cfg
 
 
+class BetfairError(Exception):
+    """A rejected Betfair call, carrying the code Betfair actually sent.
+
+    Betfair answers a 400 with a body naming the exact problem (e.g.
+    INVALID_APP_KEY). Reporting only "HTTP 400" throws away the one piece
+    of information that identifies the fix.
+    """
+
+    def __init__(self, status: int, code: str | None, body: str):
+        self.status = status
+        self.code = code
+        self.body = body
+        super().__init__(f"HTTP {status}" + (f" / {code}" if code else ""))
+
+
+def _aping_code(body: str) -> str | None:
+    """Pull errorCode out of a Betfair error body, if it has one."""
+    try:
+        payload = json.loads(body)
+    except Exception:
+        return None
+    detail = payload.get("detail") or {}
+    for key in ("APINGException", "AccountAPINGException"):
+        code = (detail.get(key) or {}).get("errorCode")
+        if code:
+            return code
+    return payload.get("errorCode") or payload.get("faultstring")
+
+
+# What Betfair's API error codes mean in practice.
+API_ERRORS = {
+    "INVALID_APP_KEY":
+        "Betfair does not recognise this application key for this account. "
+        "App keys belong to the account that created them — if you have "
+        "switched to a new Betfair account, you need a NEW app key created "
+        "from that account, not the old one.",
+    "NO_APP_KEY":
+        "No application key was sent. Check BETFAIR_API_KEY in agent.env.",
+    "NO_SESSION":
+        "The login session was not accepted. Try running the check again.",
+    "INVALID_SESSION_INFORMATION":
+        "The login session expired or was rejected. Try again; if it "
+        "persists, the app key and the logged-in account may not match.",
+    "ACCESS_DENIED":
+        "The app key is not permitted to make this call. A brand-new "
+        "delayed key sometimes needs activating on the Betfair developer "
+        "page before it will return market data.",
+    "INVALID_INPUT_DATA":
+        "Betfair rejected the request format. Tell Rob — this one is a bug "
+        "in the agent rather than anything you set up.",
+    "TOO_MUCH_DATA":
+        "The request asked for too much at once. Tell Rob.",
+    "SERVICE_BUSY":
+        "Betfair is busy. It will retry on the next check.",
+}
+
+
+def explain_api_error(err: "BetfairError") -> str:
+    if err.code and err.code in API_ERRORS:
+        return API_ERRORS[err.code]
+    if err.code:
+        return (f"Betfair rejected the request with '{err.code}'. Send this "
+                "code to Rob if it is not obvious what it means.")
+    return (f"Betfair returned HTTP {err.status} without an error code. "
+            f"Response begins: {err.body[:200]}")
+
+
 def _post(url: str, data: bytes, headers: dict, timeout: int = 30):
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-        return json.loads(resp.read().decode() or "{}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            return json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode(errors="replace")
+        except Exception:
+            pass
+        raise BetfairError(e.code, _aping_code(body), body) from None
 
 
 def login(cfg: dict) -> str:
@@ -87,14 +162,14 @@ def login(cfg: dict) -> str:
             "Accept": "application/json",
             "Content-Type": "application/x-www-form-urlencoded",
         })
-    except urllib.error.HTTPError as e:
-        if e.code == 403:
+    except BetfairError as e:
+        if e.status == 403:
             sys.exit(
                 "Betfair returned 403 Forbidden. This machine's connection "
                 "is being blocked — check you are in Ireland/UK and not on "
                 "a VPN routing through another country."
             )
-        sys.exit(f"Betfair login failed: HTTP {e.code}")
+        sys.exit(f"Betfair login failed: {e}\n\n{explain_api_error(e)}")
     if payload.get("status") != "SUCCESS":
         code = payload.get("error") or payload.get("status") or "UNKNOWN"
         sys.exit(f"Betfair login rejected: {code}\n\n{explain_login_error(code)}")
@@ -232,40 +307,46 @@ def post_to_app(cfg: dict, markets: list[dict]) -> dict:
     }, timeout=60)
 
 
-def one_pass(cfg: dict, post: bool = True) -> None:
+def one_pass(cfg: dict, post: bool = True) -> bool:
+    """One capture pass. Returns True only if it genuinely succeeded, so
+    --check cannot report success over a failed run."""
     stamp = datetime.now().strftime("%H:%M:%S")
     try:
         token = login(cfg)
         markets = collect(cfg, token)
+    except BetfairError as e:
+        print(f"[{stamp}] Betfair rejected the request: {e}\n"
+              f"    {explain_api_error(e)}", flush=True)
+        return False
     except urllib.error.URLError as e:
         print(f"[{stamp}] Betfair unreachable: {e}", flush=True)
-        return
+        return False
     if not markets:
         print(f"[{stamp}] no Irish markets in the next {WITHIN_MINUTES} min",
               flush=True)
-        return
+        return True  # nothing to send, but everything worked
     runners = sum(len(m["runners"]) for m in markets)
     if not post:
         print(f"[{stamp}] would send {len(markets)} markets, {runners} prices")
         for m in markets[:3]:
             print(f"    {m['venue']} {m['market_start_time']} "
                   f"({len(m['runners'])} runners)")
-        return
+        return True
     try:
         result = post_to_app(cfg, markets)
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode()[:200]
-        print(f"[{stamp}] app rejected the prices: HTTP {e.code} {detail}",
-              flush=True)
-        return
+    except BetfairError as e:  # raised by _post for the app call too
+        print(f"[{stamp}] the app rejected the prices: HTTP {e.status} "
+              f"{e.body[:200]}", flush=True)
+        return False
     except urllib.error.URLError as e:
         print(f"[{stamp}] could not reach the app: {e}", flush=True)
-        return
+        return False
     print(f"[{stamp}] sent {len(markets)} markets / {runners} prices -> "
           f"{result.get('snapshots_written', 0)} stored, "
           f"{result.get('markets_unmatched', 0)} unmatched", flush=True)
     if result.get("unmatched"):
         print(f"    unmatched: {', '.join(result['unmatched'])}", flush=True)
+    return True
 
 
 def main() -> None:
@@ -278,12 +359,13 @@ def main() -> None:
     cfg = load_config()
 
     if args.check:
-        one_pass(cfg, post=False)
-        print("Config looks good.")
-        return
+        if one_pass(cfg, post=False):
+            print("\nConfig looks good.")
+            return
+        print("\nCheck FAILED — see the message above. Nothing was sent.")
+        sys.exit(1)
     if args.once:
-        one_pass(cfg)
-        return
+        sys.exit(0 if one_pass(cfg) else 1)
 
     print(f"Capture agent running. Polling every {POLL_SECONDS // 60} minutes "
           f"between {ACTIVE_HOURS[0]}:00 and {ACTIVE_HOURS[-1]}:59. "

@@ -42,6 +42,11 @@ if sys.version_info < (3, 8):
         "On a Mac, install the latest from python.org."
     )
 
+# Bump when the agent changes. Printed on every run so a stale copy on
+# someone's machine is obvious instead of being diagnosed from a
+# traceback's line numbers.
+AGENT_VERSION = "2026.08.20.1"
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOGIN_URL = "https://identitysso.betfair.com/api/login"
 API_URL = "https://api.betfair.com/exchange/betting/rest/v1.0"
@@ -400,7 +405,14 @@ def main() -> None:
                     help="single pass then exit (for cron/Task Scheduler)")
     ap.add_argument("--check", action="store_true",
                     help="verify login and show what would be sent")
+    ap.add_argument("--version", action="store_true",
+                    help="print the agent version and exit")
     args = ap.parse_args()
+    if args.version:
+        print(AGENT_VERSION)
+        return
+    print(f"Betfair capture agent {AGENT_VERSION} "
+          f"(Python {sys.version.split()[0]})", flush=True)
     cfg = load_config()
 
     if args.check:

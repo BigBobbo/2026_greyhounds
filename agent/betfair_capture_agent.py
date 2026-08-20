@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import ssl
 import sys
 import time
@@ -95,17 +96,37 @@ class BetfairError(Exception):
 
 
 def _aping_code(body: str) -> str | None:
-    """Pull errorCode out of a Betfair error body, if it has one."""
-    try:
-        payload = json.loads(body)
-    except Exception:
+    """Pull errorCode out of a Betfair error body, if it has one.
+
+    Betfair answers in JSON or XML depending on the Accept header and how
+    early the request was rejected, so handle both — reading only JSON
+    meant a real INVALID_APP_KEY was reported as "no error code".
+    """
+    body = (body or "").strip()
+    if not body:
         return None
-    detail = payload.get("detail") or {}
-    for key in ("APINGException", "AccountAPINGException"):
-        code = (detail.get(key) or {}).get("errorCode")
-        if code:
-            return code
-    return payload.get("errorCode") or payload.get("faultstring")
+    if body.startswith("{"):
+        try:
+            payload = json.loads(body)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            detail = payload.get("detail") or {}
+            for key in ("APINGException", "AccountAPINGException"):
+                code = (detail.get(key) or {}).get("errorCode")
+                if code:
+                    return code
+            return payload.get("errorCode") or payload.get("faultstring")
+    # XML form: <APINGException><errorCode>INVALID_APP_KEY</errorCode>...
+    match = re.search(r"<errorCode>\s*([A-Z0-9_]+)\s*</errorCode>", body)
+    if match:
+        return match.group(1)
+    # Truncated bodies still carry the opening tag; take what's there.
+    match = re.search(r"<errorCode>\s*([A-Z0-9_]+)", body)
+    if match:
+        return match.group(1)
+    match = re.search(r"<faultstring>\s*([^<]+)", body)
+    return match.group(1).strip() if match else None
 
 
 # What Betfair's API error codes mean in practice.
@@ -143,7 +164,7 @@ def explain_api_error(err: "BetfairError") -> str:
         return (f"Betfair rejected the request with '{err.code}'. Send this "
                 "code to Rob if it is not obvious what it means.")
     return (f"Betfair returned HTTP {err.status} without an error code. "
-            f"Response begins: {err.body[:200]}")
+            f"Response begins: {err.body[:400]}")
 
 
 def _post(url: str, data: bytes, headers: dict, timeout: int = 30):
@@ -247,6 +268,8 @@ def api(cfg: dict, token: str, path: str, body: dict):
         "X-Application": cfg["BETFAIR_API_KEY"],
         "X-Authentication": token,
         "Content-Type": "application/json",
+        # Without this Betfair replies to errors in XML.
+        "Accept": "application/json",
     })
 
 

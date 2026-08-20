@@ -119,6 +119,47 @@ def test_error_codes_are_extracted_from_either_format(agent, body, expected):
     assert agent._aping_code(body) == expected
 
 
+def test_non_json_success_body_is_surfaced_not_crashed(agent, monkeypatch):
+    """Betfair can answer a rejection with an XML fault and a 200 status.
+    Assuming success means JSON killed the agent in the decoder, hiding
+    the body that said what was wrong."""
+    import contextlib
+    import io
+
+    class FakeResponse(io.BytesIO):
+        def getcode(self):
+            return 200
+
+    @contextlib.contextmanager
+    def fake_urlopen(req, timeout=None, context=None):
+        yield FakeResponse(BETFAIR_XML.encode())
+
+    monkeypatch.setattr(agent.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(agent.BetfairError) as excinfo:
+        agent._post("https://example.invalid", b"{}", {})
+    err = excinfo.value
+    assert err.status == 200
+    assert err.code == "INVALID_APP_KEY"      # code recovered from the body
+    assert "APINGException" in err.body        # body preserved for diagnosis
+
+
+def test_empty_success_body_is_not_an_error(agent, monkeypatch):
+    import contextlib
+    import io
+
+    class FakeResponse(io.BytesIO):
+        def getcode(self):
+            return 200
+
+    @contextlib.contextmanager
+    def fake_urlopen(req, timeout=None, context=None):
+        yield FakeResponse(b"   ")
+
+    monkeypatch.setattr(agent.urllib.request, "urlopen", fake_urlopen)
+    assert agent._post("https://example.invalid", b"{}", {}) == {}
+
+
 def test_known_error_codes_have_actionable_explanations(agent):
     err = agent.BetfairError(400, "INVALID_APP_KEY", BETFAIR_XML)
     assert str(err) == "HTTP 400 / INVALID_APP_KEY"

@@ -45,7 +45,7 @@ if sys.version_info < (3, 8):
 # Bump when the agent changes. Printed on every run so a stale copy on
 # someone's machine is obvious instead of being diagnosed from a
 # traceback's line numbers.
-AGENT_VERSION = "2026.08.20.1"
+AGENT_VERSION = "2026.08.20.2"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOGIN_URL = "https://identitysso.betfair.com/api/login"
@@ -306,6 +306,65 @@ def upcoming_markets(cfg: dict, token: str) -> list[dict]:
     })
 
 
+def explore(cfg: dict, token: str) -> None:
+    """Report what greyhound racing Betfair actually offers.
+
+    The capture filter asks for Irish WIN markets. If that comes back
+    empty it matters enormously whether the cause is "no racing right
+    now" or "Betfair does not price these tracks at all" — the second
+    would mean exchange prices are unavailable for this sport, which no
+    amount of code can fix. This asks without the country filter and
+    shows what comes back.
+    """
+    now = datetime.now(timezone.utc)
+    window_hours = 24
+    markets = api(cfg, token, "listMarketCatalogue", {
+        "filter": {
+            "eventTypeIds": [GREYHOUND_EVENT_TYPE],
+            "marketTypeCodes": ["WIN"],
+            "marketStartTime": {
+                "from": now.isoformat(),
+                "to": (now + timedelta(hours=window_hours)).isoformat(),
+            },
+        },
+        "marketProjection": ["EVENT", "MARKET_START_TIME"],
+        "maxResults": 200,
+    })
+    print(f"\nGreyhound WIN markets in the next {window_hours}h "
+          f"(all countries): {len(markets)}")
+    if not markets:
+        print("  Betfair is offering no greyhound win markets at all in "
+              "this window.")
+        return
+
+    by_country = {}
+    for m in markets:
+        event = m.get("event") or {}
+        country = event.get("countryCode") or "(none)"
+        by_country.setdefault(country, []).append(
+            (event.get("venue") or event.get("name") or "?",
+             m.get("marketStartTime", "")[:16].replace("T", " ")))
+    for country in sorted(by_country, key=lambda c: -len(by_country[c])):
+        rows = by_country[country]
+        venues = sorted({v for v, _ in rows})
+        print(f"  {country}: {len(rows)} markets across {len(venues)} venue(s)")
+        print(f"      {', '.join(venues[:12])}")
+        for venue, start in rows[:3]:
+            print(f"      e.g. {venue} at {start} UTC")
+
+    irish = by_country.get("IE", [])
+    print()
+    if irish:
+        print(f"Irish markets ARE available ({len(irish)} in the next "
+              f"{window_hours}h) — capture will work; the earlier empty "
+              "result was just timing.")
+    else:
+        print("No Irish (IE) greyhound markets in this window. If this "
+              "repeats across a racing evening, Betfair does not price "
+              "Irish greyhound racing and exchange odds are not available "
+              "for this sport.")
+
+
 def collect(cfg: dict, token: str) -> list[dict]:
     """One capture pass -> payload markets ready to post."""
     catalogue = upcoming_markets(cfg, token)
@@ -407,6 +466,9 @@ def main() -> None:
                     help="verify login and show what would be sent")
     ap.add_argument("--version", action="store_true",
                     help="print the agent version and exit")
+    ap.add_argument("--explore", action="store_true",
+                    help="show what greyhound racing Betfair offers, "
+                         "regardless of country (diagnostic)")
     args = ap.parse_args()
     if args.version:
         print(AGENT_VERSION)
@@ -415,6 +477,9 @@ def main() -> None:
           f"(Python {sys.version.split()[0]})", flush=True)
     cfg = load_config()
 
+    if args.explore:
+        explore(cfg, login(cfg))
+        return
     if args.check:
         if one_pass(cfg, post=False):
             print("\nConfig looks good.")

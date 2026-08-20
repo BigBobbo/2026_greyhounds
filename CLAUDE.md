@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Start here
+
+`docs/ORIENTATION.md` — current state, what is proven vs unproven, and the
+non-obvious traps (database-local race ids, leakage rules, SP being a
+closing price, Betfair not covering Irish racing). Read it before changing
+anything in the modelling or betting path.
+
 ## Project Overview
 
 Greyhound Predictor — an Irish greyhound race prediction app with a Python/FastAPI ML backend and React/TypeScript frontend. It scrapes race data from GRI Ireland, computes configurable features, trains ML models (XGBoost, LightGBM, LambdaRank, sklearn), and serves predictions with Kelly criterion bankroll management.

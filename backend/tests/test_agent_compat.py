@@ -85,6 +85,54 @@ def test_no_pep604_unions_outside_annotations(source):
     )
 
 
+@pytest.fixture(scope="module")
+def agent():
+    """Import the agent module by path (it lives outside the package)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("capture_agent", AGENT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Betfair replies in XML or JSON depending on the Accept header and how
+# early the request is rejected. Reading only JSON meant a real
+# INVALID_APP_KEY surfaced to the user as "no error code".
+BETFAIR_XML = (
+    "<?xml version='1.0' encoding='utf-8'?><fault><faultcode>Client</faultcode>"
+    "<faultstring>ANGX-0007</faultstring><detail>"
+    "<exceptionname>APINGException</exceptionname><APINGException>"
+    "<errorCode>INVALID_APP_KEY</errorCode></APINGException></detail></fault>"
+)
+
+
+@pytest.mark.parametrize("body,expected", [
+    (BETFAIR_XML, "INVALID_APP_KEY"),
+    (BETFAIR_XML[:210], "INVALID_APP_KEY"),          # truncated mid-document
+    ('{"detail":{"APINGException":{"errorCode":"NO_SESSION"}}}', "NO_SESSION"),
+    ("", None),
+    ("<html>not an api response</html>", None),
+    ("{not valid json", None),
+])
+def test_error_codes_are_extracted_from_either_format(agent, body, expected):
+    assert agent._aping_code(body) == expected
+
+
+def test_known_error_codes_have_actionable_explanations(agent):
+    err = agent.BetfairError(400, "INVALID_APP_KEY", BETFAIR_XML)
+    assert str(err) == "HTTP 400 / INVALID_APP_KEY"
+    assert "app key" in agent.explain_api_error(err).lower()
+    # An unknown code still tells the operator what to do with it.
+    unknown = agent.BetfairError(400, "SOME_NEW_CODE", "")
+    assert "SOME_NEW_CODE" in agent.explain_api_error(unknown)
+
+
+def test_data_calls_request_json_responses(source):
+    """The Accept header is why errors come back parseable at all."""
+    assert '"Accept": "application/json"' in source
+
+
 def test_agent_uses_only_the_standard_library(source):
     """Setup on a home machine is 'install Python and run it' — a
     third-party import silently breaks that promise."""

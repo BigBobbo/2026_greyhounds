@@ -1930,8 +1930,28 @@ def compute_h2h_features_batch(
     for dogs in field_by_race.values():
         dogs_of_interest.update(dogs)
 
+    def _neutral_h2h() -> pd.DataFrame:
+        # The exact values the per-entry loop emits for a dog with zero
+        # prior meetings (Beta(1,3)-shrunk rate included). Returning these
+        # instead of an empty frame keeps the column set stable, so an
+        # all-debutant field (trials, qualifiers) predicts like it trains
+        # instead of raising PredictionDataError at serve time.
+        df = pd.DataFrame(
+            {
+                "h2h_meetings_vs_field": 0.0,
+                "h2h_wins_vs_field": 0.0,
+                "h2h_losses_vs_field": 0.0,
+                "h2h_win_rate_vs_field": 0.25,
+                "h2h_avg_beaten_length_vs_field": np.nan,
+                "best_opponent_beaten_count": 0.0,
+            },
+            index=target_df.index,
+        )
+        df.index.name = "race_entry_id"
+        return df
+
     if not dogs_of_interest:
-        return pd.DataFrame()
+        return _neutral_h2h()
 
     _hb()
 
@@ -1961,7 +1981,7 @@ def compute_h2h_features_batch(
     )
 
     if not history_rows:
-        return pd.DataFrame()
+        return _neutral_h2h()
 
     # race_id -> list of (dog_id, finish_position, beaten_distance, race_date)
     race_to_entries: dict[int, list[tuple]] = defaultdict(list)

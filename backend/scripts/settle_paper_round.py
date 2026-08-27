@@ -109,6 +109,33 @@ def main() -> int:
         if not exists:
             w.writeheader()
         w.writerows(rows)
+
+    # --- pre-registered checkpoint check (docs/PROTOCOL.md) -------------
+    with open(ledger_path) as f:
+        allrows = list(csv.DictReader(f))
+    n = len(allrows)
+    checkpoints = [100, 250, 500, 1000]
+    prev_n = n - len(rows)
+    hit = [c for c in checkpoints if prev_n < c <= n]
+    if hit:
+        import random
+        pnl = [float(r["pnl_tissue"]) for r in allrows]
+        st = [float(r["stake"]) for r in allrows]
+        rng = random.Random(99)
+        rois = []
+        for _ in range(4000):
+            idx = [rng.randrange(n) for _ in range(n)]
+            s = sum(st[i] for i in idx)
+            if s > 0:
+                rois.append(sum(pnl[i] for i in idx) / s)
+        rois.sort()
+        lo = rois[int(0.00625 * len(rois))]
+        hi = rois[int(0.99375 * len(rois)) - 1]
+        roi = sum(pnl) / sum(st)
+        verdict = ("GO" if lo > 0 else "STOP" if hi < 0 else "CONTINUE")
+        print(f"[PROTOCOL] CHECKPOINT {hit[0]} REACHED: n={n} "
+              f"ROI {roi*100:+.1f}% 98.75% CI [{lo*100:+.1f}%,{hi*100:+.1f}%] "
+              f"-> {verdict}. Record this in docs/PROTOCOL.md and tell the user.")
     staked = sum(r["stake"] for r in rows)
     pnl = sum(r["pnl_tissue"] for r in rows)
     print(f"[settle] {day}: {len(rows)} bets, {sum(r['won'] for r in rows)} wins, "

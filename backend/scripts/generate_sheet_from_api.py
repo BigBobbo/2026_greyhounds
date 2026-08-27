@@ -145,11 +145,19 @@ def main() -> int:
         ok = True
         for p in plist:
             n = norm(p.get("dog_name") or "")
-            if n not in prices_by_name or prices_by_name[n][1] is None:
+            hit = prices_by_name.get(n)
+            if hit is None:
+                # Racing Post cards truncate long names at ~16 chars;
+                # accept a unique prefix match of decent length.
+                pref = [v for k, v in prices_by_name.items()
+                        if len(k) >= 10 and n.startswith(k)]
+                if len(pref) == 1:
+                    hit = pref[0]
+            if hit is None or hit[1] is None:
                 ok = False
                 break
             pm.append(float(p["win_probability"]))
-            price.append(prices_by_name[n][1])
+            price.append(hit[1])
         if not ok or sum(pm) <= 0:
             skipped["no_prices"] += 1
             continue

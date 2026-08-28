@@ -94,7 +94,12 @@ def main() -> int:
         races = races.get("races") or races.get("items") or []
     api_races = []
     for r in races:
-        preds = get(f"/api/predictions/race/{r['id']}/saved?experiment_id=59")
+        try:
+            preds = get(f"/api/predictions/race/{r['id']}/saved?experiment_id=59")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                continue  # race has no saved predictions
+            raise
         if isinstance(preds, dict):
             preds = preds.get("predictions") or preds.get("items") or []
         priced = [p for p in preds if p.get("win_probability") is not None]

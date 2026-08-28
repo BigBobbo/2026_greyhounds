@@ -48,13 +48,20 @@ def main() -> int:
     if not os.path.exists(sheet_path):
         print(f"[settle] no sheet json for {day}; nothing to settle")
         return 0
+    # Per-bet dedup (not per-date): a bet whose result was missing on the
+    # first pass gets retried on later runs instead of being lost.
+    settled_keys = set()
     if os.path.exists(ledger_path):
         with open(ledger_path) as f:
-            if any(row.startswith(str(day)) for row in f):
-                print(f"[settle] {day} already in ledger; skipping")
-                return 0
+            for r in csv.DictReader(f):
+                settled_keys.add((r["date"], r["track"], r["race_no"], r["trap"]))
 
     bets = json.load(open(sheet_path))
+    bets = [b for b in bets if (str(day), str(b["track"]), str(b["race_no"]),
+                                str(b["trap"])) not in settled_keys]
+    if not bets:
+        print(f"[settle] {day}: all bets already settled")
+        return 0
     races = get(f"/api/predictions/races-for-date?race_date={day}")
     if isinstance(races, dict):
         races = races.get("races") or races.get("items") or []

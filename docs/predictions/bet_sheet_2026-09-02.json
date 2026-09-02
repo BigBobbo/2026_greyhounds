@@ -1,0 +1,93 @@
+[
+ {
+  "time": "11:13",
+  "track": "Kilkenny",
+  "race_no": 2,
+  "trap": 3,
+  "dog": "RING JAY KAY",
+  "p_model": 0.375,
+  "p_blend": 0.342,
+  "tissue": 4.0,
+  "min_price": 3.2,
+  "edge_at_tissue": 0.0923,
+  "stake": 0.93
+ },
+ {
+  "time": "12:04",
+  "track": "Kilkenny",
+  "race_no": 5,
+  "trap": 4,
+  "dog": "FIELD LANE",
+  "p_model": 0.311,
+  "p_blend": 0.323,
+  "tissue": 4.0,
+  "min_price": 3.41,
+  "edge_at_tissue": 0.0731,
+  "stake": 0.75
+ },
+ {
+  "time": "12:54",
+  "track": "Kilkenny",
+  "race_no": 8,
+  "trap": 6,
+  "dog": "FEED ME SORBET",
+  "p_model": 0.313,
+  "p_blend": 0.369,
+  "tissue": 3.25,
+  "min_price": 2.95,
+  "edge_at_tissue": 0.0614,
+  "stake": 0.68
+ },
+ {
+  "time": "13:47",
+  "track": "Kilkenny",
+  "race_no": 11,
+  "trap": 6,
+  "dog": "DANNY SAYSTA",
+  "p_model": 0.318,
+  "p_blend": 0.304,
+  "tissue": 4.0,
+  "min_price": 3.65,
+  "edge_at_tissue": 0.0537,
+  "stake": 0.55
+ },
+ {
+  "time": "14:03",
+  "track": "Kilkenny",
+  "race_no": 12,
+  "trap": 3,
+  "dog": "LARKINS SOPHIE",
+  "p_model": 0.302,
+  "p_blend": 0.357,
+  "tissue": 3.25,
+  "min_price": 3.05,
+  "edge_at_tissue": 0.0497,
+  "stake": 0.54
+ },
+ {
+  "time": "20:26",
+  "track": "Youghal",
+  "race_no": 6,
+  "trap": 2,
+  "dog": "ASHVILLE FLIGHT",
+  "p_model": 0.438,
+  "p_blend": 0.49,
+  "tissue": 2.75,
+  "min_price": 2.17,
+  "edge_at_tissue": 0.1262,
+  "stake": 1.51
+ },
+ {
+  "time": "21:01",
+  "track": "Mullingar",
+  "race_no": 10,
+  "trap": 6,
+  "dog": "INTENSE FROST",
+  "p_model": 0.41,
+  "p_blend": 0.515,
+  "tissue": 2.62,
+  "min_price": 2.06,
+  "edge_at_tissue": 0.1339,
+  "stake": 1.59
+ }
+]

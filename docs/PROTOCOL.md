@@ -32,3 +32,4 @@ per-track splits) inform *model work*, never the go/stop call.
 | Date | Bets settled | Note |
 |---|---|---|
 | 2026-08-27 | 23 | Protocol registered. Next decision read at 100 bets. |
+| 2026-09-05 | 105 | **CHECKPOINT 100: CONTINUE.** ROI +19.1%, 98.75% CI [−22.2%, +63.0%] — straddles zero. Next read at 250. |

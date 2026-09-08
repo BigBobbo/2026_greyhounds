@@ -33,3 +33,4 @@ per-track splits) inform *model work*, never the go/stop call.
 |---|---|---|
 | 2026-08-27 | 23 | Protocol registered. Next decision read at 100 bets. |
 | 2026-09-05 | 105 | **CHECKPOINT 100: CONTINUE.** ROI +19.1%, 98.75% CI [−22.2%, +63.0%] — straddles zero. Next read at 250. |
+| 2026-09-08 | 126 | **Full ledger audit vs Racing Post results** after a phantom win was found (the DB attaches results by trap, so a withdrawn dog inherits its reserve's result). All 39 wins positively confirmed; 5 bets on non-runners voided (1 recorded win, 4 recorded losses — rows removed, stakes returned). Checkpoint-100 recomputed on the corrected as-of-Sep-4 set: n=101, ROI +22.5%, 98.75% CI [−20.9%, +66.1%] — **verdict unchanged: CONTINUE**. Daily settlement now verifies every row against RP before it enters the ledger. |

@@ -1,0 +1,93 @@
+[
+ {
+  "time": "11:13",
+  "track": "Tralee",
+  "race_no": 1,
+  "trap": 4,
+  "dog": "QUADROPHENIA",
+  "p_model": 0.286,
+  "p_blend": 0.242,
+  "tissue": 5.0,
+  "min_price": 4.71,
+  "edge_at_tissue": 0.0422,
+  "stake": 0.58
+ },
+ {
+  "time": "11:45",
+  "track": "Tralee",
+  "race_no": 3,
+  "trap": 2,
+  "dog": "TOKENFIRE GLORY",
+  "p_model": 0.318,
+  "p_blend": 0.494,
+  "tissue": 2.5,
+  "min_price": 2.16,
+  "edge_at_tissue": 0.0936,
+  "stake": 1.73
+ },
+ {
+  "time": "14:18",
+  "track": "Tralee",
+  "race_no": 12,
+  "trap": 4,
+  "dog": "MUINGWEE JENNY",
+  "p_model": 0.323,
+  "p_blend": 0.36,
+  "tissue": 3.5,
+  "min_price": 3.03,
+  "edge_at_tissue": 0.0745,
+  "stake": 1.17
+ },
+ {
+  "time": "19:42",
+  "track": "Shelbourne Park",
+  "race_no": 1,
+  "trap": 1,
+  "dog": "GOLDEN DISC",
+  "p_model": 0.332,
+  "p_blend": 0.298,
+  "tissue": 4.0,
+  "min_price": 3.74,
+  "edge_at_tissue": 0.0477,
+  "stake": 0.52
+ },
+ {
+  "time": "20:12",
+  "track": "Shelbourne Park",
+  "race_no": 3,
+  "trap": 1,
+  "dog": "HIGHVIEW PEAK",
+  "p_model": 0.624,
+  "p_blend": 0.432,
+  "tissue": 4.5,
+  "min_price": 2.49,
+  "edge_at_tissue": 0.2098,
+  "stake": 2.27
+ },
+ {
+  "time": "20:57",
+  "track": "Shelbourne Park",
+  "race_no": 6,
+  "trap": 6,
+  "dog": "DARRAGHS CASHOUT",
+  "p_model": 0.398,
+  "p_blend": 0.356,
+  "tissue": 4.0,
+  "min_price": 3.07,
+  "edge_at_tissue": 0.1062,
+  "stake": 1.56
+ },
+ {
+  "time": "21:12",
+  "track": "Shelbourne Park",
+  "race_no": 7,
+  "trap": 6,
+  "dog": "DISTANT DYNAMO",
+  "p_model": 0.346,
+  "p_blend": 0.311,
+  "tissue": 4.0,
+  "min_price": 3.55,
+  "edge_at_tissue": 0.0615,
+  "stake": 0.89
+ }
+]

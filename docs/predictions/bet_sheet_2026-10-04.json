@@ -1,0 +1,80 @@
+[
+ {
+  "time": "19:04",
+  "track": "Clonmel",
+  "race_no": 4,
+  "trap": 1,
+  "dog": "KERRYROAD FANCY",
+  "p_model": 0.318,
+  "p_blend": 0.321,
+  "tissue": 3.75,
+  "min_price": 3.44,
+  "edge_at_tissue": 0.0542,
+  "stake": 1.49
+ },
+ {
+  "time": "20:34",
+  "track": "Clonmel",
+  "race_no": 9,
+  "trap": 4,
+  "dog": "SLANEYSIDE BOSCO",
+  "p_model": 0.287,
+  "p_blend": 0.317,
+  "tissue": 3.5,
+  "min_price": 3.48,
+  "edge_at_tissue": 0.0314,
+  "stake": 0.81
+ },
+ {
+  "time": "20:52",
+  "track": "Clonmel",
+  "race_no": 10,
+  "trap": 1,
+  "dog": "SLANEYSIDE CYRIL",
+  "p_model": 0.296,
+  "p_blend": 0.422,
+  "tissue": 3.0,
+  "min_price": 2.55,
+  "edge_at_tissue": 0.0884,
+  "stake": 2.73
+ },
+ {
+  "time": "20:52",
+  "track": "Clonmel",
+  "race_no": 10,
+  "trap": 4,
+  "dog": "CHAOTIC PERSHING",
+  "p_model": 0.501,
+  "p_blend": 0.282,
+  "tissue": 6.0,
+  "min_price": 3.96,
+  "edge_at_tissue": 0.1156,
+  "stake": 2.89
+ },
+ {
+  "time": "21:09",
+  "track": "Clonmel",
+  "race_no": 11,
+  "trap": 3,
+  "dog": "CLONDOTY LEONORD",
+  "p_model": 0.291,
+  "p_blend": 0.292,
+  "tissue": 4.0,
+  "min_price": 3.81,
+  "edge_at_tissue": 0.0423,
+  "stake": 1.15
+ },
+ {
+  "time": "21:26",
+  "track": "Clonmel",
+  "race_no": 12,
+  "trap": 1,
+  "dog": "CHAMBERLAIN LILY",
+  "p_model": 0.266,
+  "p_blend": 0.319,
+  "tissue": 3.5,
+  "min_price": 3.46,
+  "edge_at_tissue": 0.0331,
+  "stake": 0.92
+ }
+]

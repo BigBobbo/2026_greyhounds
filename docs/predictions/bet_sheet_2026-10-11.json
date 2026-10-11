@@ -1,0 +1,93 @@
+[
+ {
+  "time": "18:29",
+  "track": "Clonmel",
+  "race_no": 2,
+  "trap": 3,
+  "dog": "SLANEYSIDE ACTOR",
+  "p_model": 0.328,
+  "p_blend": 0.375,
+  "tissue": 3.25,
+  "min_price": 2.9,
+  "edge_at_tissue": 0.067,
+  "stake": 1.08
+ },
+ {
+  "time": "18:46",
+  "track": "Clonmel",
+  "race_no": 3,
+  "trap": 3,
+  "dog": "SLANEYSIDE PRO",
+  "p_model": 0.328,
+  "p_blend": 0.283,
+  "tissue": 4.5,
+  "min_price": 3.95,
+  "edge_at_tissue": 0.061,
+  "stake": 0.94
+ },
+ {
+  "time": "19:04",
+  "track": "Clonmel",
+  "race_no": 4,
+  "trap": 4,
+  "dog": "DAKOTA SPIRIT",
+  "p_model": 0.271,
+  "p_blend": 0.313,
+  "tissue": 3.75,
+  "min_price": 3.54,
+  "edge_at_tissue": 0.0461,
+  "stake": 0.78
+ },
+ {
+  "time": "19:24",
+  "track": "Clonmel",
+  "race_no": 5,
+  "trap": 2,
+  "dog": "ACES YOUNG",
+  "p_model": 0.688,
+  "p_blend": 0.536,
+  "tissue": 4.5,
+  "min_price": 1.98,
+  "edge_at_tissue": 0.3136,
+  "stake": 2.79
+ },
+ {
+  "time": "20:16",
+  "track": "Clonmel",
+  "race_no": 8,
+  "trap": 3,
+  "dog": "CHAOTIC PERSHING",
+  "p_model": 0.366,
+  "p_blend": 0.266,
+  "tissue": 5.0,
+  "min_price": 4.23,
+  "edge_at_tissue": 0.0664,
+  "stake": 1.03
+ },
+ {
+  "time": "20:52",
+  "track": "Clonmel",
+  "race_no": 10,
+  "trap": 4,
+  "dog": "SLANEYSIDE CYRIL",
+  "p_model": 0.374,
+  "p_blend": 0.34,
+  "tissue": 4.0,
+  "min_price": 3.22,
+  "edge_at_tissue": 0.0904,
+  "stake": 1.5
+ },
+ {
+  "time": "21:26",
+  "track": "Clonmel",
+  "race_no": 12,
+  "trap": 5,
+  "dog": "DENISES DIVA",
+  "p_model": 0.377,
+  "p_blend": 0.448,
+  "tissue": 3.0,
+  "min_price": 2.39,
+  "edge_at_tissue": 0.1145,
+  "stake": 1.88
+ }
+]

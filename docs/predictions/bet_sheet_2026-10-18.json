@@ -1,0 +1,93 @@
+[
+ {
+  "time": "18:46",
+  "track": "Clonmel",
+  "race_no": 3,
+  "trap": 5,
+  "dog": "CALUMET GLITCH",
+  "p_model": 0.425,
+  "p_blend": 0.387,
+  "tissue": 3.75,
+  "min_price": 2.8,
+  "edge_at_tissue": 0.1201,
+  "stake": 1.3
+ },
+ {
+  "time": "19:04",
+  "track": "Clonmel",
+  "race_no": 4,
+  "trap": 4,
+  "dog": "CUTEEN VIEW",
+  "p_model": 0.522,
+  "p_blend": 0.377,
+  "tissue": 5.0,
+  "min_price": 2.88,
+  "edge_at_tissue": 0.1774,
+  "stake": 1.95
+ },
+ {
+  "time": "19:24",
+  "track": "Clonmel",
+  "race_no": 5,
+  "trap": 6,
+  "dog": "SLANEYSIDE SLIDE",
+  "p_model": 0.325,
+  "p_blend": 0.35,
+  "tissue": 3.5,
+  "min_price": 3.12,
+  "edge_at_tissue": 0.0644,
+  "stake": 0.8
+ },
+ {
+  "time": "19:58",
+  "track": "Clonmel",
+  "race_no": 7,
+  "trap": 4,
+  "dog": "EMERS ANN",
+  "p_model": 0.329,
+  "p_blend": 0.251,
+  "tissue": 5.0,
+  "min_price": 4.53,
+  "edge_at_tissue": 0.0507,
+  "stake": 0.56
+ },
+ {
+  "time": "20:16",
+  "track": "Clonmel",
+  "race_no": 8,
+  "trap": 1,
+  "dog": "SIENNAS LOCAL",
+  "p_model": 0.442,
+  "p_blend": 0.368,
+  "tissue": 4.5,
+  "min_price": 2.96,
+  "edge_at_tissue": 0.1454,
+  "stake": 1.76
+ },
+ {
+  "time": "20:52",
+  "track": "Clonmel",
+  "race_no": 10,
+  "trap": 3,
+  "dog": "SLANEYSIDE CYRIL",
+  "p_model": 0.597,
+  "p_blend": 0.485,
+  "tissue": 4.5,
+  "min_price": 2.2,
+  "edge_at_tissue": 0.2632,
+  "stake": 2.12
+ },
+ {
+  "time": "21:09",
+  "track": "Clonmel",
+  "race_no": 11,
+  "trap": 3,
+  "dog": "SLANEYSIDE PRO",
+  "p_model": 0.29,
+  "p_blend": 0.316,
+  "tissue": 3.75,
+  "min_price": 3.49,
+  "edge_at_tissue": 0.0495,
+  "stake": 0.6
+ }
+]

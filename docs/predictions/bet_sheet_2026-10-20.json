@@ -1,0 +1,80 @@
+[
+ {
+  "time": "12:38",
+  "track": "Tralee",
+  "race_no": 6,
+  "trap": 3,
+  "dog": "GLORY DAN",
+  "p_model": 0.573,
+  "p_blend": 0.482,
+  "tissue": 3.75,
+  "min_price": 2.21,
+  "edge_at_tissue": 0.2156,
+  "stake": 3.31
+ },
+ {
+  "time": "12:54",
+  "track": "Tralee",
+  "race_no": 7,
+  "trap": 1,
+  "dog": "LOHER TIGER",
+  "p_model": 0.302,
+  "p_blend": 0.235,
+  "tissue": 5.0,
+  "min_price": 4.87,
+  "edge_at_tissue": 0.0353,
+  "stake": 0.65
+ },
+ {
+  "time": "13:47",
+  "track": "Tralee",
+  "race_no": 10,
+  "trap": 6,
+  "dog": "WOMAN IN LOVE",
+  "p_model": 0.357,
+  "p_blend": 0.366,
+  "tissue": 3.75,
+  "min_price": 2.97,
+  "edge_at_tissue": 0.0996,
+  "stake": 1.91
+ },
+ {
+  "time": "20:15",
+  "track": "Shelbourne Park",
+  "race_no": 3,
+  "trap": 4,
+  "dog": "SPUDZ ARE ROTTEN",
+  "p_model": 0.354,
+  "p_blend": 0.26,
+  "tissue": 4.5,
+  "min_price": 4.35,
+  "edge_at_tissue": 0.0374,
+  "stake": 0.7
+ },
+ {
+  "time": "21:15",
+  "track": "Shelbourne Park",
+  "race_no": 6,
+  "trap": 3,
+  "dog": "OGLALA OGUN",
+  "p_model": 0.357,
+  "p_blend": 0.327,
+  "tissue": 4.0,
+  "min_price": 3.36,
+  "edge_at_tissue": 0.0775,
+  "stake": 1.48
+ },
+ {
+  "time": "21:45",
+  "track": "Shelbourne Park",
+  "race_no": 8,
+  "trap": 5,
+  "dog": "DARRAGHS CASHOUT",
+  "p_model": 0.37,
+  "p_blend": 0.353,
+  "tissue": 4.0,
+  "min_price": 3.1,
+  "edge_at_tissue": 0.1028,
+  "stake": 1.95
+ }
+]
